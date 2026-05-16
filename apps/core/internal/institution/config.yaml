@@ -10,5 +10,3 @@ output: institution.gen.go
 output-options:
   skip-prune: true
   nullable-type: true
-import-mapping:
-  ../common/schema.yaml: github.com/lenz-core/packages/shared/schema

@@ -145,6 +145,11 @@ if command -v lsof >/dev/null 2>&1 && lsof -tiTCP:"$API_PORT" -sTCP:LISTEN >/dev
   fail "API port ${API_PORT} is already in use. Stop that process or set API_PORT to another port."
 fi
 
+echo "Generating OpenAPI code..."
+"$GO_BIN" generate ./apps/core/internal/corebanking
+"$GO_BIN" generate ./apps/core/internal/institution
+pass "OpenAPI code generated"
+
 echo "Resetting Docker Compose services and volumes for a clean demo database..."
 compose down -v --remove-orphans >/dev/null
 compose up -d postgres redis >/dev/null

@@ -55,6 +55,31 @@ go run ./apps/core
 Then follow [docs/TRANSFER_ENGINE_DEMO.md](docs/TRANSFER_ENGINE_DEMO.md) for
 the exact API calls and expected output shape.
 
+## Generated OpenAPI Code
+
+OpenAPI server code is generated locally and intentionally not committed.
+
+- `design/openapi/core/corebanking.yaml` generates
+  `apps/core/internal/corebanking/corebanking.gen.go`.
+- `design/openapi/core/institution.yaml` generates
+  `apps/core/internal/institution/institution.gen.go`.
+
+Regenerate both files before direct `go test` or `go build` commands:
+
+```sh
+go generate ./apps/core/internal/corebanking
+go generate ./apps/core/internal/institution
+```
+
+If `task` is installed, use:
+
+```sh
+task generate
+```
+
+The Taskfile `test`, `build`, and `demo_transfer_spine` tasks run generation
+first.
+
 ## Security-Sensitive Local Configuration
 
 Authenticated local requests use the dev bearer token only:
@@ -89,5 +114,13 @@ export APP_ENV=development
 ## Verification
 
 ```sh
+task test
+```
+
+Without `task`, run the same flow directly:
+
+```sh
+go generate ./apps/core/internal/corebanking
+go generate ./apps/core/internal/institution
 go test ./apps/core/... ./apps/auth/... ./packages/shared/...
 ```

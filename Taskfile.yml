@@ -3,6 +3,18 @@ version: "3"
 dotenv: ['.env']
 
 tasks:
+  generate:
+    desc: Generate OpenAPI-backed Go code.
+    cmds:
+      - go generate ./apps/core/internal/corebanking
+      - go generate ./apps/core/internal/institution
+
+  build:
+    desc: Generate code, then build the Go workspace packages.
+    deps: [generate]
+    cmds:
+      - go build ./apps/core/... ./apps/auth/... ./packages/shared/...
+
   docker_up:
     cmds:
       - docker compose -f infra/docker/docker-compose.yml up -d postgres redis
@@ -20,9 +32,11 @@ tasks:
       - echo "Down migrations are manual for now; see migrations/*.down.sql"
 
   test:
+    deps: [generate]
     cmds:
       - go test ./apps/core/... ./apps/auth/... ./packages/shared/...
 
   demo_transfer_spine:
+    deps: [generate]
     cmds:
       - ./scripts/demo_transfer_spine.sh

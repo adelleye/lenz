@@ -10,7 +10,8 @@ dist/
 *_mock.go
 *_moq.go
 *.gen.go
-!apps/core/internal/corebanking/corebanking.gen.go
+apps/core/internal/corebanking/corebanking.gen.go
+apps/core/internal/institution/institution.gen.go
 *.pb.go
 
 # Test binary, built with `go test -c`

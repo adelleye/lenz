@@ -11,7 +11,10 @@ institution module:
   chi server routes, models, strict-server types, and the embedded spec.
 - `apps/core/internal/corebanking/doc.go` wires `go generate` to regenerate the
   corebanking server stubs.
-- `apps/core/internal/corebanking/corebanking.gen.go` is generated code.
+- `apps/core/internal/corebanking/corebanking.gen.go` is generated code and is
+  intentionally ignored by git.
+- `apps/core/internal/institution/institution.gen.go` is generated from
+  `design/openapi/core/institution.yaml` and is intentionally ignored by git.
 
 The hand-written HTTP server is intentionally thin. It satisfies the generated
 `ServerInterface`, lets generated routing bind path and header parameters, uses
