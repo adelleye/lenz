@@ -202,6 +202,72 @@ func TestSQLStoreTransferSpineIntegration(t *testing.T) {
 	}
 }
 
+func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	repo := NewSQLRepository(db)
+
+	if _, err := repo.EnsureDemoData(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	commitInput := RecordTransferInput{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       17000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "withtx-commit",
+		Provider:          ProviderMockNIP,
+		ProviderReference: "withtx-commit-ref",
+		ProviderEventID:   "withtx-commit-event",
+		Narration:         "WithTx commit proof",
+	}
+	if err := WithTx(ctx, db, func(tx TxRunner) error {
+		_, err := repo.sqlTransferRepository.recordTransfer(ctx, tx, commitInput)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertRepositoryBalance(t, repo, ctx, 17000, 17000)
+
+	rollbackInput := RecordTransferInput{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       9000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "withtx-rollback",
+		Provider:          ProviderMockNIP,
+		ProviderReference: "withtx-rollback-ref",
+		ProviderEventID:   "withtx-rollback-event",
+		Narration:         "WithTx rollback proof",
+	}
+	forcedRollback := errors.New("force rollback after posting")
+	err := WithTx(ctx, db, func(tx TxRunner) error {
+		if _, err := repo.sqlTransferRepository.recordTransfer(ctx, tx, rollbackInput); err != nil {
+			return err
+		}
+		return forcedRollback
+	})
+	if !errors.Is(err, forcedRollback) {
+		t.Fatalf("expected forced rollback error, got %v", err)
+	}
+	assertRepositoryBalance(t, repo, ctx, 17000, 17000)
+
+	var rollbackRows int
+	if err := db.GetContext(ctx, &rollbackRows, `SELECT COUNT(*) FROM transfers WHERE institution_id = $1 AND idempotency_key = $2`, DemoInstitutionID, rollbackInput.IdempotencyKey); err != nil {
+		t.Fatal(err)
+	}
+	if rollbackRows != 0 {
+		t.Fatalf("rollback transfer should not be committed, found %d rows", rollbackRows)
+	}
+}
+
 func integrationDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 
@@ -223,6 +289,17 @@ func integrationDB(t *testing.T) *sqlx.DB {
 	})
 	resetIntegrationSchema(t, db)
 	return db
+}
+
+func assertRepositoryBalance(t *testing.T, repo *SQLRepository, ctx context.Context, wantAvailable, wantLedger int64) {
+	t.Helper()
+	balance, err := repo.GetBalance(ctx, DemoInstitutionID, DemoCustomerAccountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance.AvailableMinor != wantAvailable || balance.LedgerMinor != wantLedger {
+		t.Fatalf("balance mismatch: got available=%d ledger=%d want available=%d ledger=%d", balance.AvailableMinor, balance.LedgerMinor, wantAvailable, wantLedger)
+	}
 }
 
 func resetIntegrationSchema(t *testing.T, db *sqlx.DB) {

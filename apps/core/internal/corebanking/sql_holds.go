@@ -5,14 +5,16 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jmoiron/sqlx"
+	"github.com/google/uuid"
 )
 
-func createHoldTx(ctx context.Context, tx *sqlx.Tx, transfer Transfer, now time.Time) error {
+type sqlHoldRepository struct{}
+
+func (r *sqlHoldRepository) create(ctx context.Context, tx TxRunner, transfer Transfer, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO account_holds (id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, 'active', 'pending_outbound_transfer', $7, $7)`,
-		newID(), transfer.InstitutionID, transfer.AccountID, transfer.ID, transfer.AmountMinor, transfer.CurrencyID, now); err != nil {
+		uuid.Must(uuid.NewRandom()).String(), transfer.InstitutionID, transfer.AccountID, transfer.ID, transfer.AmountMinor, transfer.CurrencyID, now); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `
@@ -23,8 +25,8 @@ WHERE institution_id = $3 AND account_id = $4`, transfer.AmountMinor, now, trans
 	return err
 }
 
-func releaseHoldTx(ctx context.Context, tx *sqlx.Tx, institutionID, transferID string, now time.Time) error {
-	hold, err := getActiveHoldForTransferTx(ctx, tx, institutionID, transferID)
+func (r *sqlHoldRepository) release(ctx context.Context, tx TxRunner, institutionID, transferID string, now time.Time) error {
+	hold, err := r.getActiveForTransfer(ctx, tx, institutionID, transferID)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
@@ -47,8 +49,8 @@ WHERE institution_id = $3 AND account_id = $4`, hold.AmountMinor, now, instituti
 	return err
 }
 
-func consumeHoldTx(ctx context.Context, tx *sqlx.Tx, institutionID, transferID string, now time.Time) error {
-	hold, err := getActiveHoldForTransferTx(ctx, tx, institutionID, transferID)
+func (r *sqlHoldRepository) consume(ctx context.Context, tx TxRunner, institutionID, transferID string, now time.Time) error {
+	hold, err := r.getActiveForTransfer(ctx, tx, institutionID, transferID)
 	if err != nil {
 		return err
 	}
@@ -61,7 +63,7 @@ WHERE institution_id = $2 AND id = $3`, now, institutionID, hold.ID)
 	return err
 }
 
-func getActiveHoldForTransferTx(ctx context.Context, tx *sqlx.Tx, institutionID, transferID string) (*AccountHold, error) {
+func (r *sqlHoldRepository) getActiveForTransfer(ctx context.Context, tx TxRunner, institutionID, transferID string) (*AccountHold, error) {
 	var hold AccountHold
 	err := tx.GetContext(ctx, &hold, `
 SELECT id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, created_at, updated_at, released_at

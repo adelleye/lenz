@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -23,6 +25,9 @@ type MockNIPProvider struct {
 	clock     func() time.Time
 	transfers map[string]ProviderTransferResult
 }
+
+var _ Provider = (*MockNIPProvider)(nil)
+var _ TransferProvider = (*MockNIPProvider)(nil)
 
 type MockNIPOption func(*MockNIPProvider)
 
@@ -253,7 +258,7 @@ func (p *MockNIPProvider) providerReference(prefix, existing string) string {
 	if existing != "" {
 		return existing
 	}
-	return fmt.Sprintf("%s-%s", prefix, newID())
+	return fmt.Sprintf("%s-%s", prefix, uuid.Must(uuid.NewRandom()).String())
 }
 
 func delayDuration(seconds int64) time.Duration {

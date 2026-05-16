@@ -1,0 +1,697 @@
+openapi: 3.0.0
+info:
+  title: Lenz Core Corebanking
+  version: 1.0.0
+  description: >
+    OpenAPI source for the current Lenz Core transaction-spine HTTP surface.
+    The mock endpoints are demo-only and remain gated by application config.
+tags:
+  - name: Corebanking
+    description: Accounts, balances, transfers, ledger journals, and demo transfer-spine routes.
+
+paths:
+  /api/v1/demo/seed:
+    post:
+      operationId: seedDemo
+      summary: Seed demo transaction-spine data
+      tags: [Corebanking]
+      responses:
+        "200":
+          description: Demo data seed result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APISeedResult"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/customers/{customer_id}/accounts:
+    get:
+      operationId: listCustomerAccounts
+      summary: List accounts owned by a customer inside an institution
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: customer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Customer account list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APIAccount"
+        "400":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/accounts/{account_id}/balance:
+    get:
+      operationId: getAccountBalance
+      summary: Get account ledger and available balances
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Account balance.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccountBalance"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/accounts/{account_id}/transactions:
+    get:
+      operationId: listAccountTransactions
+      summary: List ledger-backed account transactions
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Account transaction history.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APITransaction"
+        "400":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/transfers/mock/inbound:
+    post:
+      operationId: mockInboundTransfer
+      summary: Record a mock inbound provider transfer event
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MockTransferRequest"
+      responses:
+        "200":
+          description: Transfer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITransfer"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/transfers/mock/outbound:
+    post:
+      operationId: mockOutboundTransfer
+      summary: Initiate a mock outbound provider transfer
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MockTransferRequest"
+      responses:
+        "200":
+          description: Transfer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITransfer"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/transfers/{transfer_id}:
+    get:
+      operationId: getTransfer
+      summary: Get a transfer by ID
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Transfer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITransfer"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/transfers/{transfer_id}/reverse:
+    post:
+      operationId: reverseTransfer
+      summary: Reverse a succeeded transfer as a new ledger event
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Reversal transfer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITransfer"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/admin/ledger/journal/{journal_entry_id}:
+    get:
+      operationId: getJournal
+      summary: Inspect a journal entry and postings
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: journal_entry_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Journal entry with postings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIJournalWithPostings"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/admin/transfers:
+    get:
+      operationId: listTransfers
+      summary: List recent institution transfers
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      responses:
+        "200":
+          description: Recent transfers.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APITransfer"
+        "400":
+          $ref: "#/components/responses/Error"
+
+components:
+  parameters:
+    InstitutionID:
+      name: X-Institution-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+        minLength: 1
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+
+  responses:
+    Error:
+      description: Error response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          minLength: 1
+
+    APISeedResult:
+      type: object
+      required: [institution, branch, customer, account, clearing_account]
+      properties:
+        institution:
+          $ref: "#/components/schemas/APIInstitution"
+        branch:
+          $ref: "#/components/schemas/APIBranch"
+        customer:
+          $ref: "#/components/schemas/APICustomer"
+        account:
+          $ref: "#/components/schemas/APIAccount"
+        clearing_account:
+          $ref: "#/components/schemas/APIAccount"
+
+    APIInstitution:
+      type: object
+      required: [id, name, short_name, code, currency_id, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        short_name:
+          type: string
+        code:
+          type: string
+        currency_id:
+          type: string
+          minLength: 3
+          maxLength: 3
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    APIBranch:
+      type: object
+      required: [id, institution_id, code, name, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    APICustomer:
+      type: object
+      required: [id, institution_id, branch_id, first_name, last_name, email, phone, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        branch_id:
+          type: string
+          format: uuid
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    APIAccount:
+      type: object
+      required:
+        - id
+        - institution_id
+        - account_number
+        - name
+        - kind
+        - product_type
+        - allow_negative_balance
+        - currency_id
+        - normal_balance
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+          nullable: true
+        account_number:
+          type: string
+        name:
+          type: string
+        kind:
+          type: string
+        product_type:
+          type: string
+        allow_negative_balance:
+          type: boolean
+        currency_id:
+          type: string
+          minLength: 3
+          maxLength: 3
+        normal_balance:
+          type: string
+          enum: [debit, credit]
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    APIAccountBalance:
+      type: object
+      required: [account_id, institution_id, available_minor, ledger_minor, currency_id, updated_at]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        available_minor:
+          type: integer
+          format: int64
+        ledger_minor:
+          type: integer
+          format: int64
+        currency_id:
+          type: string
+          minLength: 3
+          maxLength: 3
+        last_journal_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+        updated_at:
+          type: string
+          format: date-time
+
+    APITransfer:
+      type: object
+      required:
+        - id
+        - institution_id
+        - account_id
+        - direction
+        - status
+        - provider_status
+        - ledger_status
+        - reconciliation_status
+        - amount_minor
+        - currency_id
+        - idempotency_key
+        - provider
+        - provider_reference
+        - narration
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [inbound, outbound, reversal]
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        provider_status:
+          type: string
+          enum: [pending, succeeded, failed]
+        ledger_status:
+          type: string
+          enum: [pending, posted, no_posting, reversal_deficit]
+        reconciliation_status:
+          type: string
+          enum: [pending, matched, no_action, manual_review]
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          minLength: 3
+          maxLength: 3
+        idempotency_key:
+          type: string
+          minLength: 1
+        provider:
+          type: string
+          minLength: 1
+        provider_reference:
+          type: string
+        provider_event_id:
+          type: string
+          nullable: true
+        journal_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+        reversal_of_transfer_id:
+          type: string
+          format: uuid
+          nullable: true
+        failure_reason:
+          type: string
+          nullable: true
+        narration:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    MockTransferRequest:
+      type: object
+      required: [account_id, amount_minor]
+      additionalProperties: false
+      properties:
+        institution_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          minLength: 3
+          maxLength: 3
+          default: NGN
+        idempotency_key:
+          type: string
+          minLength: 1
+        provider_event_id:
+          type: string
+        provider_reference:
+          type: string
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+          default: succeeded
+        narration:
+          type: string
+        scenario:
+          type: string
+          enum: [success, pending, failed, duplicate, delayed, reversal]
+        delay_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+
+    APIJournalEntry:
+      type: object
+      required: [id, institution_id, entry_type, currency_id, narration, total_debit_minor, total_credit_minor, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        transfer_id:
+          type: string
+          format: uuid
+          nullable: true
+        entry_type:
+          type: string
+          enum: [inbound, outbound, reversal]
+        currency_id:
+          type: string
+        narration:
+          type: string
+        total_debit_minor:
+          type: integer
+          format: int64
+        total_credit_minor:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+
+    APIPosting:
+      type: object
+      required: [id, institution_id, journal_entry_id, account_id, direction, amount_minor, currency_id, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        journal_entry_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [debit, credit]
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    APIJournalWithPostings:
+      type: object
+      required: [journal_entry, postings, balanced]
+      properties:
+        journal_entry:
+          $ref: "#/components/schemas/APIJournalEntry"
+        postings:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIPosting"
+        balanced:
+          type: boolean
+
+    APITransaction:
+      type: object
+      required: [id, transfer_id, account_id, direction, status, amount_minor, signed_minor, currency_id, narration, created_at]
+      properties:
+        id:
+          type: string
+        transfer_id:
+          type: string
+          format: uuid
+        journal_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+        account_id:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [inbound, outbound, reversal]
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        amount_minor:
+          type: integer
+          format: int64
+        signed_minor:
+          type: integer
+          format: int64
+        currency_id:
+          type: string
+        narration:
+          type: string
+        created_at:
+          type: string
+          format: date-time

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestSuccessfulTransferInPostsBalancedLedger(t *testing.T) {
@@ -770,7 +772,7 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 		reconciliationStatus = ReconciliationStatusManualReview
 	}
 	now := time.Now().UTC()
-	transfer := Transfer{ID: newID(), InstitutionID: input.InstitutionID, AccountID: input.AccountID, Direction: input.Direction, Status: status, ProviderStatus: providerStatus, LedgerStatus: ledgerStatus, ReconciliationStatus: reconciliationStatus, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: input.Provider, ProviderReference: input.ProviderReference, Narration: input.Narration, CreatedAt: now, UpdatedAt: now}
+	transfer := Transfer{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: input.InstitutionID, AccountID: input.AccountID, Direction: input.Direction, Status: status, ProviderStatus: providerStatus, LedgerStatus: ledgerStatus, ReconciliationStatus: reconciliationStatus, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: input.Provider, ProviderReference: input.ProviderReference, Narration: input.Narration, CreatedAt: now, UpdatedAt: now}
 	if input.ProviderEventID != "" {
 		transfer.ProviderEventID = &input.ProviderEventID
 	}
@@ -850,7 +852,7 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 }
 
 func (m *memoryStore) postJournalLocked(input RecordTransferInput, transferID string, now time.Time, heldAccountID string) string {
-	journalID := newID()
+	journalID := uuid.Must(uuid.NewRandom()).String()
 	entryType := input.Direction
 	if input.ReversalOfTransferID != "" {
 		entryType = TransferDirectionReversal
@@ -864,8 +866,8 @@ func (m *memoryStore) postJournalLocked(input RecordTransferInput, transferID st
 		creditAccountID = input.ClearingAccountID
 	}
 	m.postings[journalID] = []Posting{
-		{ID: newID(), InstitutionID: input.InstitutionID, JournalEntryID: journalID, AccountID: debitAccountID, Direction: PostingDebit, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, CreatedAt: now},
-		{ID: newID(), InstitutionID: input.InstitutionID, JournalEntryID: journalID, AccountID: creditAccountID, Direction: PostingCredit, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, CreatedAt: now},
+		{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: input.InstitutionID, JournalEntryID: journalID, AccountID: debitAccountID, Direction: PostingDebit, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, CreatedAt: now},
+		{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: input.InstitutionID, JournalEntryID: journalID, AccountID: creditAccountID, Direction: PostingCredit, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, CreatedAt: now},
 	}
 	for _, posting := range m.postings[journalID] {
 		availableDeltaOverride := false
@@ -895,7 +897,7 @@ func (m *memoryStore) applyPostingLocked(posting Posting, journalID string, now 
 }
 
 func (m *memoryStore) createHoldLocked(transfer Transfer, now time.Time) {
-	m.holds[transfer.ID] = AccountHold{ID: newID(), InstitutionID: transfer.InstitutionID, AccountID: transfer.AccountID, TransferID: transfer.ID, AmountMinor: transfer.AmountMinor, CurrencyID: transfer.CurrencyID, Status: HoldStatusActive, Reason: "pending_outbound_transfer", CreatedAt: now, UpdatedAt: now}
+	m.holds[transfer.ID] = AccountHold{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: transfer.InstitutionID, AccountID: transfer.AccountID, TransferID: transfer.ID, AmountMinor: transfer.AmountMinor, CurrencyID: transfer.CurrencyID, Status: HoldStatusActive, Reason: "pending_outbound_transfer", CreatedAt: now, UpdatedAt: now}
 	balance := m.balances[transfer.AccountID]
 	balance.AvailableMinor -= transfer.AmountMinor
 	balance.UpdatedAt = now

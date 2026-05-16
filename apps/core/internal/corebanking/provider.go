@@ -5,8 +5,12 @@ import (
 	"time"
 )
 
-type TransferProvider interface {
+type Provider interface {
 	Name() string
+}
+
+type TransferProvider interface {
+	Provider
 	NameEnquiry(ctx context.Context, request NameEnquiryRequest) (*NameEnquiryResult, error)
 	InitiateTransfer(ctx context.Context, request ProviderTransferRequest) (*ProviderTransferResult, error)
 	RequeryTransfer(ctx context.Context, providerReference string) (*ProviderTransferResult, error)
