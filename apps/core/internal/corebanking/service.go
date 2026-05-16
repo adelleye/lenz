@@ -2,15 +2,24 @@ package corebanking
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 )
 
 type Service struct {
-	store Store
+	store     Store
+	providers map[string]TransferProvider
 }
 
-func NewService(store Store) *Service {
-	return &Service{store: store}
+func NewService(store Store, providers ...TransferProvider) *Service {
+	s := &Service{store: store, providers: map[string]TransferProvider{}}
+	for _, provider := range providers {
+		if provider == nil {
+			continue
+		}
+		s.providers[provider.Name()] = provider
+	}
+	return s
 }
 
 func (s *Service) SeedDemo(ctx context.Context) (*SeedResult, error) {
@@ -18,77 +27,245 @@ func (s *Service) SeedDemo(ctx context.Context) (*SeedResult, error) {
 }
 
 func (s *Service) ListCustomerAccounts(ctx context.Context, institutionID, customerID string) ([]Account, error) {
-	return s.store.ListAccountsByCustomer(ctx, institutionIDOrDemo(institutionID), customerID)
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ListAccountsByCustomer(ctx, institutionID, customerID)
 }
 
 func (s *Service) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
-	return s.store.GetBalance(ctx, institutionIDOrDemo(institutionID), accountID)
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.GetBalance(ctx, institutionID, accountID)
 }
 
 func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID string) ([]Transaction, error) {
-	return s.store.ListTransactions(ctx, institutionIDOrDemo(institutionID), accountID)
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ListTransactions(ctx, institutionID, accountID)
 }
 
 func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error) {
-	return s.store.GetTransfer(ctx, institutionIDOrDemo(institutionID), transferID)
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.GetTransfer(ctx, institutionID, transferID)
 }
 
 func (s *Service) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
-	return s.store.ListTransfers(ctx, institutionIDOrDemo(institutionID))
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ListTransfers(ctx, institutionID)
 }
 
 func (s *Service) GetJournal(ctx context.Context, institutionID, journalEntryID string) (*JournalWithPostings, error) {
-	return s.store.GetJournal(ctx, institutionIDOrDemo(institutionID), journalEntryID)
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.GetJournal(ctx, institutionID, journalEntryID)
 }
 
 func (s *Service) MockInbound(ctx context.Context, req TransferRequest) (*Transfer, error) {
-	if err := normalizeTransferRequest(&req); err != nil {
+	headers := map[string]string{}
+	if req.InstitutionID != "" {
+		headers["X-Institution-ID"] = req.InstitutionID
+	}
+	if req.IdempotencyKey != "" {
+		headers["Idempotency-Key"] = req.IdempotencyKey
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
 		return nil, err
 	}
-	if req.ProviderEventID == "" {
-		return nil, ErrInvalidRequest
-	}
-	return s.store.RecordTransfer(ctx, RecordTransferInput{
-		InstitutionID:     institutionIDOrDemo(req.InstitutionID),
-		AccountID:         req.AccountID,
-		ClearingAccountID: DemoClearingAccountID,
-		Direction:         TransferDirectionInbound,
-		Status:            req.Status,
-		AmountMinor:       req.AmountMinor,
-		CurrencyID:        req.CurrencyID,
-		IdempotencyKey:    req.IdempotencyKey,
-		Provider:          ProviderMockNIP,
-		ProviderReference: req.ProviderReference,
-		ProviderEventID:   req.ProviderEventID,
-		Narration:         req.Narration,
-	})
+	return s.MockProviderWebhook(ctx, ProviderMockNIP, payload, headers)
 }
 
 func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Transfer, error) {
 	if err := normalizeTransferRequest(&req); err != nil {
 		return nil, err
 	}
-	return s.store.RecordTransfer(ctx, RecordTransferInput{
-		InstitutionID:     institutionIDOrDemo(req.InstitutionID),
+	provider, err := s.provider(ProviderMockNIP)
+	if err != nil {
+		return nil, err
+	}
+	result, err := provider.InitiateTransfer(ctx, ProviderTransferRequest{
+		InstitutionID:     req.InstitutionID,
 		AccountID:         req.AccountID,
-		ClearingAccountID: DemoClearingAccountID,
-		Direction:         TransferDirectionOutbound,
-		Status:            req.Status,
 		AmountMinor:       req.AmountMinor,
 		CurrencyID:        req.CurrencyID,
 		IdempotencyKey:    req.IdempotencyKey,
-		Provider:          ProviderMockNIP,
 		ProviderReference: req.ProviderReference,
 		ProviderEventID:   req.ProviderEventID,
+		Status:            req.Status,
 		Narration:         req.Narration,
+		Scenario:          req.Scenario,
+		DelaySeconds:      req.DelaySeconds,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return s.recordProviderTransfer(ctx, TransferDirectionOutbound, req, *result)
+}
+
+func (s *Service) MockProviderWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) (*Transfer, error) {
+	provider, err := s.provider(providerName)
+	if err != nil {
+		return nil, err
+	}
+	event, err := provider.ParseWebhook(ctx, payload, headers)
+	if err != nil {
+		return nil, err
+	}
+	return s.recordProviderWebhookEvent(ctx, *event)
 }
 
 func (s *Service) ReverseTransfer(ctx context.Context, institutionID, transferID, idempotencyKey string) (*Transfer, error) {
 	if strings.TrimSpace(idempotencyKey) == "" {
 		return nil, ErrInvalidRequest
 	}
-	return s.store.ReverseTransfer(ctx, institutionIDOrDemo(institutionID), transferID, idempotencyKey)
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ReverseTransfer(ctx, ReverseTransferInput{
+		InstitutionID:  institutionID,
+		TransferID:     strings.TrimSpace(transferID),
+		IdempotencyKey: strings.TrimSpace(idempotencyKey),
+	})
+}
+
+func (s *Service) provider(name string) (TransferProvider, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrInvalidRequest
+	}
+	provider, ok := s.providers[name]
+	if !ok {
+		return nil, ErrInvalidRequest
+	}
+	return provider, nil
+}
+
+func (s *Service) recordProviderWebhookEvent(ctx context.Context, event ProviderWebhookEvent) (*Transfer, error) {
+	event.Provider = strings.TrimSpace(event.Provider)
+	if event.Provider == "" {
+		return nil, ErrInvalidRequest
+	}
+	institutionID, err := requireInstitutionID(event.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	event.InstitutionID = institutionID
+	event.Direction = strings.ToLower(strings.TrimSpace(event.Direction))
+	event.Status = strings.ToLower(strings.TrimSpace(event.Status))
+	event.CurrencyID = strings.ToUpper(strings.TrimSpace(event.CurrencyID))
+	event.IdempotencyKey = strings.TrimSpace(event.IdempotencyKey)
+	event.ProviderEventID = strings.TrimSpace(event.ProviderEventID)
+	event.ProviderReference = strings.TrimSpace(event.ProviderReference)
+	event.FailureReason = strings.TrimSpace(event.FailureReason)
+	event.Narration = strings.TrimSpace(event.Narration)
+	if event.CurrencyID == "" {
+		event.CurrencyID = "NGN"
+	}
+	if event.Status == "" {
+		event.Status = TransferStatusSucceeded
+	}
+	if event.Narration == "" {
+		event.Narration = "Provider webhook"
+	}
+	if event.IdempotencyKey == "" || event.ProviderEventID == "" {
+		return nil, ErrInvalidRequest
+	}
+	if !validTransferStatus(event.Status) {
+		return nil, ErrInvalidRequest
+	}
+	if event.Direction == TransferDirectionReversal {
+		if strings.TrimSpace(event.ReversalOfTransferID) == "" {
+			return nil, ErrInvalidRequest
+		}
+		return s.store.ReverseTransfer(ctx, ReverseTransferInput{
+			InstitutionID:     event.InstitutionID,
+			TransferID:        strings.TrimSpace(event.ReversalOfTransferID),
+			IdempotencyKey:    event.IdempotencyKey,
+			Provider:          event.Provider,
+			ProviderReference: event.ProviderReference,
+			ProviderEventID:   event.ProviderEventID,
+			FailureReason:     event.FailureReason,
+			Narration:         event.Narration,
+		})
+	}
+	if event.Direction != TransferDirectionInbound && event.Direction != TransferDirectionOutbound {
+		return nil, ErrInvalidRequest
+	}
+	if event.AccountID == "" || event.AmountMinor <= 0 {
+		return nil, ErrInvalidRequest
+	}
+	return s.store.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     event.InstitutionID,
+		AccountID:         event.AccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         event.Direction,
+		Status:            event.Status,
+		AmountMinor:       event.AmountMinor,
+		CurrencyID:        event.CurrencyID,
+		IdempotencyKey:    event.IdempotencyKey,
+		Provider:          event.Provider,
+		ProviderReference: event.ProviderReference,
+		ProviderEventID:   event.ProviderEventID,
+		FailureReason:     event.FailureReason,
+		Narration:         event.Narration,
+	})
+}
+
+func (s *Service) recordProviderTransfer(ctx context.Context, direction string, req TransferRequest, result ProviderTransferResult) (*Transfer, error) {
+	providerName := strings.TrimSpace(result.Provider)
+	if providerName == "" {
+		providerName = ProviderMockNIP
+	}
+	status := strings.ToLower(strings.TrimSpace(result.Status))
+	if status == "" {
+		status = req.Status
+	}
+	if !validTransferStatus(status) {
+		return nil, ErrInvalidRequest
+	}
+	failureReason := strings.TrimSpace(result.FailureReason)
+	narration := strings.TrimSpace(result.Narration)
+	if narration == "" {
+		narration = req.Narration
+	}
+	providerReference := strings.TrimSpace(result.ProviderReference)
+	if providerReference == "" {
+		providerReference = req.ProviderReference
+	}
+	providerEventID := strings.TrimSpace(result.ProviderEventID)
+	if providerEventID == "" {
+		providerEventID = req.ProviderEventID
+	}
+	return s.store.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     req.InstitutionID,
+		AccountID:         req.AccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         direction,
+		Status:            status,
+		AmountMinor:       req.AmountMinor,
+		CurrencyID:        req.CurrencyID,
+		IdempotencyKey:    req.IdempotencyKey,
+		Provider:          providerName,
+		ProviderReference: providerReference,
+		ProviderEventID:   providerEventID,
+		FailureReason:     failureReason,
+		Narration:         narration,
+	})
 }
 
 func normalizeTransferRequest(req *TransferRequest) error {
@@ -118,6 +295,23 @@ func normalizeTransferRequest(req *TransferRequest) error {
 	default:
 		return ErrInvalidRequest
 	}
+}
+
+func validTransferStatus(status string) bool {
+	switch status {
+	case TransferStatusSucceeded, TransferStatusPending, TransferStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func requireInstitutionID(institutionID string) (string, error) {
+	institutionID = strings.TrimSpace(institutionID)
+	if institutionID == "" {
+		return "", ErrInvalidRequest
+	}
+	return institutionID, nil
 }
 
 func institutionIDOrDemo(institutionID string) string {

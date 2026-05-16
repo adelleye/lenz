@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -106,7 +107,7 @@ func applyRequestScope(r *http.Request, req *TransferRequest) {
 }
 
 func institutionID(r *http.Request) string {
-	return institutionIDOrDemo(r.Header.Get("X-Institution-ID"))
+	return strings.TrimSpace(r.Header.Get("X-Institution-ID"))
 }
 
 func idempotencyKey(r *http.Request) string {

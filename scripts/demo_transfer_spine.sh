@@ -9,6 +9,7 @@ API_PORT="${API_PORT:-3001}"
 GO_BIN="${GO_BIN:-go}"
 DATABASE_URL="${DATABASE_URL:-postgres://lenzcore:lenzcore123@localhost:${POSTGRES_PORT}/lenzcore?sslmode=disable}"
 BASE_URL="http://localhost:${API_PORT}"
+INSTITUTION_ID="11111111-1111-1111-1111-111111111111"
 ACCOUNT_ID="44444444-4444-4444-4444-444444444444"
 CUSTOMER_ID="33333333-3333-3333-3333-333333333333"
 
@@ -91,7 +92,7 @@ wait_api() {
 assert_balance() {
   local want="$1"
   local body
-  body="$(request "${BASE_URL}/api/v1/accounts/${ACCOUNT_ID}/balance")"
+  body="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/accounts/${ACCOUNT_ID}/balance")"
   assert_json "$body" ".available_minor == ${want} and .ledger_minor == ${want}" "expected account balance ${want}"
 }
 
@@ -99,7 +100,7 @@ assert_journal_balanced() {
   local journal_id="$1"
   local amount="$2"
   local body
-  body="$(request "${BASE_URL}/api/v1/admin/ledger/journal/${journal_id}")"
+  body="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/admin/ledger/journal/${journal_id}")"
   assert_json "$body" ".balanced == true" "journal ${journal_id} is not marked balanced"
   assert_json "$body" "([.postings[] | select(.direction == \"debit\") | .amount_minor] | add) == ${amount}" "journal ${journal_id} debit amount mismatch"
   assert_json "$body" "([.postings[] | select(.direction == \"credit\") | .amount_minor] | add) == ${amount}" "journal ${journal_id} credit amount mismatch"
@@ -143,7 +144,9 @@ echo "Running Postgres-backed integration tests..."
 LENZ_INTEGRATION_DATABASE_URL="$DATABASE_URL" "$GO_BIN" test -count=1 -tags=integration ./apps/core/internal/corebanking -run TestSQLStoreTransferSpineIntegration
 pass "SQL integration test suite passed"
 
-TMP_DIR="$(mktemp -d)"
+TMP_PARENT="${TMPDIR:-/tmp}"
+mkdir -p "$TMP_PARENT"
+TMP_DIR="$(mktemp -d "${TMP_PARENT%/}/lenz-core-demo.XXXXXX")"
 API_LOG="${TMP_DIR}/api.log"
 "$GO_BIN" build -o "${TMP_DIR}/lenz-core-api" ./apps/core
 DATABASE_URL="$DATABASE_URL" PORT="$API_PORT" "${TMP_DIR}/lenz-core-api" >"$API_LOG" 2>&1 &
@@ -159,7 +162,7 @@ seed="$(request -X POST "${BASE_URL}/api/v1/demo/seed")"
 assert_json "$seed" '.institution.id == "11111111-1111-1111-1111-111111111111" and .customer.id == "33333333-3333-3333-3333-333333333333" and .account.id == "44444444-4444-4444-4444-444444444444"' "demo seed response mismatch"
 pass "POST /api/v1/demo/seed created demo tenant data"
 
-accounts="$(request "${BASE_URL}/api/v1/customers/${CUSTOMER_ID}/accounts")"
+accounts="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/customers/${CUSTOMER_ID}/accounts")"
 assert_json "$accounts" 'length == 1 and .[0].id == "44444444-4444-4444-4444-444444444444" and .[0].account_number == "9990000001"' "customer accounts response mismatch"
 pass "customer account lookup returned the demo account"
 
@@ -216,7 +219,7 @@ assert_balance 375000
 pending_id="$(json_get '.id' "$pending")"
 pass "pending transfer recorded without posting money"
 
-reversal="$(request -X POST "${BASE_URL}/api/v1/transfers/${inbound_id}/reverse" -H 'Idempotency-Key: demo-script-reversal-001')"
+reversal="$(request -X POST "${BASE_URL}/api/v1/transfers/${inbound_id}/reverse" -H "X-Institution-ID: ${INSTITUTION_ID}" -H 'Idempotency-Key: demo-script-reversal-001')"
 assert_json "$reversal" ".direction == \"reversal\" and .status == \"succeeded\" and .reversal_of_transfer_id == \"${inbound_id}\" and .journal_entry_id != null" "reversal did not create a succeeded reversal transfer"
 reversal_id="$(json_get '.id' "$reversal")"
 reversal_journal_id="$(json_get '.journal_entry_id' "$reversal")"
@@ -224,7 +227,7 @@ assert_journal_balanced "$reversal_journal_id" 500000
 assert_balance -125000
 pass "reversal created a new transfer and balanced journal entry"
 
-transactions="$(request "${BASE_URL}/api/v1/accounts/${ACCOUNT_ID}/transactions")"
+transactions="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/accounts/${ACCOUNT_ID}/transactions")"
 assert_json "$transactions" 'length == 5' "transaction history did not contain five Lenz transfer rows"
 assert_json "$transactions" "[.[] | select(.transfer_id == \"${inbound_id}\" and .status == \"succeeded\" and .signed_minor == 500000 and .journal_entry_id != null)] | length == 1" "history missing posted inbound row"
 assert_json "$transactions" "[.[] | select(.direction == \"outbound\" and .status == \"succeeded\" and .signed_minor == -125000 and .journal_entry_id != null)] | length == 1" "history missing posted outbound row"
@@ -233,7 +236,7 @@ assert_json "$transactions" "[.[] | select(.transfer_id == \"${failed_id}\" and 
 assert_json "$transactions" "[.[] | select(.transfer_id == \"${reversal_id}\" and .direction == \"reversal\" and .signed_minor == -500000 and .journal_entry_id != null)] | length == 1" "history missing reversal row"
 pass "transaction history came from Lenz transfer/journal/posting records"
 
-transfers="$(request "${BASE_URL}/api/v1/admin/transfers")"
+transfers="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/admin/transfers")"
 assert_json "$transfers" 'length == 5' "admin transfer list did not contain five transfer records"
 pass "admin transfer list returned all demo transfers"
 

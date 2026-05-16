@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -203,14 +204,21 @@ func (s *SQLStore) RecordTransfer(ctx context.Context, input RecordTransferInput
 	return transfer, nil
 }
 
-func (s *SQLStore) ReverseTransfer(ctx context.Context, institutionID, transferID, idempotencyKey string) (*Transfer, error) {
+func (s *SQLStore) ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error) {
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer rollbackUnlessCommitted(tx)
 
-	original, err := getTransferTx(ctx, tx, institutionID, transferID)
+	input.InstitutionID = strings.TrimSpace(input.InstitutionID)
+	input.TransferID = strings.TrimSpace(input.TransferID)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if input.InstitutionID == "" || input.TransferID == "" || input.IdempotencyKey == "" {
+		return nil, ErrInvalidRequest
+	}
+
+	original, err := getTransferTx(ctx, tx, input.InstitutionID, input.TransferID)
 	if err != nil {
 		return nil, err
 	}
@@ -218,23 +226,42 @@ func (s *SQLStore) ReverseTransfer(ctx context.Context, institutionID, transferI
 		return nil, ErrInvalidRequest
 	}
 
+	provider := strings.TrimSpace(input.Provider)
+	if provider == "" {
+		provider = original.Provider
+	}
+	providerReference := strings.TrimSpace(input.ProviderReference)
+	if providerReference == "" {
+		originalReference := strings.TrimSpace(original.ProviderReference)
+		if originalReference == "" {
+			originalReference = original.ID
+		}
+		providerReference = "reversal:" + originalReference
+	}
+	narration := strings.TrimSpace(input.Narration)
+	if narration == "" {
+		narration = "Reversal of " + original.ID
+	}
+
 	direction := TransferDirectionOutbound
 	if original.Direction == TransferDirectionOutbound {
 		direction = TransferDirectionInbound
 	}
 	transfer, err := recordTransferTx(ctx, tx, RecordTransferInput{
-		InstitutionID:        institutionID,
+		InstitutionID:        input.InstitutionID,
 		AccountID:            original.AccountID,
 		ClearingAccountID:    DemoClearingAccountID,
 		Direction:            direction,
 		Status:               TransferStatusSucceeded,
 		AmountMinor:          original.AmountMinor,
 		CurrencyID:           original.CurrencyID,
-		IdempotencyKey:       idempotencyKey,
-		Provider:             ProviderMockNIP,
-		ProviderReference:    "reversal:" + original.ID,
+		IdempotencyKey:       input.IdempotencyKey,
+		Provider:             provider,
+		ProviderReference:    providerReference,
+		ProviderEventID:      strings.TrimSpace(input.ProviderEventID),
 		ReversalOfTransferID: original.ID,
-		Narration:            "Reversal of " + original.ID,
+		FailureReason:        strings.TrimSpace(input.FailureReason),
+		Narration:            narration,
 	})
 	if err != nil {
 		return nil, err
@@ -243,7 +270,7 @@ func (s *SQLStore) ReverseTransfer(ctx context.Context, institutionID, transferI
 		return nil, ErrConflict
 	}
 	transfer.Direction = TransferDirectionReversal
-	if _, err = tx.ExecContext(ctx, `UPDATE transfers SET direction = 'reversal', updated_at = $1 WHERE institution_id = $2 AND id = $3`, time.Now().UTC(), institutionID, transfer.ID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE transfers SET direction = 'reversal', updated_at = $1 WHERE institution_id = $2 AND id = $3`, time.Now().UTC(), input.InstitutionID, transfer.ID); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {

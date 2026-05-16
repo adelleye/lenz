@@ -87,7 +87,8 @@ clearing_account_id=55555555-5555-5555-5555-555555555555
 ## Read Customer Accounts
 
 ```sh
-curl -s http://localhost:3001/api/v1/customers/33333333-3333-3333-3333-333333333333/accounts
+curl -s http://localhost:3001/api/v1/customers/33333333-3333-3333-3333-333333333333/accounts \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
 ```
 
 Expected: one customer wallet account with account number `9990000001`.
@@ -113,7 +114,8 @@ journal contains one debit and one credit for the same minor-unit amount.
 Check balance:
 
 ```sh
-curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-444444444444/balance
+curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-444444444444/balance \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
 ```
 
 Expected: `available_minor` and `ledger_minor` are `500000`.
@@ -181,7 +183,8 @@ balance is unchanged.
 ## Transaction History
 
 ```sh
-curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-444444444444/transactions
+curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-444444444444/transactions \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
 ```
 
 Expected: succeeded rows have `journal_entry_id` and signed amounts from Lenz
@@ -192,7 +195,8 @@ postings. Pending and failed rows appear with `signed_minor: 0`.
 Use a `journal_entry_id` from a succeeded transfer:
 
 ```sh
-curl -s http://localhost:3001/api/v1/admin/ledger/journal/<journal_entry_id>
+curl -s http://localhost:3001/api/v1/admin/ledger/journal/<journal_entry_id> \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
 ```
 
 Expected:
@@ -213,6 +217,7 @@ Reverse a succeeded transfer:
 
 ```sh
 curl -s -X POST http://localhost:3001/api/v1/transfers/<transfer_id>/reverse \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111' \
   -H 'Idempotency-Key: demo-reversal-001'
 ```
 
@@ -223,7 +228,16 @@ journal entry. The original ledger history is not deleted.
 ## Admin Transfer List
 
 ```sh
-curl -s http://localhost:3001/api/v1/admin/transfers
+curl -s http://localhost:3001/api/v1/admin/transfers \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
 ```
 
 Expected: all demo transfer records for the demo institution.
+
+## Provider Adapter Boundary
+
+The mock routes now go through `MockNIPProvider`, which implements the provider
+adapter contract described in [Provider Adapters](PROVIDER_ADAPTERS.md). The
+mock provider simulates provider responses and webhook payloads; Lenz Core still
+owns the ledger, balances, history, idempotency, duplicate provider-event
+protection, and reversals.

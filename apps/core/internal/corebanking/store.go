@@ -12,5 +12,5 @@ type Store interface {
 	GetJournal(ctx context.Context, institutionID, journalEntryID string) (*JournalWithPostings, error)
 	ListTransactions(ctx context.Context, institutionID, accountID string) ([]Transaction, error)
 	RecordTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, error)
-	ReverseTransfer(ctx context.Context, institutionID, transferID, idempotencyKey string) (*Transfer, error)
+	ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error)
 }
