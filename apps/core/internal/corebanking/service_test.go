@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -171,6 +172,20 @@ func TestTenantScopingPreventsCrossTenantReads(t *testing.T) {
 	}
 }
 
+func TestProductionReadsRequireInstitutionScope(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	if _, err := svc.GetBalance(ctx, "", DemoCustomerAccountID); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected missing institution scope to fail, got %v", err)
+	}
+	if _, err := svc.GetTransactions(ctx, "", DemoCustomerAccountID); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected missing institution scope to fail for history, got %v", err)
+	}
+	if _, err := svc.ListTransfers(ctx, ""); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected missing institution scope to fail for transfer list, got %v", err)
+	}
+}
+
 func TestTransactionHistoryComesFromLenzRecords(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	inbound := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 12000, IdempotencyKey: "hist-in", ProviderEventID: "evt-hist-in"})
@@ -194,10 +209,107 @@ func TestTransactionHistoryComesFromLenzRecords(t *testing.T) {
 	}
 }
 
+func TestMockOutboundCallsProviderAdapter(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{
+		initiateResult: ProviderTransferResult{
+			Provider:          ProviderMockNIP,
+			ProviderReference: "provider-out-ref",
+			Status:            TransferStatusSucceeded,
+			Narration:         "provider outbound",
+		},
+	}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       50000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "provider-test-fund",
+		Provider:          "test_setup",
+		ProviderReference: "provider-test-fund-ref",
+		ProviderEventID:   "provider-test-fund-event",
+		Narration:         "provider adapter test funding",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transfer, err := svc.MockOutbound(ctx, TransferRequest{
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    10000,
+		IdempotencyKey: "provider-adapter-out",
+		Narration:      "outbound through provider",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if provider.initiateCalls != 1 {
+		t.Fatalf("expected one provider InitiateTransfer call, got %d", provider.initiateCalls)
+	}
+	if provider.lastInitiate.AmountMinor != 10000 || provider.lastInitiate.AccountID != DemoCustomerAccountID {
+		t.Fatalf("provider received wrong request: %+v", provider.lastInitiate)
+	}
+	if transfer.ProviderReference != "provider-out-ref" || transfer.Narration != "provider outbound" {
+		t.Fatalf("transfer did not use provider result: %+v", transfer)
+	}
+}
+
+func TestMockInboundCallsProviderAdapter(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{
+		webhookEvent: ProviderWebhookEvent{
+			Provider:          ProviderMockNIP,
+			InstitutionID:     DemoInstitutionID,
+			AccountID:         DemoCustomerAccountID,
+			Direction:         TransferDirectionInbound,
+			Status:            TransferStatusSucceeded,
+			AmountMinor:       15000,
+			CurrencyID:        "NGN",
+			IdempotencyKey:    "provider-adapter-in",
+			ProviderReference: "provider-in-ref",
+			ProviderEventID:   "provider-in-event",
+			Narration:         "provider inbound",
+		},
+	}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	transfer, err := svc.MockInbound(ctx, TransferRequest{
+		AccountID:       DemoCustomerAccountID,
+		AmountMinor:     999,
+		IdempotencyKey:  "payload-idem",
+		ProviderEventID: "payload-event",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if provider.parseCalls != 1 {
+		t.Fatalf("expected one provider ParseWebhook call, got %d", provider.parseCalls)
+	}
+	if provider.lastHeaders["Idempotency-Key"] != "payload-idem" {
+		t.Fatalf("provider did not receive idempotency header: %+v", provider.lastHeaders)
+	}
+	if transfer.AmountMinor != 15000 || transfer.ProviderReference != "provider-in-ref" {
+		t.Fatalf("transfer did not use parsed provider webhook event: %+v", transfer)
+	}
+}
+
 func newTestService(t *testing.T) (context.Context, *Service, *memoryStore) {
 	t.Helper()
 	store := newMemoryStore()
-	svc := NewService(store)
+	svc := NewService(store, NewMockNIPProvider())
 	ctx := context.Background()
 	if _, err := svc.SeedDemo(ctx); err != nil {
 		t.Fatal(err)
@@ -420,21 +532,43 @@ func (m *memoryStore) RecordTransfer(ctx context.Context, input RecordTransferIn
 	return m.recordTransferLocked(input)
 }
 
-func (m *memoryStore) ReverseTransfer(ctx context.Context, institutionID, transferID, idempotencyKey string) (*Transfer, error) {
+func (m *memoryStore) ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	original, ok := m.transfers[transferID]
-	if !ok || original.InstitutionID != institutionID {
+	input.InstitutionID = strings.TrimSpace(input.InstitutionID)
+	input.TransferID = strings.TrimSpace(input.TransferID)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if input.InstitutionID == "" || input.TransferID == "" || input.IdempotencyKey == "" {
+		return nil, ErrInvalidRequest
+	}
+	original, ok := m.transfers[input.TransferID]
+	if !ok || original.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
 	}
 	if original.Status != TransferStatusSucceeded || original.JournalEntryID == nil || original.Direction == TransferDirectionReversal {
 		return nil, ErrInvalidRequest
 	}
+	provider := strings.TrimSpace(input.Provider)
+	if provider == "" {
+		provider = original.Provider
+	}
+	providerReference := strings.TrimSpace(input.ProviderReference)
+	if providerReference == "" {
+		originalReference := strings.TrimSpace(original.ProviderReference)
+		if originalReference == "" {
+			originalReference = original.ID
+		}
+		providerReference = "reversal:" + originalReference
+	}
+	narration := strings.TrimSpace(input.Narration)
+	if narration == "" {
+		narration = "Reversal of " + original.ID
+	}
 	direction := TransferDirectionOutbound
 	if original.Direction == TransferDirectionOutbound {
 		direction = TransferDirectionInbound
 	}
-	reversal, err := m.recordTransferLocked(RecordTransferInput{InstitutionID: institutionID, AccountID: original.AccountID, ClearingAccountID: DemoClearingAccountID, Direction: direction, Status: TransferStatusSucceeded, AmountMinor: original.AmountMinor, CurrencyID: original.CurrencyID, IdempotencyKey: idempotencyKey, Provider: ProviderMockNIP, ProviderReference: "reversal:" + original.ID, ReversalOfTransferID: original.ID, Narration: "Reversal of " + original.ID})
+	reversal, err := m.recordTransferLocked(RecordTransferInput{InstitutionID: input.InstitutionID, AccountID: original.AccountID, ClearingAccountID: DemoClearingAccountID, Direction: direction, Status: TransferStatusSucceeded, AmountMinor: original.AmountMinor, CurrencyID: original.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: provider, ProviderReference: providerReference, ProviderEventID: strings.TrimSpace(input.ProviderEventID), ReversalOfTransferID: original.ID, FailureReason: strings.TrimSpace(input.FailureReason), Narration: narration})
 	if err != nil {
 		return nil, err
 	}
@@ -527,6 +661,44 @@ func (m *memoryStore) applyPostingLocked(posting Posting, journalID string, now 
 	balance.LastJournalEntryID = &journalID
 	balance.UpdatedAt = now
 	m.balances[posting.AccountID] = balance
+}
+
+type spyTransferProvider struct {
+	initiateCalls int
+	parseCalls    int
+
+	lastInitiate ProviderTransferRequest
+	lastHeaders  map[string]string
+
+	initiateResult ProviderTransferResult
+	webhookEvent   ProviderWebhookEvent
+}
+
+func (s *spyTransferProvider) Name() string {
+	return ProviderMockNIP
+}
+
+func (s *spyTransferProvider) NameEnquiry(ctx context.Context, request NameEnquiryRequest) (*NameEnquiryResult, error) {
+	return nil, ErrInvalidRequest
+}
+
+func (s *spyTransferProvider) InitiateTransfer(ctx context.Context, request ProviderTransferRequest) (*ProviderTransferResult, error) {
+	s.initiateCalls++
+	s.lastInitiate = request
+	return copyOf(s.initiateResult), nil
+}
+
+func (s *spyTransferProvider) RequeryTransfer(ctx context.Context, providerReference string) (*ProviderTransferResult, error) {
+	return nil, ErrNotFound
+}
+
+func (s *spyTransferProvider) ParseWebhook(ctx context.Context, payload []byte, headers map[string]string) (*ProviderWebhookEvent, error) {
+	s.parseCalls++
+	s.lastHeaders = map[string]string{}
+	for key, value := range headers {
+		s.lastHeaders[key] = value
+	}
+	return copyOf(s.webhookEvent), nil
 }
 
 func copyOf[T any](v T) *T {

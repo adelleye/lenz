@@ -20,6 +20,6 @@ func main() {
 
 func routes(r *chi.Mux, deps server.Deps) {
 	store := corebanking.NewSQLStore(deps.Cfg.DBConn)
-	handler := corebanking.NewHandler(corebanking.NewService(store))
+	handler := corebanking.NewHandler(corebanking.NewService(store, corebanking.NewMockNIPProvider()))
 	handler.Routes(r)
 }

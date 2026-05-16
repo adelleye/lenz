@@ -15,7 +15,7 @@ import (
 func TestSQLStoreTransferSpineIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
-	svc := NewService(NewSQLStore(db))
+	svc := NewService(NewSQLStore(db), NewMockNIPProvider())
 
 	seed, err := svc.SeedDemo(ctx)
 	if err != nil {

@@ -180,6 +180,8 @@ type TransferRequest struct {
 	ProviderReference string `json:"provider_reference"`
 	Status            string `json:"status"`
 	Narration         string `json:"narration"`
+	Scenario          string `json:"scenario"`
+	DelaySeconds      int64  `json:"delay_seconds"`
 }
 
 type RecordTransferInput struct {
@@ -197,4 +199,15 @@ type RecordTransferInput struct {
 	ReversalOfTransferID string
 	FailureReason        string
 	Narration            string
+}
+
+type ReverseTransferInput struct {
+	InstitutionID     string
+	TransferID        string
+	IdempotencyKey    string
+	Provider          string
+	ProviderReference string
+	ProviderEventID   string
+	FailureReason     string
+	Narration         string
 }
