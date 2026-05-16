@@ -29,6 +29,13 @@ Run migrations:
 go run ./apps/core/cmd/migrate
 ```
 
+If you already have local Postgres on port 5432, start Compose with
+`POSTGRES_PORT=55432` and set:
+
+```sh
+export DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable'
+```
+
 Start the API:
 
 ```sh

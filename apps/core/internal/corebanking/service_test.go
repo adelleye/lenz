@@ -126,6 +126,21 @@ func TestReversalCreatesNewLedgerEvent(t *testing.T) {
 	assertJournalBalanced(t, store, reversal)
 }
 
+func TestReversalPostsEvenWhenFundsWereSpent(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	original := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "spent-rev-in", ProviderEventID: "evt-spent-rev-in"})
+	mockOutbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 20000, IdempotencyKey: "spent-rev-out"})
+
+	reversal := reverseTransfer(t, svc, ctx, original.ID, "spent-reverse-1")
+
+	assertStatus(t, reversal, TransferStatusSucceeded)
+	if reversal.JournalEntryID == nil {
+		t.Fatalf("spent-funds reversal should still create a journal")
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, -20000)
+	assertJournalBalanced(t, store, reversal)
+}
+
 func TestTenantScopingPreventsCrossTenantReads(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 10000, IdempotencyKey: "tenant-in", ProviderEventID: "evt-tenant-in"})
@@ -428,7 +443,7 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	}
 	status := input.Status
 	failureReason := input.FailureReason
-	if status == TransferStatusSucceeded && input.Direction == TransferDirectionOutbound && m.balances[input.AccountID].AvailableMinor < input.AmountMinor {
+	if status == TransferStatusSucceeded && input.Direction == TransferDirectionOutbound && input.ReversalOfTransferID == "" && m.balances[input.AccountID].AvailableMinor < input.AmountMinor {
 		status = TransferStatusFailed
 		failureReason = "insufficient_funds"
 	}

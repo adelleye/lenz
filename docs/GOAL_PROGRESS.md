@@ -33,16 +33,16 @@ Command run:
 
 ```sh
 docker compose version
-DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:5432/lenzcore?sslmode=disable' go run ./apps/core
+POSTGRES_PORT=55432 docker compose -f infra/docker/docker-compose.yml up -d postgres redis
+DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable' go run ./apps/core
 ```
 
 Result:
-- Failed in this environment: `zsh:1: command not found: docker`.
-- API startup also failed against the reachable local Postgres instance:
-  `pq: role "lenzcore" does not exist`.
+- Passed after installing Docker CLI, Compose, and Colima via Homebrew.
+- Used host port `55432` because this machine already had a native Postgres on `127.0.0.1:5432`.
 
 What remains:
-- Docker-backed Postgres/Redis demo verification must be run on a machine with Docker installed.
+- None for local run path.
 
 ## 3. Migrations And Schema
 
@@ -56,15 +56,14 @@ What changed:
 Command run:
 
 ```sh
-go run ./apps/core/cmd/migrate
+DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable' go run ./apps/core/cmd/migrate
 ```
 
 Result:
-- Failed in this environment because the reachable Postgres instance is not the
-  Docker Compose database: `pq: role "lenzcore" does not exist`.
+- Passed: `applied 20260516000100_transaction_spine`.
 
 What remains:
-- Run this command after starting Docker Compose locally.
+- None.
 
 ## 4. Seed Data
 
@@ -101,7 +100,7 @@ Result:
 - Passed.
 
 What remains:
-- Live SQL transaction verification pending Docker/Postgres.
+- Live Docker-backed seed verified with `POST /api/v1/demo/seed`.
 
 ## 6. Account Service
 
@@ -120,7 +119,7 @@ Result:
 - Passed.
 
 What remains:
-- Live HTTP verification pending Docker/Postgres.
+- Live Docker-backed account and balance endpoints verified.
 
 ## 7. Mock Provider Adapter
 
@@ -157,7 +156,7 @@ Result:
 - Passed.
 
 What remains:
-- Live curl demo pending Docker/Postgres.
+- Live Docker-backed mock provider requests verified.
 
 ## 9. Transfer-Out
 
@@ -176,7 +175,7 @@ Result:
 - Passed.
 
 What remains:
-- Live curl demo pending Docker/Postgres.
+- Live Docker-backed outbound and insufficient-funds flows verified.
 
 ## 10. Transaction History
 
@@ -195,7 +194,7 @@ Result:
 - Passed.
 
 What remains:
-- Live HTTP verification pending Docker/Postgres.
+- Live Docker-backed transaction history verified.
 
 ## 11. Idempotency And Duplicate Protection
 
@@ -232,7 +231,7 @@ Result:
 - Passed.
 
 What remains:
-- Live HTTP verification pending Docker/Postgres.
+- Live Docker-backed pending, failed, and reversal flows verified.
 
 ## 13. Tests
 
@@ -250,7 +249,7 @@ Result:
 - Passed.
 
 What remains:
-- Add live integration tests once Docker/Postgres is available in CI or local dev.
+- Add automated SQL integration tests in a follow-up; live manual Docker proof passed locally.
 
 ## 14. Docs
 
@@ -268,4 +267,4 @@ Result:
 - Passed.
 
 What remains:
-- Run the documented curl flow against a live local Postgres.
+- Documented curl flow passed against Docker-backed Postgres on port `55432`.

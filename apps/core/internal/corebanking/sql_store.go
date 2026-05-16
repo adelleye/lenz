@@ -162,7 +162,7 @@ func (s *SQLStore) ListTransactions(ctx context.Context, institutionID, accountI
 	var txns []Transaction
 	err := s.db.SelectContext(ctx, &txns, `
 SELECT
-	t.id || ':' || COALESCE(p.id, 'pending') AS id,
+	t.id::text || ':' || COALESCE(p.id::text, 'pending') AS id,
 	t.id AS transfer_id,
 	t.journal_entry_id,
 	t.account_id,
@@ -274,7 +274,7 @@ func recordTransferTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInpu
 
 	status := input.Status
 	failureReason := input.FailureReason
-	if status == TransferStatusSucceeded && input.Direction == TransferDirectionOutbound && account.Balance.AvailableMinor < input.AmountMinor {
+	if status == TransferStatusSucceeded && input.Direction == TransferDirectionOutbound && input.ReversalOfTransferID == "" && account.Balance.AvailableMinor < input.AmountMinor {
 		status = TransferStatusFailed
 		failureReason = "insufficient_funds"
 	}

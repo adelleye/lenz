@@ -24,6 +24,15 @@ go run ./apps/core/cmd/migrate
 go run ./apps/core
 ```
 
+If port `5432` is already used by another local Postgres, run:
+
+```sh
+POSTGRES_PORT=55432 docker compose -f infra/docker/docker-compose.yml up -d postgres redis
+export DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable'
+go run ./apps/core/cmd/migrate
+go run ./apps/core
+```
+
 In another terminal:
 
 ```sh

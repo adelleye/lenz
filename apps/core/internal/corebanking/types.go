@@ -157,17 +157,17 @@ type JournalWithPostings struct {
 }
 
 type Transaction struct {
-	ID             string    `json:"id"`
-	TransferID     string    `json:"transfer_id"`
-	JournalEntryID *string   `json:"journal_entry_id,omitempty"`
-	AccountID      string    `json:"account_id"`
-	Direction      string    `json:"direction"`
-	Status         string    `json:"status"`
-	AmountMinor    int64     `json:"amount_minor"`
-	SignedMinor    int64     `json:"signed_minor"`
-	CurrencyID     string    `json:"currency_id"`
-	Narration      string    `json:"narration"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string    `json:"id" db:"id"`
+	TransferID     string    `json:"transfer_id" db:"transfer_id"`
+	JournalEntryID *string   `json:"journal_entry_id,omitempty" db:"journal_entry_id"`
+	AccountID      string    `json:"account_id" db:"account_id"`
+	Direction      string    `json:"direction" db:"direction"`
+	Status         string    `json:"status" db:"status"`
+	AmountMinor    int64     `json:"amount_minor" db:"amount_minor"`
+	SignedMinor    int64     `json:"signed_minor" db:"signed_minor"`
+	CurrencyID     string    `json:"currency_id" db:"currency_id"`
+	Narration      string    `json:"narration" db:"narration"`
+	CreatedAt      time.Time `json:"created_at" db:"created_at"`
 }
 
 type TransferRequest struct {
