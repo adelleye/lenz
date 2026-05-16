@@ -239,6 +239,9 @@ func (s *SQLStore) ReverseTransfer(ctx context.Context, institutionID, transferI
 	if err != nil {
 		return nil, err
 	}
+	if transfer.ReversalOfTransferID == nil || *transfer.ReversalOfTransferID != original.ID {
+		return nil, ErrConflict
+	}
 	transfer.Direction = TransferDirectionReversal
 	if _, err = tx.ExecContext(ctx, `UPDATE transfers SET direction = 'reversal', updated_at = $1 WHERE institution_id = $2 AND id = $3`, time.Now().UTC(), institutionID, transfer.ID); err != nil {
 		return nil, err

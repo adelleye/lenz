@@ -22,3 +22,7 @@ tasks:
   test:
     cmds:
       - go test ./apps/core/... ./apps/auth/... ./packages/shared/...
+
+  demo_transfer_spine:
+    cmds:
+      - ./scripts/demo_transfer_spine.sh

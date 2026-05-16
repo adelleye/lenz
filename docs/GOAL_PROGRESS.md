@@ -238,6 +238,7 @@ What remains:
 What changed:
 - Added automated tests for all required scenarios:
   successful transfer-in, successful transfer-out, insufficient funds, duplicate idempotency key, duplicate provider event, pending history, failed transfer, reversal, tenant scoping, and Lenz-derived history.
+- Added Postgres-backed integration coverage for the SQL store with aggregate checks for balanced journals and balances matching postings.
 
 Command run:
 
@@ -249,22 +250,23 @@ Result:
 - Passed.
 
 What remains:
-- Add automated SQL integration tests in a follow-up; live manual Docker proof passed locally.
+- None for current unit and SQL integration coverage.
 
 ## 14. Docs
 
 What changed:
 - Added `docs/TRANSFER_ENGINE_DEMO.md`.
 - Updated `README.md`, `PROJECT_STRUCTURE.md`, `Taskfile.yml`, Dockerfile, migration config, and OpenAPI docs.
+- Added `scripts/demo_transfer_spine.sh` as the single verified local proof command.
 
 Command run:
 
 ```sh
-/tmp/codex-go/go/bin/go test ./apps/core/... ./apps/auth/... ./packages/shared/...
+GO_BIN=/tmp/codex-go/go/bin/go ./scripts/demo_transfer_spine.sh
 ```
 
 Result:
-- Passed.
+- Passed: `DEMO TRANSFER SPINE: PASS`.
 
 What remains:
-- Documented curl flow passed against Docker-backed Postgres on port `55432`.
+- None for the transaction-spine demo proof.

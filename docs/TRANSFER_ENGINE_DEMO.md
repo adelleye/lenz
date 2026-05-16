@@ -8,6 +8,7 @@ institution -> customer -> account -> ledger -> transfer-in -> transfer-out -> t
 
 - Go 1.25.6+
 - Docker with Compose
+- `jq`
 
 The API defaults to:
 
@@ -17,6 +18,29 @@ PORT=3001
 ```
 
 ## Start Locally
+
+The verified one-command proof is:
+
+```sh
+./scripts/demo_transfer_spine.sh
+```
+
+If your shell does not have `go` on `PATH`, pass an explicit Go binary:
+
+```sh
+GO_BIN=/path/to/go ./scripts/demo_transfer_spine.sh
+```
+
+The script resets the repo's demo database volume for a clean proof run, starts
+Postgres and Redis, runs migrations, runs the normal Go test suite, runs the
+Postgres-backed integration test suite, starts the API, and asserts the transfer
+spine over HTTP.
+
+By default the script maps Postgres to host port `55432` to avoid colliding with
+an existing local Postgres on `5432`. Override it with `POSTGRES_PORT=5432` if
+that port is free.
+
+Manual flow:
 
 ```sh
 docker compose -f infra/docker/docker-compose.yml up -d postgres redis

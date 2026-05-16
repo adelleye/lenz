@@ -141,6 +141,24 @@ func TestReversalPostsEvenWhenFundsWereSpent(t *testing.T) {
 	assertJournalBalanced(t, store, reversal)
 }
 
+func TestReversalRejectsUnrelatedIdempotencyKey(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	original := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "collision-in", ProviderEventID: "evt-collision-in"})
+
+	_, err := svc.ReverseTransfer(ctx, DemoInstitutionID, original.ID, "collision-in")
+
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected idempotency collision to be rejected, got %v", err)
+	}
+	stillOriginal, err := svc.GetTransfer(ctx, DemoInstitutionID, original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillOriginal.Direction != TransferDirectionInbound {
+		t.Fatalf("idempotency collision mutated original transfer: %+v", stillOriginal)
+	}
+}
+
 func TestTenantScopingPreventsCrossTenantReads(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 10000, IdempotencyKey: "tenant-in", ProviderEventID: "evt-tenant-in"})
@@ -419,6 +437,9 @@ func (m *memoryStore) ReverseTransfer(ctx context.Context, institutionID, transf
 	reversal, err := m.recordTransferLocked(RecordTransferInput{InstitutionID: institutionID, AccountID: original.AccountID, ClearingAccountID: DemoClearingAccountID, Direction: direction, Status: TransferStatusSucceeded, AmountMinor: original.AmountMinor, CurrencyID: original.CurrencyID, IdempotencyKey: idempotencyKey, Provider: ProviderMockNIP, ProviderReference: "reversal:" + original.ID, ReversalOfTransferID: original.ID, Narration: "Reversal of " + original.ID})
 	if err != nil {
 		return nil, err
+	}
+	if reversal.ReversalOfTransferID == nil || *reversal.ReversalOfTransferID != original.ID {
+		return nil, ErrConflict
 	}
 	reversal.Direction = TransferDirectionReversal
 	m.transfers[reversal.ID] = *reversal

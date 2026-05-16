@@ -17,6 +17,16 @@ Lenz Core:
 
 ## Local Demo
 
+The fastest verified proof is:
+
+```sh
+./scripts/demo_transfer_spine.sh
+```
+
+This resets the demo Docker database volume, runs migrations, runs unit and
+Postgres-backed integration tests, starts the API, and asserts the transfer
+spine over HTTP.
+
 Start Postgres and Redis:
 
 ```sh
