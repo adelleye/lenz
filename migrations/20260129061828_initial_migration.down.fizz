@@ -1,0 +1,5 @@
+drop_table("customers")
+drop_table("branches")
+drop_table("institutions")
+drop_table("countries")
+drop_table("currencies")

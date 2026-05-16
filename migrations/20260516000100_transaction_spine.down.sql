@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS provider_events;
+DROP TABLE IF EXISTS transfers;
+DROP TABLE IF EXISTS postings;
+DROP TABLE IF EXISTS journal_entries;
+DROP TABLE IF EXISTS account_balances;
+DROP TABLE IF EXISTS accounts;
+DROP TABLE IF EXISTS customers;
+DROP TABLE IF EXISTS branches;
+DROP TABLE IF EXISTS institutions;
+DROP TABLE IF EXISTS countries;
+DROP TABLE IF EXISTS currencies;

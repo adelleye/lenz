@@ -1,0 +1,32 @@
+FROM golang:1.25-alpine AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache git
+
+# Copy go mod files
+COPY go.work go.work.sum ./
+COPY apps/core/go.mod apps/core/go.sum ./apps/core/
+COPY apps/auth/go.mod ./apps/auth/
+COPY packages/shared/go.mod packages/shared/go.sum ./packages/shared/
+RUN cd apps/core && go mod download
+
+# Copy source code
+COPY apps ./apps
+COPY packages ./packages
+
+# Build
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o bin/server ./apps/core
+
+# Final stage
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /root/
+
+COPY --from=builder /app/bin/server .
+
+EXPOSE 8080
+
+CMD ["./server"]

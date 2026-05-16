@@ -1,0 +1,193 @@
+openapi: 3.0.0
+info:
+  title: Lenz Core API
+  version: 1.0.0
+  contact: 
+    email: engineering@cliveai.com
+  description: |
+    ## Lenz Core API
+    Lenz core is a CBA aiming to provide instituions with a next-gen, Core Banking Application for Nigeria and beyond.
+  servers:
+    - url: http://localhost:3001
+      description: Local development server
+      x-internal: true
+paths:
+  /api/v1/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+  /api/v1/demo/seed:
+    post:
+      summary: Seed demo transaction-spine data
+      responses:
+        '200':
+          description: Demo institution, customer, account, and clearing account
+  /api/v1/customers/{customer_id}/accounts:
+    get:
+      summary: List customer accounts
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - name: customer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Accounts
+  /api/v1/accounts/{account_id}/balance:
+    get:
+      summary: Get account balance
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Balance
+  /api/v1/accounts/{account_id}/transactions:
+    get:
+      summary: Get account transaction history from Lenz records
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Transactions
+  /api/v1/transfers/mock/inbound:
+    post:
+      summary: Simulate inbound mock provider transfer
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+      responses:
+        '200':
+          description: Transfer
+  /api/v1/transfers/mock/outbound:
+    post:
+      summary: Simulate outbound mock provider transfer
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+      responses:
+        '200':
+          description: Transfer
+  /api/v1/transfers/{transfer_id}:
+    get:
+      summary: Get transfer
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Transfer
+  /api/v1/transfers/{transfer_id}/reverse:
+    post:
+      summary: Reverse a succeeded transfer with a new ledger event
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reversal transfer
+  /api/v1/admin/ledger/journal/{journal_entry_id}:
+    get:
+      summary: Inspect journal entry and postings
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+        - name: journal_entry_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Journal with postings
+  /api/v1/admin/transfers:
+    get:
+      summary: List transfers for an institution
+      parameters:
+        - $ref: '#/components/parameters/InstitutionID'
+      responses:
+        '200':
+          description: Transfers
+components:
+  parameters:
+    InstitutionID:
+      name: X-Institution-ID
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: Defaults to the demo institution when omitted.
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+  schemas:
+    TransferRequest:
+      type: object
+      required:
+        - account_id
+        - amount_minor
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        amount_minor:
+          type: integer
+          format: int64
+        currency_id:
+          type: string
+          default: NGN
+        idempotency_key:
+          type: string
+          description: Optional when Idempotency-Key header is supplied.
+        provider_event_id:
+          type: string
+        provider_reference:
+          type: string
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        narration:
+          type: string

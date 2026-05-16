@@ -1,0 +1,271 @@
+# Goal Progress
+
+## 1. Repo Audit
+
+What changed:
+- Confirmed this is an early scaffold, not a mature core banking app.
+- Found `apps/auth`, `apps/core`, `packages/shared`, server setup, Docker Compose, migrations, OpenAPI files, and an institution placeholder module.
+- Found mismatches: docs and Dockerfile referenced `apps/backend`; actual API is `apps/core`. The initial down migration dropped `tenants`, which does not exist, and omitted current tables.
+
+Command run:
+
+```sh
+rg --files -g '!*node_modules*' -g '!vendor' -g '!dist' -g '!build'
+```
+
+Result:
+- Passed. Scaffold inventory completed.
+
+What remains:
+- No full PRD implementation attempted.
+
+## 2. Local Run Path
+
+What changed:
+- Added `go.work` including `apps/auth`, `apps/core`, and `packages/shared`.
+- Updated `go.work.example`.
+- Fixed `apps/core/go.mod` local module requirements/replaces.
+- Added a local Docker Compose default `DATABASE_URL` fallback.
+- Fixed `infra/docker/Dockerfile.backend` to build `apps/core`, not `apps/backend`.
+- Updated `Taskfile.yml` commands for Docker, migrations, API run, and tests.
+
+Command run:
+
+```sh
+docker compose version
+DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:5432/lenzcore?sslmode=disable' go run ./apps/core
+```
+
+Result:
+- Failed in this environment: `zsh:1: command not found: docker`.
+- API startup also failed against the reachable local Postgres instance:
+  `pq: role "lenzcore" does not exist`.
+
+What remains:
+- Docker-backed Postgres/Redis demo verification must be run on a machine with Docker installed.
+
+## 3. Migrations And Schema
+
+What changed:
+- Added `migrations/20260516000100_transaction_spine.up.sql`.
+- Added tables for accounts, balances, journal entries, postings, transfers, provider events, and audit events.
+- Preserved integer minor-unit money amounts with `bigint`.
+- Added uniqueness for transfer idempotency and provider event dedupe.
+- Fixed the existing fizz migration's broken institution index and down-table order.
+
+Command run:
+
+```sh
+go run ./apps/core/cmd/migrate
+```
+
+Result:
+- Failed in this environment because the reachable Postgres instance is not the
+  Docker Compose database: `pq: role "lenzcore" does not exist`.
+
+What remains:
+- Run this command after starting Docker Compose locally.
+
+## 4. Seed Data
+
+What changed:
+- Added `POST /api/v1/demo/seed`.
+- Seed creates one demo institution, branch, customer, customer wallet account, and mock NIP clearing account.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed. Unit tests seed demo data in the service layer.
+
+What remains:
+- Verify HTTP seeding with live Postgres once Docker is available.
+
+## 5. Ledger Service
+
+What changed:
+- Added balanced journal-entry and posting creation.
+- Customer balances are updated atomically from postings in the same SQL transaction.
+- Reversals create new journal events.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- Live SQL transaction verification pending Docker/Postgres.
+
+## 6. Account Service
+
+What changed:
+- Added account listing by customer.
+- Added balance lookup.
+- All account reads are institution-scoped.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- Live HTTP verification pending Docker/Postgres.
+
+## 7. Mock Provider Adapter
+
+What changed:
+- Added mock NIP provider fields on transfers and provider events.
+- Kept provider state internal to Lenz records so the adapter can later be replaced.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- No real Monnify/Interswitch/NIBSS/sponsor-bank adapter was added.
+
+## 8. Transfer-In
+
+What changed:
+- Added `POST /api/v1/transfers/mock/inbound`.
+- Successful inbound transfers debit clearing and credit the customer wallet.
+- Duplicate provider events do not double-credit.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- Live curl demo pending Docker/Postgres.
+
+## 9. Transfer-Out
+
+What changed:
+- Added `POST /api/v1/transfers/mock/outbound`.
+- Successful outbound transfers debit the customer wallet and credit clearing.
+- Insufficient funds create a failed transfer without postings.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- Live curl demo pending Docker/Postgres.
+
+## 10. Transaction History
+
+What changed:
+- Added `GET /api/v1/accounts/:account_id/transactions`.
+- Succeeded rows are generated from Lenz transfer, journal, and posting records.
+- Pending and failed rows appear with zero signed movement.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- Live HTTP verification pending Docker/Postgres.
+
+## 11. Idempotency And Duplicate Protection
+
+What changed:
+- Every money-moving endpoint requires an idempotency key.
+- Unique `(institution_id, idempotency_key)` prevents duplicate request posting.
+- Unique `(institution_id, provider, provider_event_id)` prevents duplicate webhook/event crediting.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- Race behavior should be stress-tested with live Postgres before production use.
+
+## 12. Pending, Failed, And Reversal Flows
+
+What changed:
+- Pending and failed transfers are represented as transfer records without ledger postings.
+- Reversal posts a new transfer and new balanced journal entry.
+
+Command run:
+
+```sh
+go test ./apps/core/internal/corebanking
+```
+
+Result:
+- Passed.
+
+What remains:
+- Live HTTP verification pending Docker/Postgres.
+
+## 13. Tests
+
+What changed:
+- Added automated tests for all required scenarios:
+  successful transfer-in, successful transfer-out, insufficient funds, duplicate idempotency key, duplicate provider event, pending history, failed transfer, reversal, tenant scoping, and Lenz-derived history.
+
+Command run:
+
+```sh
+/tmp/codex-go/go/bin/go test ./apps/core/... ./apps/auth/... ./packages/shared/...
+```
+
+Result:
+- Passed.
+
+What remains:
+- Add live integration tests once Docker/Postgres is available in CI or local dev.
+
+## 14. Docs
+
+What changed:
+- Added `docs/TRANSFER_ENGINE_DEMO.md`.
+- Updated `README.md`, `PROJECT_STRUCTURE.md`, `Taskfile.yml`, Dockerfile, migration config, and OpenAPI docs.
+
+Command run:
+
+```sh
+/tmp/codex-go/go/bin/go test ./apps/core/... ./apps/auth/... ./packages/shared/...
+```
+
+Result:
+- Passed.
+
+What remains:
+- Run the documented curl flow against a live local Postgres.

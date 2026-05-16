@@ -1,0 +1,24 @@
+version: "3"
+
+dotenv: ['.env']
+
+tasks:
+  docker_up:
+    cmds:
+      - docker compose -f infra/docker/docker-compose.yml up -d postgres redis
+
+  run_core:
+    cmds:
+      - go run -gcflags="-N -l" ./apps/core
+  
+  migration_run_up:
+    cmds:
+      - go run ./apps/core/cmd/migrate
+  
+  migration_run_down:
+    cmds:
+      - echo "Down migrations are manual for now; see migrations/*.down.sql"
+
+  test:
+    cmds:
+      - go test ./apps/core/... ./apps/auth/... ./packages/shared/...

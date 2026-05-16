@@ -1,0 +1,79 @@
+create_table("institutions") {
+    t.Column("id", "uuid", {primary: true})
+    t.Column("name", "string", {"size": 200})
+    t.Column("short_name", "string", {"size": 50})
+    t.Column("code", "string", {"size": 10})
+    t.Column("nuban_prefix", "string", {"size": 3})
+    t.Column("country_id", "string", {"size": 2})
+    t.Column("currency_id", "string", {"size": 3})
+    t.Column("status", "string", {"size": 10, "default": "pending"})
+    t.Column("meta", "jsonb", {})
+    t.Column("created_at", "timestamptz", {})
+    t.Column("updated_at", "timestamptz", {})
+    t.Column("deleted_at", "timestamptz", {})
+
+    t.ForeignKey("country_id", {"countries": ["id"]}, {"on_delete": "DO NOTHING", "on_update": "DO NOTHING"})
+    t.ForeignKey("currency_id", {"currencies": ["id"]}, {"on_delete": "DO NOTHING", "on_update": "DO NOTHING"})
+
+    t.DisableTimestamps()
+}
+
+add_index("institutions", "code", {"unique": true})
+
+create_table("branches") {
+    t.Column("id", "uuid", {primary: true})
+    t.Column("institution_id", "uuid", {})
+    t.Column("code", "string", {"size": 10})
+    t.Column("name", "string", {})
+    t.Column("meta", "jsonb", {})
+    t.Column("status", "string", {"size": 10, "default": "pending"})
+
+    t.ForeignKey("institution_id", {"institutions": ["id"]}, {"on_delete": "CASCADE", "on_update": "CASCADE"})
+    t.Column("created_at", "timestamptz", {})
+    t.Column("updated_at", "timestamptz", {})
+
+    t.DisableTimestamps()
+}
+
+create_table("customers") {
+    t.Column("id", "uuid", {primary: true})
+    t.Column("institution_id", "uuid", {})
+    t.Column("branch_id", "uuid", {})
+    t.Column("first_name", "string", {"size": 200})
+    t.Column("last_name", "string", {"size": 200})
+    t.Column("middle_name", "string", {"size": 200, "null": true})
+    t.Column("email", "string", {"size": 200})
+    t.Column("phone", "string", {"size": 30})
+    t.Column("status", "string", {"size": 10, "default": "pending"})
+    t.Column("meta", "jsonb", {})
+
+
+    t.Column("created_at", "timestamptz", {})
+    t.Column("updated_at", "timestamptz", {})
+
+    t.DisableTimestamps()
+}
+
+create_table("countries") {
+    t.Column("id", "string", {primary: true, "size": 2})
+    t.Column("name", "string", {})
+    t.Column("flag", "string", {"null": true})
+    t.Column("currency", "string", {})
+    t.Column("is_supported", "bool", {"default": false})
+    t.Column("meta", "jsonb", {})
+
+    t.Column("created_at", "timestamptz", {})
+    t.Column("updated_at", "timestamptz", {})
+    
+    t.DisableTimestamps()
+}
+
+create_table("currencies") {
+    t.Column("id", "string", {primary: true, "size": 3})
+    t.Column("name", "string", {})
+
+    t.Column("created_at", "timestamptz", {})
+    t.Column("updated_at", "timestamptz", {})
+    
+    t.DisableTimestamps()
+}

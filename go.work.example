@@ -1,0 +1,7 @@
+go 1.25.6
+
+use (
+	./apps/auth
+	./apps/core
+	./packages/shared
+)

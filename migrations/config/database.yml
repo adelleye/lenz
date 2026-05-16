@@ -1,0 +1,29 @@
+development:
+  dialect: postgres
+  database: lenzcore
+  user: lenzcore
+  password: lenzcore123
+  host: 127.0.0.1
+  pool: 5
+
+playground:
+  dialect: postgres
+  database: test_mig
+  user: postgres
+  password: root
+  host: 127.0.0.1
+  pool: 5
+
+staging_local:
+  dialect: postgres
+  database: lenz_staging
+  user: postgres
+  password: root
+  host: 127.0.0.1
+  pool: 5
+
+staging:
+  url: {{env "STAGING_URL"}}
+
+production:
+  url: {{env "PROD_URL"}}
