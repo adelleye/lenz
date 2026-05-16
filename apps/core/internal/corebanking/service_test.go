@@ -484,6 +484,110 @@ func TestMockOutboundCallsProviderAdapter(t *testing.T) {
 	}
 }
 
+func TestMockOutboundIdempotencyPreventsDuplicateProviderInitiation(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{
+		initiateResult: ProviderTransferResult{
+			Provider:          ProviderMockNIP,
+			ProviderReference: "idem-provider-out-ref",
+			Status:            TransferStatusSucceeded,
+			Narration:         "provider outbound",
+		},
+	}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       50000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "idem-provider-fund",
+		Provider:          "test_setup",
+		ProviderReference: "idem-provider-fund-ref",
+		ProviderEventID:   "idem-provider-fund-event",
+		Narration:         "fund test account",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := TransferRequest{
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    10000,
+		IdempotencyKey: "provider-adapter-idem-out",
+		Narration:      "outbound",
+	}
+	first, err := svc.MockOutbound(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.MockOutbound(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if first.ID != second.ID {
+		t.Fatalf("expected duplicate idempotency request to return original transfer")
+	}
+	if provider.initiateCalls != 1 {
+		t.Fatalf("expected one provider InitiateTransfer call, got %d", provider.initiateCalls)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000)
+}
+
+func TestMockOutboundRecordsProviderUnknownOnTimeout(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{initiateErr: context.DeadlineExceeded}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       50000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "unknown-provider-fund",
+		Provider:          "test_setup",
+		ProviderReference: "unknown-provider-fund-ref",
+		ProviderEventID:   "unknown-provider-fund-event",
+		Narration:         "fund test account",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transfer, err := svc.MockOutbound(ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       10000,
+		IdempotencyKey:    "unknown-provider-out",
+		ProviderReference: "unknown-provider-out-ref",
+		Narration:         "outbound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if transfer.Status != TransferStatusPending || transfer.ProviderStatus != TransferProviderStatusUnknown || transfer.ReconciliationStatus != ReconciliationStatusManualReview {
+		t.Fatalf("provider unknown transfer mismatch: %+v", transfer)
+	}
+	if transfer.JournalEntryID != nil {
+		t.Fatalf("provider unknown transfer should not post a journal: %+v", transfer)
+	}
+	if hold := store.holds[transfer.ID]; hold.Status != HoldStatusActive || hold.AmountMinor != 10000 {
+		t.Fatalf("provider unknown outbound should keep an active hold: %+v", hold)
+	}
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000, 50000)
+}
+
 func TestMockInboundCallsProviderAdapter(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
@@ -732,6 +836,16 @@ func (m *memoryStore) GetTransfer(ctx context.Context, institutionID, transferID
 	return copyOf(transfer), nil
 }
 
+func (m *memoryStore) GetTransferByIdempotency(ctx context.Context, institutionID, idempotencyKey string) (*Transfer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := m.idempotency[strings.TrimSpace(institutionID)+"|"+strings.TrimSpace(idempotencyKey)]
+	if id == "" {
+		return nil, ErrNotFound
+	}
+	return copyOf(m.transfers[id]), nil
+}
+
 func (m *memoryStore) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -866,8 +980,14 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	if _, ok = m.accounts[input.ClearingAccountID]; !ok {
 		return nil, ErrNotFound
 	}
-	providerStatus := input.Status
+	providerStatus := strings.ToLower(strings.TrimSpace(input.ProviderStatus))
+	if providerStatus == "" {
+		providerStatus = input.Status
+	}
 	status := input.Status
+	if providerStatus == TransferProviderStatusUnknown {
+		status = TransferStatusPending
+	}
 	failureReason := input.FailureReason
 	balance := m.balances[input.AccountID]
 	if customerInitiatedOutbound(input) && !canUseAvailableBalance(account, balance.AvailableMinor, input.AmountMinor) {
@@ -875,6 +995,9 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 		failureReason = "insufficient_funds"
 	}
 	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	if providerStatus == TransferProviderStatusUnknown {
+		reconciliationStatus = ReconciliationStatusManualReview
+	}
 	if status == TransferStatusSucceeded && wouldCreateReversalDeficit(account, balance, input) {
 		ledgerStatus = LedgerStatusReversalDeficit
 		reconciliationStatus = ReconciliationStatusManualReview
@@ -911,9 +1034,19 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 	}
 	account := m.accounts[pending.AccountID]
 	balance := m.balances[pending.AccountID]
+	providerStatus := strings.ToLower(strings.TrimSpace(input.ProviderStatus))
+	if providerStatus == "" {
+		providerStatus = input.Status
+	}
 	status := input.Status
+	if providerStatus == TransferProviderStatusUnknown {
+		status = TransferStatusPending
+	}
 	failureReason := input.FailureReason
 	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	if providerStatus == TransferProviderStatusUnknown {
+		reconciliationStatus = ReconciliationStatusManualReview
+	}
 	now := time.Now().UTC()
 	if status == TransferStatusSucceeded && wouldCreateReversalDeficit(account, balance, input) {
 		ledgerStatus = LedgerStatusReversalDeficit
@@ -941,7 +1074,7 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 		return nil, ErrInvalidRequest
 	}
 	pending.Status = status
-	pending.ProviderStatus = input.Status
+	pending.ProviderStatus = providerStatus
 	pending.LedgerStatus = ledgerStatus
 	pending.ReconciliationStatus = reconciliationStatus
 	pending.UpdatedAt = now
@@ -1043,6 +1176,7 @@ type spyTransferProvider struct {
 	lastHeaders  map[string]string
 
 	initiateResult ProviderTransferResult
+	initiateErr    error
 	webhookEvent   ProviderWebhookEvent
 }
 
@@ -1057,6 +1191,9 @@ func (s *spyTransferProvider) NameEnquiry(ctx context.Context, request NameEnqui
 func (s *spyTransferProvider) InitiateTransfer(ctx context.Context, request ProviderTransferRequest) (*ProviderTransferResult, error) {
 	s.initiateCalls++
 	s.lastInitiate = request
+	if s.initiateErr != nil {
+		return nil, s.initiateErr
+	}
 	return copyOf(s.initiateResult), nil
 }
 

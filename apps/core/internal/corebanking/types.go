@@ -37,6 +37,8 @@ const (
 	TransferStatusSucceeded = "succeeded"
 	TransferStatusFailed    = "failed"
 
+	TransferProviderStatusUnknown = "provider_unknown"
+
 	LedgerStatusPending         = "pending"
 	LedgerStatusPosted          = "posted"
 	LedgerStatusNoPosting       = "no_posting"
@@ -247,6 +249,7 @@ type RecordTransferInput struct {
 	Provider             string
 	ProviderReference    string
 	ProviderEventID      string
+	ProviderStatus       string
 	ReversalOfTransferID string
 	FailureReason        string
 	Narration            string

@@ -520,7 +520,7 @@ components:
           enum: [pending, succeeded, failed]
         provider_status:
           type: string
-          enum: [pending, succeeded, failed]
+          enum: [pending, succeeded, failed, provider_unknown]
         ledger_status:
           type: string
           enum: [pending, posted, no_posting, reversal_deficit]

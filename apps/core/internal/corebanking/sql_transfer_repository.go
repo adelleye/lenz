@@ -25,6 +25,12 @@ func (r *sqlTransferRepository) GetTransfer(ctx context.Context, institutionID, 
 	return &transfer, normalizeSQLError(err)
 }
 
+func (r *sqlTransferRepository) GetTransferByIdempotency(ctx context.Context, institutionID, idempotencyKey string) (*Transfer, error) {
+	var transfer Transfer
+	err := r.db.GetContext(ctx, &transfer, transferSelectSQL+` WHERE institution_id = $1 AND idempotency_key = $2`, institutionID, strings.TrimSpace(idempotencyKey))
+	return &transfer, normalizeSQLError(err)
+}
+
 func (r *sqlTransferRepository) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
 	var transfers []Transfer
 	err := r.db.SelectContext(ctx, &transfers, transferSelectSQL+` WHERE institution_id = $1 ORDER BY created_at DESC LIMIT 100`, institutionID)
@@ -141,14 +147,23 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 		return nil, err
 	}
 
-	providerStatus := input.Status
+	providerStatus := strings.ToLower(strings.TrimSpace(input.ProviderStatus))
+	if providerStatus == "" {
+		providerStatus = input.Status
+	}
 	status := input.Status
+	if providerStatus == TransferProviderStatusUnknown {
+		status = TransferStatusPending
+	}
 	failureReason := input.FailureReason
 	if customerInitiatedOutbound(input) && !canUseAvailableBalance(account.Account, account.Balance.AvailableMinor, input.AmountMinor) {
 		status = TransferStatusFailed
 		failureReason = "insufficient_funds"
 	}
 	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	if providerStatus == TransferProviderStatusUnknown {
+		reconciliationStatus = ReconciliationStatusManualReview
+	}
 	if status == TransferStatusSucceeded && wouldCreateReversalDeficit(account.Account, account.Balance, input) {
 		ledgerStatus = LedgerStatusReversalDeficit
 		reconciliationStatus = ReconciliationStatusManualReview
@@ -253,9 +268,19 @@ func (r *sqlTransferRepository) settlePendingTransfer(ctx context.Context, tx Tx
 		}
 	}
 
+	providerStatus := strings.ToLower(strings.TrimSpace(input.ProviderStatus))
+	if providerStatus == "" {
+		providerStatus = input.Status
+	}
 	status := input.Status
+	if providerStatus == TransferProviderStatusUnknown {
+		status = TransferStatusPending
+	}
 	failureReason := input.FailureReason
 	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	if providerStatus == TransferProviderStatusUnknown {
+		reconciliationStatus = ReconciliationStatusManualReview
+	}
 	var journalEntryID *string
 
 	switch status {
@@ -320,7 +345,7 @@ SET status = $1,
     narration = $8,
     updated_at = $9
 WHERE institution_id = $10 AND id = $11`,
-		status, input.Status, ledgerStatus, reconciliationStatus, providerEventID, journalEntryID, failure, narration, now, pending.InstitutionID, pending.ID); err != nil {
+		status, providerStatus, ledgerStatus, reconciliationStatus, providerEventID, journalEntryID, failure, narration, now, pending.InstitutionID, pending.ID); err != nil {
 		return nil, err
 	}
 	return r.getTransferForUpdate(ctx, tx, pending.InstitutionID, pending.ID)

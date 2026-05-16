@@ -26,6 +26,7 @@ type LedgerRepository interface {
 
 type TransferRepository interface {
 	GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error)
+	GetTransferByIdempotency(ctx context.Context, institutionID, idempotencyKey string) (*Transfer, error)
 	ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error)
 	RecordTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, error)
 	ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error)

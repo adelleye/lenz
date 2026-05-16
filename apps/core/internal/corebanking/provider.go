@@ -2,7 +2,14 @@ package corebanking
 
 import (
 	"context"
+	"errors"
 	"time"
+)
+
+var (
+	ErrProviderCapabilityUnavailable = errors.New("provider capability unavailable")
+	ErrProviderPreSubmissionFailure  = errors.New("provider transfer was not submitted")
+	ErrProviderStatusUnknown         = errors.New("provider transfer status unknown")
 )
 
 type Provider interface {
@@ -51,6 +58,7 @@ type ProviderTransferResult struct {
 	ProviderReference string
 	ProviderEventID   string
 	Status            string
+	ProviderStatus    string
 	FailureReason     string
 	Narration         string
 	Delayed           bool

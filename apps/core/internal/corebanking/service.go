@@ -3,6 +3,7 @@ package corebanking
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 )
 
@@ -58,6 +59,18 @@ func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID str
 	return s.store.GetTransfer(ctx, institutionID, transferID)
 }
 
+func (s *Service) RequeryTransfer(ctx context.Context, institutionID, transferID string) (*ProviderTransferResult, error) {
+	transfer, err := s.GetTransfer(ctx, institutionID, transferID)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := s.provider(transfer.Provider)
+	if err != nil {
+		return nil, err
+	}
+	return provider.RequeryTransfer(ctx, transfer.ProviderReference)
+}
+
 func (s *Service) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
@@ -93,11 +106,18 @@ func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Trans
 	if err := normalizeTransferRequest(&req); err != nil {
 		return nil, err
 	}
+	existing, err := s.store.GetTransferByIdempotency(ctx, req.InstitutionID, req.IdempotencyKey)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
 	provider, err := s.provider(ProviderMockNIP)
 	if err != nil {
 		return nil, err
 	}
-	result, err := provider.InitiateTransfer(ctx, ProviderTransferRequest{
+	providerRequest := ProviderTransferRequest{
 		InstitutionID:     req.InstitutionID,
 		AccountID:         req.AccountID,
 		AmountMinor:       req.AmountMinor,
@@ -109,9 +129,13 @@ func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Trans
 		Narration:         req.Narration,
 		Scenario:          req.Scenario,
 		DelaySeconds:      req.DelaySeconds,
-	})
+	}
+	result, err := provider.InitiateTransfer(ctx, providerRequest)
 	if err != nil {
-		return nil, err
+		if !providerTransferStatusUnknown(err) {
+			return nil, err
+		}
+		result = providerUnknownTransferResult(provider, providerRequest)
 	}
 	return s.recordProviderTransfer(ctx, TransferDirectionOutbound, req, *result)
 }
@@ -232,10 +256,24 @@ func (s *Service) recordProviderTransfer(ctx context.Context, direction string, 
 		providerName = ProviderMockNIP
 	}
 	status := strings.ToLower(strings.TrimSpace(result.Status))
+	providerStatus := strings.ToLower(strings.TrimSpace(result.ProviderStatus))
+	if status == TransferProviderStatusUnknown {
+		status = TransferStatusPending
+		providerStatus = TransferProviderStatusUnknown
+	}
+	if providerStatus == TransferProviderStatusUnknown {
+		status = TransferStatusPending
+	}
 	if status == "" {
 		status = req.Status
 	}
+	if providerStatus == "" {
+		providerStatus = status
+	}
 	if !validTransferStatus(status) {
+		return nil, ErrInvalidRequest
+	}
+	if !validProviderStatus(providerStatus) {
 		return nil, ErrInvalidRequest
 	}
 	failureReason := strings.TrimSpace(result.FailureReason)
@@ -263,6 +301,7 @@ func (s *Service) recordProviderTransfer(ctx context.Context, direction string, 
 		Provider:          providerName,
 		ProviderReference: providerReference,
 		ProviderEventID:   providerEventID,
+		ProviderStatus:    providerStatus,
 		FailureReason:     failureReason,
 		Narration:         narration,
 	})
@@ -300,6 +339,15 @@ func normalizeTransferRequest(req *TransferRequest) error {
 func validTransferStatus(status string) bool {
 	switch status {
 	case TransferStatusSucceeded, TransferStatusPending, TransferStatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func validProviderStatus(status string) bool {
+	switch status {
+	case TransferStatusSucceeded, TransferStatusPending, TransferStatusFailed, TransferProviderStatusUnknown:
 		return true
 	default:
 		return false
