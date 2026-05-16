@@ -82,6 +82,66 @@ func TestSQLStoreTransferSpineIntegration(t *testing.T) {
 	assertSQLBalance(t, svc, ctx, 375000)
 	assertSQLJournalBalanced(t, svc, ctx, outbound, 125000)
 
+	pendingOutboundToFail := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       50000,
+		IdempotencyKey:    "sql-out-pending-fail-001",
+		ProviderReference: "sql-out-pending-fail-ref-001",
+		Status:            TransferStatusPending,
+		Narration:         "SQL pending outbound fail proof",
+	})
+	assertStatus(t, pendingOutboundToFail, TransferStatusPending)
+	assertSQLBalancePair(t, svc, ctx, 325000, 375000)
+
+	failedPendingOutbound := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusFailed,
+		AmountMinor:       50000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "sql-out-pending-fail-settle-001",
+		ProviderReference: "sql-out-pending-fail-ref-001",
+		ProviderEventID:   "sql-provider-event-out-pending-fail-001",
+		FailureReason:     "provider_failed",
+		Narration:         "SQL pending outbound failed",
+	})
+	if failedPendingOutbound.ID != pendingOutboundToFail.ID {
+		t.Fatalf("failed settlement should update the pending transfer: pending=%s failed=%s", pendingOutboundToFail.ID, failedPendingOutbound.ID)
+	}
+	assertStatus(t, failedPendingOutbound, TransferStatusFailed)
+	assertSQLBalance(t, svc, ctx, 375000)
+
+	pendingOutboundToSucceed := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       25000,
+		IdempotencyKey:    "sql-out-pending-success-001",
+		ProviderReference: "sql-out-pending-success-ref-001",
+		Status:            TransferStatusPending,
+		Narration:         "SQL pending outbound success proof",
+	})
+	assertStatus(t, pendingOutboundToSucceed, TransferStatusPending)
+	assertSQLBalancePair(t, svc, ctx, 350000, 375000)
+
+	succeededPendingOutbound := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       25000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "sql-out-pending-success-settle-001",
+		ProviderReference: "sql-out-pending-success-ref-001",
+		ProviderEventID:   "sql-provider-event-out-pending-success-001",
+		Narration:         "SQL pending outbound succeeded",
+	})
+	if succeededPendingOutbound.ID != pendingOutboundToSucceed.ID {
+		t.Fatalf("successful settlement should update the pending transfer: pending=%s succeeded=%s", pendingOutboundToSucceed.ID, succeededPendingOutbound.ID)
+	}
+	assertStatus(t, succeededPendingOutbound, TransferStatusSucceeded)
+	assertSQLBalance(t, svc, ctx, 350000)
+	assertSQLJournalBalanced(t, svc, ctx, succeededPendingOutbound, 25000)
+
 	failed := mockOutbound(t, svc, ctx, TransferRequest{
 		AccountID:      DemoCustomerAccountID,
 		AmountMinor:    999999999,
@@ -92,7 +152,7 @@ func TestSQLStoreTransferSpineIntegration(t *testing.T) {
 	if failed.JournalEntryID != nil || failed.FailureReason == nil || *failed.FailureReason != "insufficient_funds" {
 		t.Fatalf("failed transfer should record insufficient funds without a journal: %+v", failed)
 	}
-	assertSQLBalance(t, svc, ctx, 375000)
+	assertSQLBalance(t, svc, ctx, 350000)
 
 	pending := mockInbound(t, svc, ctx, TransferRequest{
 		AccountID:       DemoCustomerAccountID,
@@ -106,14 +166,17 @@ func TestSQLStoreTransferSpineIntegration(t *testing.T) {
 	if pending.JournalEntryID != nil {
 		t.Fatalf("pending transfer should not have a journal: %+v", pending)
 	}
-	assertSQLBalance(t, svc, ctx, 375000)
+	assertSQLBalance(t, svc, ctx, 350000)
 
 	reversal := reverseTransfer(t, svc, ctx, inbound.ID, "sql-reversal-001")
 	assertStatus(t, reversal, TransferStatusSucceeded)
 	if reversal.Direction != TransferDirectionReversal || reversal.ReversalOfTransferID == nil || *reversal.ReversalOfTransferID != inbound.ID {
 		t.Fatalf("reversal did not reference the original transfer: %+v", reversal)
 	}
-	assertSQLBalance(t, svc, ctx, -125000)
+	if reversal.LedgerStatus != LedgerStatusReversalDeficit || reversal.ReconciliationStatus != ReconciliationStatusManualReview {
+		t.Fatalf("deficit reversal should be marked for manual review: %+v", reversal)
+	}
+	assertSQLBalance(t, svc, ctx, -150000)
 	assertSQLJournalBalanced(t, svc, ctx, reversal, 500000)
 
 	_, err = svc.ReverseTransfer(ctx, DemoInstitutionID, inbound.ID, "sql-in-001")
@@ -125,7 +188,7 @@ func TestSQLStoreTransferSpineIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertSQLHistory(t, history, inbound.ID, outbound.ID, pending.ID, failed.ID, reversal.ID)
+	assertSQLHistory(t, history, inbound.ID, outbound.ID, pendingOutboundToFail.ID, pendingOutboundToSucceed.ID, pending.ID, failed.ID, reversal.ID)
 
 	if err := assertAllSQLJournalsBalanced(ctx, db); err != nil {
 		t.Fatal(err)
@@ -168,6 +231,7 @@ func resetIntegrationSchema(t *testing.T, db *sqlx.DB) {
 TRUNCATE TABLE
 	audit_events,
 	provider_events,
+	account_holds,
 	transfers,
 	postings,
 	journal_entries,
@@ -186,12 +250,17 @@ RESTART IDENTITY CASCADE`)
 
 func assertSQLBalance(t *testing.T, svc *Service, ctx context.Context, want int64) {
 	t.Helper()
+	assertSQLBalancePair(t, svc, ctx, want, want)
+}
+
+func assertSQLBalancePair(t *testing.T, svc *Service, ctx context.Context, wantAvailable, wantLedger int64) {
+	t.Helper()
 	balance, err := svc.GetBalance(ctx, DemoInstitutionID, DemoCustomerAccountID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if balance.AvailableMinor != want || balance.LedgerMinor != want {
-		t.Fatalf("balance mismatch: got available=%d ledger=%d want=%d", balance.AvailableMinor, balance.LedgerMinor, want)
+	if balance.AvailableMinor != wantAvailable || balance.LedgerMinor != wantLedger {
+		t.Fatalf("balance mismatch: got available=%d ledger=%d want available=%d ledger=%d", balance.AvailableMinor, balance.LedgerMinor, wantAvailable, wantLedger)
 	}
 }
 
@@ -221,10 +290,10 @@ func assertSQLJournalBalanced(t *testing.T, svc *Service, ctx context.Context, t
 	}
 }
 
-func assertSQLHistory(t *testing.T, history []Transaction, inboundID, outboundID, pendingID, failedID, reversalID string) {
+func assertSQLHistory(t *testing.T, history []Transaction, inboundID, outboundID, failedPendingOutboundID, succeededPendingOutboundID, pendingID, failedID, reversalID string) {
 	t.Helper()
-	if len(history) != 5 {
-		t.Fatalf("expected five transaction history rows, got %d: %+v", len(history), history)
+	if len(history) != 7 {
+		t.Fatalf("expected seven transaction history rows, got %d: %+v", len(history), history)
 	}
 	seen := map[string]Transaction{}
 	for _, txn := range history {
@@ -235,11 +304,13 @@ func assertSQLHistory(t *testing.T, history []Transaction, inboundID, outboundID
 		signedMinor int64
 		hasJournal  bool
 	}{
-		inboundID:  {status: TransferStatusSucceeded, signedMinor: 500000, hasJournal: true},
-		outboundID: {status: TransferStatusSucceeded, signedMinor: -125000, hasJournal: true},
-		pendingID:  {status: TransferStatusPending, signedMinor: 0, hasJournal: false},
-		failedID:   {status: TransferStatusFailed, signedMinor: 0, hasJournal: false},
-		reversalID: {status: TransferStatusSucceeded, signedMinor: -500000, hasJournal: true},
+		inboundID:                  {status: TransferStatusSucceeded, signedMinor: 500000, hasJournal: true},
+		outboundID:                 {status: TransferStatusSucceeded, signedMinor: -125000, hasJournal: true},
+		failedPendingOutboundID:    {status: TransferStatusFailed, signedMinor: 0, hasJournal: false},
+		succeededPendingOutboundID: {status: TransferStatusSucceeded, signedMinor: -25000, hasJournal: true},
+		pendingID:                  {status: TransferStatusPending, signedMinor: 0, hasJournal: false},
+		failedID:                   {status: TransferStatusFailed, signedMinor: 0, hasJournal: false},
+		reversalID:                 {status: TransferStatusSucceeded, signedMinor: -500000, hasJournal: true},
 	}
 	for transferID, want := range expect {
 		got, ok := seen[transferID]
@@ -309,17 +380,26 @@ WITH posting_balances AS (
 		AND p.account_id = a.id
 	WHERE a.institution_id = $1
 	GROUP BY a.id
+),
+active_holds AS (
+	SELECT
+		account_id,
+		COALESCE(SUM(amount_minor), 0) AS held_minor
+	FROM account_holds
+	WHERE institution_id = $1 AND status = 'active'
+	GROUP BY account_id
 )
 SELECT COUNT(*)
 FROM account_balances b
 JOIN posting_balances pb ON pb.account_id = b.account_id
+LEFT JOIN active_holds h ON h.account_id = b.account_id
 WHERE b.institution_id = $1
-	AND (b.available_minor <> pb.computed_minor OR b.ledger_minor <> pb.computed_minor)`, DemoInstitutionID)
+	AND (b.ledger_minor <> pb.computed_minor OR b.available_minor <> pb.computed_minor - COALESCE(h.held_minor, 0))`, DemoInstitutionID)
 	if err != nil {
 		return err
 	}
 	if mismatches != 0 {
-		return errors.New("SQL account balances do not match postings")
+		return errors.New("SQL account balances do not reconcile to postings and active holds")
 	}
 	return nil
 }

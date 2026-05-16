@@ -41,6 +41,100 @@ func TestSuccessfulTransferOutPostsBalancedLedger(t *testing.T) {
 	assertJournalBalanced(t, store, transfer)
 }
 
+func TestPendingOutboundCreatesHoldAndReducesAvailable(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "hold-fund", ProviderEventID: "evt-hold-fund"})
+
+	transfer := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       20000,
+		IdempotencyKey:    "hold-out",
+		ProviderReference: "hold-out-ref",
+		Status:            TransferStatusPending,
+	})
+
+	assertStatus(t, transfer, TransferStatusPending)
+	if transfer.JournalEntryID != nil {
+		t.Fatalf("pending outbound should not post a journal: %+v", transfer)
+	}
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 30000, 50000)
+	hold := store.holds[transfer.ID]
+	if hold.Status != HoldStatusActive || hold.AmountMinor != 20000 {
+		t.Fatalf("pending outbound hold mismatch: %+v", hold)
+	}
+}
+
+func TestFailedPendingOutboundReleasesHold(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "hold-fail-fund", ProviderEventID: "evt-hold-fail-fund"})
+	pending := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       20000,
+		IdempotencyKey:    "hold-fail-out",
+		ProviderReference: "hold-fail-out-ref",
+		Status:            TransferStatusPending,
+	})
+
+	failed := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusFailed,
+		AmountMinor:       20000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "hold-fail-settle",
+		ProviderReference: "hold-fail-out-ref",
+		ProviderEventID:   "evt-hold-fail-settle",
+		FailureReason:     "provider_failed",
+	})
+
+	if failed.ID != pending.ID {
+		t.Fatalf("expected settlement to update pending transfer: pending=%s failed=%s", pending.ID, failed.ID)
+	}
+	assertStatus(t, failed, TransferStatusFailed)
+	if failed.JournalEntryID != nil {
+		t.Fatalf("failed pending outbound should not post a journal: %+v", failed)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 50000)
+	if hold := store.holds[pending.ID]; hold.Status != HoldStatusReleased {
+		t.Fatalf("failed outbound should release hold: %+v", hold)
+	}
+}
+
+func TestSuccessfulPendingOutboundPostsAndConsumesHold(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "hold-success-fund", ProviderEventID: "evt-hold-success-fund"})
+	pending := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       20000,
+		IdempotencyKey:    "hold-success-out",
+		ProviderReference: "hold-success-out-ref",
+		Status:            TransferStatusPending,
+	})
+
+	succeeded := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       20000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "hold-success-settle",
+		ProviderReference: "hold-success-out-ref",
+		ProviderEventID:   "evt-hold-success-settle",
+	})
+
+	if succeeded.ID != pending.ID {
+		t.Fatalf("expected settlement to update pending transfer: pending=%s succeeded=%s", pending.ID, succeeded.ID)
+	}
+	assertStatus(t, succeeded, TransferStatusSucceeded)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 30000)
+	assertJournalBalanced(t, store, succeeded)
+	if hold := store.holds[pending.ID]; hold.Status != HoldStatusConsumed {
+		t.Fatalf("successful outbound should consume hold: %+v", hold)
+	}
+}
+
 func TestInsufficientFundsDoesNotDebit(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	transfer := mockOutbound(t, svc, ctx, TransferRequest{
@@ -125,9 +219,12 @@ func TestReversalCreatesNewLedgerEvent(t *testing.T) {
 	}
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
 	assertJournalBalanced(t, store, reversal)
+	if reversal.LedgerStatus != LedgerStatusPosted || reversal.ReconciliationStatus != ReconciliationStatusMatched {
+		t.Fatalf("sufficient reversal should be normally posted: %+v", reversal)
+	}
 }
 
-func TestReversalPostsEvenWhenFundsWereSpent(t *testing.T) {
+func TestReversalDeficitIsMarkedForManualReview(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 	original := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "spent-rev-in", ProviderEventID: "evt-spent-rev-in"})
 	mockOutbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 20000, IdempotencyKey: "spent-rev-out"})
@@ -140,6 +237,46 @@ func TestReversalPostsEvenWhenFundsWereSpent(t *testing.T) {
 	}
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, -20000)
 	assertJournalBalanced(t, store, reversal)
+	if reversal.LedgerStatus != LedgerStatusReversalDeficit || reversal.ReconciliationStatus != ReconciliationStatusManualReview {
+		t.Fatalf("deficit reversal should be marked for manual review: %+v", reversal)
+	}
+}
+
+func TestStandardAccountCannotSpendReversalDeficit(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	original := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "deficit-spend-in", ProviderEventID: "evt-deficit-spend-in"})
+	mockOutbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 20000, IdempotencyKey: "deficit-spend-out"})
+	reverseTransfer(t, svc, ctx, original.ID, "deficit-spend-reverse")
+
+	transfer := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    1,
+		IdempotencyKey: "deficit-spend-attempt",
+	})
+
+	assertStatus(t, transfer, TransferStatusFailed)
+	if transfer.FailureReason == nil || *transfer.FailureReason != "insufficient_funds" {
+		t.Fatalf("deficit spend should fail as insufficient funds: %+v", transfer)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, -20000)
+}
+
+func TestOverdraftCapableAccountCanBeRepresented(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	creditAccountID := "66666666-6666-6666-6666-666666666666"
+	customerID := DemoCustomerID
+	now := time.Now().UTC()
+	store.accounts[creditAccountID] = Account{ID: creditAccountID, InstitutionID: DemoInstitutionID, CustomerID: &customerID, AccountNumber: "9990000002", Name: "Ada Demo Overdraft", Kind: AccountKindCustomer, ProductType: AccountProductOverdraftCredit, AllowNegative: true, CurrencyID: "NGN", NormalBalance: NormalBalanceCredit, Status: "active", CreatedAt: now, UpdatedAt: now}
+	store.balances[creditAccountID] = AccountBalance{AccountID: creditAccountID, InstitutionID: DemoInstitutionID, CurrencyID: "NGN", UpdatedAt: now}
+
+	transfer := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:      creditAccountID,
+		AmountMinor:    10000,
+		IdempotencyKey: "overdraft-out",
+	})
+
+	assertStatus(t, transfer, TransferStatusSucceeded)
+	assertBalance(t, svc, ctx, DemoInstitutionID, creditAccountID, -10000)
 }
 
 func TestReversalRejectsUnrelatedIdempotencyKey(t *testing.T) {
@@ -343,6 +480,15 @@ func reverseTransfer(t *testing.T, svc *Service, ctx context.Context, transferID
 	return mustTransfer(t, transfer, err)
 }
 
+func mockProviderEvent(t *testing.T, svc *Service, ctx context.Context, event ProviderWebhookEvent) *Transfer {
+	t.Helper()
+	if event.Provider == "" {
+		event.Provider = ProviderMockNIP
+	}
+	transfer, err := svc.recordProviderWebhookEvent(ctx, event)
+	return mustTransfer(t, transfer, err)
+}
+
 func assertStatus(t *testing.T, transfer *Transfer, status string) {
 	t.Helper()
 	if transfer.Status != status {
@@ -352,12 +498,17 @@ func assertStatus(t *testing.T, transfer *Transfer, status string) {
 
 func assertBalance(t *testing.T, svc *Service, ctx context.Context, institutionID, accountID string, want int64) {
 	t.Helper()
+	assertBalancePair(t, svc, ctx, institutionID, accountID, want, want)
+}
+
+func assertBalancePair(t *testing.T, svc *Service, ctx context.Context, institutionID, accountID string, wantAvailable, wantLedger int64) {
+	t.Helper()
 	balance, err := svc.GetBalance(ctx, institutionID, accountID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if balance.AvailableMinor != want || balance.LedgerMinor != want {
-		t.Fatalf("balance mismatch: got available=%d ledger=%d want=%d", balance.AvailableMinor, balance.LedgerMinor, want)
+	if balance.AvailableMinor != wantAvailable || balance.LedgerMinor != wantLedger {
+		t.Fatalf("balance mismatch: got available=%d ledger=%d want available=%d ledger=%d", balance.AvailableMinor, balance.LedgerMinor, wantAvailable, wantLedger)
 	}
 }
 
@@ -385,6 +536,7 @@ type memoryStore struct {
 	transfers      map[string]Transfer
 	journals       map[string]JournalEntry
 	postings       map[string][]Posting
+	holds          map[string]AccountHold
 	idempotency    map[string]string
 	providerEvents map[string]string
 }
@@ -399,6 +551,7 @@ func newMemoryStore() *memoryStore {
 		transfers:      map[string]Transfer{},
 		journals:       map[string]JournalEntry{},
 		postings:       map[string][]Posting{},
+		holds:          map[string]AccountHold{},
 		idempotency:    map[string]string{},
 		providerEvents: map[string]string{},
 	}
@@ -413,8 +566,8 @@ func (m *memoryStore) EnsureDemoData(ctx context.Context) (*SeedResult, error) {
 	m.institutions[DemoInstitutionID] = Institution{ID: DemoInstitutionID, Name: "Lenz Demo Microfinance Bank", ShortName: "Lenz Demo", Code: "999001", CurrencyID: "NGN", Status: "active", CreatedAt: now, UpdatedAt: now}
 	m.branches[DemoBranchID] = Branch{ID: DemoBranchID, InstitutionID: DemoInstitutionID, Code: "HQ", Name: "Demo HQ", Status: "active", CreatedAt: now, UpdatedAt: now}
 	m.customers[DemoCustomerID] = Customer{ID: DemoCustomerID, InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "ada.demo@example.com", Phone: "+2348000000000", Status: "active", CreatedAt: now, UpdatedAt: now}
-	m.accounts[DemoCustomerAccountID] = Account{ID: DemoCustomerAccountID, InstitutionID: DemoInstitutionID, CustomerID: &customerID, AccountNumber: "9990000001", Name: "Ada Demo Wallet", Kind: AccountKindCustomer, CurrencyID: "NGN", NormalBalance: NormalBalanceCredit, Status: "active", CreatedAt: now, UpdatedAt: now}
-	m.accounts[DemoClearingAccountID] = Account{ID: DemoClearingAccountID, InstitutionID: DemoInstitutionID, AccountNumber: "9999999999", Name: "Mock NIP Clearing", Kind: AccountKindInternal, CurrencyID: "NGN", NormalBalance: NormalBalanceDebit, Status: "active", CreatedAt: now, UpdatedAt: now}
+	m.accounts[DemoCustomerAccountID] = Account{ID: DemoCustomerAccountID, InstitutionID: DemoInstitutionID, CustomerID: &customerID, AccountNumber: "9990000001", Name: "Ada Demo Wallet", Kind: AccountKindCustomer, ProductType: AccountProductStandardWallet, AllowNegative: false, CurrencyID: "NGN", NormalBalance: NormalBalanceCredit, Status: "active", CreatedAt: now, UpdatedAt: now}
+	m.accounts[DemoClearingAccountID] = Account{ID: DemoClearingAccountID, InstitutionID: DemoInstitutionID, AccountNumber: "9999999999", Name: "Mock NIP Clearing", Kind: AccountKindInternal, ProductType: AccountProductInternal, AllowNegative: true, CurrencyID: "NGN", NormalBalance: NormalBalanceDebit, Status: "active", CreatedAt: now, UpdatedAt: now}
 	if _, ok := m.balances[DemoCustomerAccountID]; !ok {
 		m.balances[DemoCustomerAccountID] = AccountBalance{AccountID: DemoCustomerAccountID, InstitutionID: DemoInstitutionID, CurrencyID: "NGN", UpdatedAt: now}
 	}
@@ -589,6 +742,13 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 			return copyOf(m.transfers[id]), nil
 		}
 	}
+	if input.ProviderReference != "" && input.Status != TransferStatusPending {
+		for _, transfer := range m.transfers {
+			if transfer.InstitutionID == input.InstitutionID && transfer.Provider == input.Provider && transfer.ProviderReference == input.ProviderReference && transfer.Direction == input.Direction && transfer.Status == TransferStatusPending {
+				return m.settlePendingTransferLocked(transfer, input)
+			}
+		}
+	}
 	account, ok := m.accounts[input.AccountID]
 	if !ok || account.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
@@ -596,14 +756,21 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	if _, ok = m.accounts[input.ClearingAccountID]; !ok {
 		return nil, ErrNotFound
 	}
+	providerStatus := input.Status
 	status := input.Status
 	failureReason := input.FailureReason
-	if status == TransferStatusSucceeded && input.Direction == TransferDirectionOutbound && input.ReversalOfTransferID == "" && m.balances[input.AccountID].AvailableMinor < input.AmountMinor {
+	balance := m.balances[input.AccountID]
+	if customerInitiatedOutbound(input) && !canUseAvailableBalance(account, balance.AvailableMinor, input.AmountMinor) {
 		status = TransferStatusFailed
 		failureReason = "insufficient_funds"
 	}
+	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	if status == TransferStatusSucceeded && wouldCreateReversalDeficit(account, balance, input) {
+		ledgerStatus = LedgerStatusReversalDeficit
+		reconciliationStatus = ReconciliationStatusManualReview
+	}
 	now := time.Now().UTC()
-	transfer := Transfer{ID: newID(), InstitutionID: input.InstitutionID, AccountID: input.AccountID, Direction: input.Direction, Status: status, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: input.Provider, ProviderReference: input.ProviderReference, Narration: input.Narration, CreatedAt: now, UpdatedAt: now}
+	transfer := Transfer{ID: newID(), InstitutionID: input.InstitutionID, AccountID: input.AccountID, Direction: input.Direction, Status: status, ProviderStatus: providerStatus, LedgerStatus: ledgerStatus, ReconciliationStatus: reconciliationStatus, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: input.Provider, ProviderReference: input.ProviderReference, Narration: input.Narration, CreatedAt: now, UpdatedAt: now}
 	if input.ProviderEventID != "" {
 		transfer.ProviderEventID = &input.ProviderEventID
 	}
@@ -614,10 +781,13 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 		transfer.FailureReason = &failureReason
 	}
 	if status == TransferStatusSucceeded {
-		journalID := m.postJournalLocked(input, transfer.ID, now)
+		journalID := m.postJournalLocked(input, transfer.ID, now, "")
 		transfer.JournalEntryID = &journalID
 	}
 	m.transfers[transfer.ID] = transfer
+	if status == TransferStatusPending && input.Direction == TransferDirectionOutbound && input.ReversalOfTransferID == "" {
+		m.createHoldLocked(transfer, now)
+	}
 	m.idempotency[input.InstitutionID+"|"+input.IdempotencyKey] = transfer.ID
 	if input.ProviderEventID != "" {
 		m.providerEvents[input.InstitutionID+"|"+input.Provider+"|"+input.ProviderEventID] = transfer.ID
@@ -625,7 +795,61 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	return copyOf(transfer), nil
 }
 
-func (m *memoryStore) postJournalLocked(input RecordTransferInput, transferID string, now time.Time) string {
+func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input RecordTransferInput) (*Transfer, error) {
+	if pending.AccountID != input.AccountID || pending.AmountMinor != input.AmountMinor || pending.CurrencyID != input.CurrencyID {
+		return nil, ErrConflict
+	}
+	account := m.accounts[pending.AccountID]
+	balance := m.balances[pending.AccountID]
+	status := input.Status
+	failureReason := input.FailureReason
+	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	now := time.Now().UTC()
+	if status == TransferStatusSucceeded && wouldCreateReversalDeficit(account, balance, input) {
+		ledgerStatus = LedgerStatusReversalDeficit
+		reconciliationStatus = ReconciliationStatusManualReview
+	}
+	switch status {
+	case TransferStatusSucceeded:
+		heldAccountID := ""
+		if pending.Direction == TransferDirectionOutbound && pending.ReversalOfTransferID == nil {
+			if hold, ok := m.holds[pending.ID]; !ok || hold.Status != HoldStatusActive {
+				return nil, ErrConflict
+			}
+			heldAccountID = pending.AccountID
+		}
+		journalID := m.postJournalLocked(input, pending.ID, now, heldAccountID)
+		pending.JournalEntryID = &journalID
+		if heldAccountID != "" {
+			m.consumeHoldLocked(pending.ID, now)
+		}
+	case TransferStatusFailed:
+		if pending.Direction == TransferDirectionOutbound && pending.ReversalOfTransferID == nil {
+			m.releaseHoldLocked(pending.ID, now)
+		}
+	default:
+		return nil, ErrInvalidRequest
+	}
+	pending.Status = status
+	pending.ProviderStatus = input.Status
+	pending.LedgerStatus = ledgerStatus
+	pending.ReconciliationStatus = reconciliationStatus
+	pending.UpdatedAt = now
+	if input.ProviderEventID != "" {
+		pending.ProviderEventID = &input.ProviderEventID
+		m.providerEvents[input.InstitutionID+"|"+input.Provider+"|"+input.ProviderEventID] = pending.ID
+	}
+	if failureReason != "" {
+		pending.FailureReason = &failureReason
+	}
+	if strings.TrimSpace(input.Narration) != "" {
+		pending.Narration = input.Narration
+	}
+	m.transfers[pending.ID] = pending
+	return copyOf(pending), nil
+}
+
+func (m *memoryStore) postJournalLocked(input RecordTransferInput, transferID string, now time.Time, heldAccountID string) string {
 	journalID := newID()
 	entryType := input.Direction
 	if input.ReversalOfTransferID != "" {
@@ -644,23 +868,61 @@ func (m *memoryStore) postJournalLocked(input RecordTransferInput, transferID st
 		{ID: newID(), InstitutionID: input.InstitutionID, JournalEntryID: journalID, AccountID: creditAccountID, Direction: PostingCredit, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, CreatedAt: now},
 	}
 	for _, posting := range m.postings[journalID] {
-		m.applyPostingLocked(posting, journalID, now)
+		availableDeltaOverride := false
+		if posting.AccountID == heldAccountID {
+			availableDeltaOverride = true
+		}
+		m.applyPostingLocked(posting, journalID, now, availableDeltaOverride, 0)
 	}
 	return journalID
 }
 
-func (m *memoryStore) applyPostingLocked(posting Posting, journalID string, now time.Time) {
+func (m *memoryStore) applyPostingLocked(posting Posting, journalID string, now time.Time, availableDeltaOverride bool, availableDelta int64) {
 	account := m.accounts[posting.AccountID]
 	delta := -posting.AmountMinor
 	if (account.NormalBalance == NormalBalanceDebit && posting.Direction == PostingDebit) || (account.NormalBalance == NormalBalanceCredit && posting.Direction == PostingCredit) {
 		delta = posting.AmountMinor
 	}
+	if !availableDeltaOverride {
+		availableDelta = delta
+	}
 	balance := m.balances[posting.AccountID]
-	balance.AvailableMinor += delta
+	balance.AvailableMinor += availableDelta
 	balance.LedgerMinor += delta
 	balance.LastJournalEntryID = &journalID
 	balance.UpdatedAt = now
 	m.balances[posting.AccountID] = balance
+}
+
+func (m *memoryStore) createHoldLocked(transfer Transfer, now time.Time) {
+	m.holds[transfer.ID] = AccountHold{ID: newID(), InstitutionID: transfer.InstitutionID, AccountID: transfer.AccountID, TransferID: transfer.ID, AmountMinor: transfer.AmountMinor, CurrencyID: transfer.CurrencyID, Status: HoldStatusActive, Reason: "pending_outbound_transfer", CreatedAt: now, UpdatedAt: now}
+	balance := m.balances[transfer.AccountID]
+	balance.AvailableMinor -= transfer.AmountMinor
+	balance.UpdatedAt = now
+	m.balances[transfer.AccountID] = balance
+}
+
+func (m *memoryStore) releaseHoldLocked(transferID string, now time.Time) {
+	hold, ok := m.holds[transferID]
+	if !ok || hold.Status != HoldStatusActive {
+		return
+	}
+	hold.Status = HoldStatusReleased
+	hold.UpdatedAt = now
+	hold.ReleasedAt = &now
+	m.holds[transferID] = hold
+	balance := m.balances[hold.AccountID]
+	balance.AvailableMinor += hold.AmountMinor
+	balance.UpdatedAt = now
+	m.balances[hold.AccountID] = balance
+}
+
+func (m *memoryStore) consumeHoldLocked(transferID string, now time.Time) {
+	hold := m.holds[transferID]
+	hold.Status = HoldStatusConsumed
+	hold.UpdatedAt = now
+	hold.ReleasedAt = &now
+	m.holds[transferID] = hold
 }
 
 type spyTransferProvider struct {

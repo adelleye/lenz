@@ -17,6 +17,12 @@ const (
 	AccountKindCustomer = "customer"
 	AccountKindInternal = "internal"
 
+	AccountProductStandardWallet  = "standard_wallet"
+	AccountProductStandardCurrent = "standard_current"
+	AccountProductStandardSavings = "standard_savings"
+	AccountProductOverdraftCredit = "overdraft_credit"
+	AccountProductInternal        = "internal"
+
 	NormalBalanceDebit  = "debit"
 	NormalBalanceCredit = "credit"
 
@@ -30,6 +36,20 @@ const (
 	TransferStatusPending   = "pending"
 	TransferStatusSucceeded = "succeeded"
 	TransferStatusFailed    = "failed"
+
+	LedgerStatusPending         = "pending"
+	LedgerStatusPosted          = "posted"
+	LedgerStatusNoPosting       = "no_posting"
+	LedgerStatusReversalDeficit = "reversal_deficit"
+
+	ReconciliationStatusPending      = "pending"
+	ReconciliationStatusMatched      = "matched"
+	ReconciliationStatusNoAction     = "no_action"
+	ReconciliationStatusManualReview = "manual_review"
+
+	HoldStatusActive   = "active"
+	HoldStatusReleased = "released"
+	HoldStatusConsumed = "consumed"
 
 	ProviderMockNIP = "mock_nip"
 )
@@ -90,6 +110,8 @@ type Account struct {
 	AccountNumber string    `json:"account_number" db:"account_number"`
 	Name          string    `json:"name" db:"name"`
 	Kind          string    `json:"kind" db:"kind"`
+	ProductType   string    `json:"product_type" db:"product_type"`
+	AllowNegative bool      `json:"allow_negative_balance" db:"allow_negative_balance"`
 	CurrencyID    string    `json:"currency_id" db:"currency_id"`
 	NormalBalance string    `json:"normal_balance" db:"normal_balance"`
 	Status        string    `json:"status" db:"status"`
@@ -113,6 +135,9 @@ type Transfer struct {
 	AccountID            string    `json:"account_id" db:"account_id"`
 	Direction            string    `json:"direction" db:"direction"`
 	Status               string    `json:"status" db:"status"`
+	ProviderStatus       string    `json:"provider_status" db:"provider_status"`
+	LedgerStatus         string    `json:"ledger_status" db:"ledger_status"`
+	ReconciliationStatus string    `json:"reconciliation_status" db:"reconciliation_status"`
 	AmountMinor          int64     `json:"amount_minor" db:"amount_minor"`
 	CurrencyID           string    `json:"currency_id" db:"currency_id"`
 	IdempotencyKey       string    `json:"idempotency_key" db:"idempotency_key"`
@@ -148,6 +173,20 @@ type Posting struct {
 	AmountMinor    int64     `json:"amount_minor" db:"amount_minor"`
 	CurrencyID     string    `json:"currency_id" db:"currency_id"`
 	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+}
+
+type AccountHold struct {
+	ID            string     `json:"id" db:"id"`
+	InstitutionID string     `json:"institution_id" db:"institution_id"`
+	AccountID     string     `json:"account_id" db:"account_id"`
+	TransferID    string     `json:"transfer_id" db:"transfer_id"`
+	AmountMinor   int64      `json:"amount_minor" db:"amount_minor"`
+	CurrencyID    string     `json:"currency_id" db:"currency_id"`
+	Status        string     `json:"status" db:"status"`
+	Reason        string     `json:"reason" db:"reason"`
+	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
+	ReleasedAt    *time.Time `json:"released_at,omitempty" db:"released_at"`
 }
 
 type JournalWithPostings struct {

@@ -2,7 +2,12 @@
 
 This demo proves the first Lenz Core transaction spine:
 
-institution -> customer -> account -> ledger -> transfer-in -> transfer-out -> transaction history.
+institution -> customer -> account -> hold -> ledger -> transfer-in -> transfer-out -> transaction history.
+
+It also proves the current account policy boundary: standard customer accounts
+cannot initiate spend above available balance, pending outbound transfers
+reserve available balance without posting ledger money, and reversal deficits
+are marked for manual review.
 
 ## Prerequisites
 
@@ -16,6 +21,10 @@ The API defaults to:
 DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:5432/lenzcore?sslmode=disable'
 PORT=3001
 ```
+
+All non-health routes require a bearer token. The local demo script starts the
+API with `LENZ_DEMO_MODE=true` and a throwaway `LENZ_DEV_AUTH_TOKEN` so the
+demo-only seed/mock routes are explicit and unavailable by default.
 
 ## Start Locally
 
@@ -45,7 +54,7 @@ Manual flow:
 ```sh
 docker compose -f infra/docker/docker-compose.yml up -d postgres redis
 go run ./apps/core/cmd/migrate
-go run ./apps/core
+LENZ_DEMO_MODE=true LENZ_DEV_AUTH_TOKEN=local-demo-token go run ./apps/core
 ```
 
 If port `5432` is already used by another local Postgres, run:
@@ -54,7 +63,7 @@ If port `5432` is already used by another local Postgres, run:
 POSTGRES_PORT=55432 docker compose -f infra/docker/docker-compose.yml up -d postgres redis
 export DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable'
 go run ./apps/core/cmd/migrate
-go run ./apps/core
+LENZ_DEMO_MODE=true LENZ_DEV_AUTH_TOKEN=local-demo-token go run ./apps/core
 ```
 
 In another terminal:
@@ -72,7 +81,8 @@ Expected:
 ## Seed Demo Data
 
 ```sh
-curl -s -X POST http://localhost:3001/api/v1/demo/seed
+curl -s -X POST http://localhost:3001/api/v1/demo/seed \
+  -H 'Authorization: Bearer local-demo-token'
 ```
 
 Important seeded IDs:
@@ -88,16 +98,22 @@ clearing_account_id=55555555-5555-5555-5555-555555555555
 
 ```sh
 curl -s http://localhost:3001/api/v1/customers/33333333-3333-3333-3333-333333333333/accounts \
+  -H 'Authorization: Bearer local-demo-token' \
   -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
 ```
 
 Expected: one customer wallet account with account number `9990000001`.
 
+The demo wallet is a `standard_wallet` account with
+`allow_negative_balance: false`.
+
 ## Transfer In
 
 ```sh
 curl -s -X POST http://localhost:3001/api/v1/transfers/mock/inbound \
+  -H 'Authorization: Bearer local-demo-token' \
   -H 'Content-Type: application/json' \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111' \
   -H 'Idempotency-Key: demo-in-001' \
   -d '{
     "account_id": "44444444-4444-4444-4444-444444444444",
@@ -115,6 +131,7 @@ Check balance:
 
 ```sh
 curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-444444444444/balance \
+  -H 'Authorization: Bearer local-demo-token' \
   -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
 ```
 
@@ -147,9 +164,51 @@ Expected: `status` is `succeeded`.
 
 Balance should now be `375000`.
 
+## Pending Outbound Holds
+
+Pending outbound transfer:
+
+```sh
+curl -s -X POST http://localhost:3001/api/v1/transfers/mock/outbound \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-pending-out-001' \
+  -d '{
+    "account_id": "44444444-4444-4444-4444-444444444444",
+    "amount_minor": 50000,
+    "provider_reference": "nip-pending-out-001",
+    "status": "pending",
+    "narration": "Pending outbound transfer"
+  }'
+```
+
+Expected: `status` is `pending`, `journal_entry_id` is absent, ledger balance
+stays `375000`, and available balance drops to `325000`.
+
+Failed settlement for the same provider reference:
+
+```sh
+curl -s -X POST http://localhost:3001/api/v1/transfers/mock/outbound \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-pending-out-failed-001' \
+  -d '{
+    "account_id": "44444444-4444-4444-4444-444444444444",
+    "amount_minor": 50000,
+    "provider_reference": "nip-pending-out-001",
+    "status": "failed",
+    "narration": "Failed pending outbound transfer"
+  }'
+```
+
+Expected: the same transfer is marked `failed`, the hold is released, no ledger
+posting is created, and both available and ledger balance return to `375000`.
+
+Successful settlement follows the same pattern but with `status: "succeeded"`:
+the transfer receives a journal entry, the hold is consumed, and available and
+ledger balance become equal after the posting.
+
 ## Pending And Failed Transfers
 
-Pending transfer, no ledger posting:
+Pending inbound transfer, no ledger posting and no available-balance increase:
 
 ```sh
 curl -s -X POST http://localhost:3001/api/v1/transfers/mock/inbound \
@@ -225,6 +284,10 @@ Expected: a new transfer is created with `direction: reversal`,
 `reversal_of_transfer_id` set to the original transfer, and a new balanced
 journal entry. The original ledger history is not deleted.
 
+If the reversal pushes the standard customer wallet below zero, the transfer is
+still posted but marked `ledger_status: reversal_deficit` and
+`reconciliation_status: manual_review`.
+
 ## Admin Transfer List
 
 ```sh
@@ -241,3 +304,6 @@ adapter contract described in [Provider Adapters](PROVIDER_ADAPTERS.md). The
 mock provider simulates provider responses and webhook payloads; Lenz Core still
 owns the ledger, balances, history, idempotency, duplicate provider-event
 protection, and reversals.
+
+See [Architecture Decisions](ARCHITECTURE_DECISIONS.md) for the policy model
+that must hold before real provider integrations are added.

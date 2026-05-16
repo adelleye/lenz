@@ -10,20 +10,35 @@ import (
 )
 
 type Handler struct {
-	service *Service
+	service    *Service
+	demoRoutes bool
 }
 
-func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+type HandlerOption func(*Handler)
+
+func WithDemoRoutes(enabled bool) HandlerOption {
+	return func(h *Handler) {
+		h.demoRoutes = enabled
+	}
+}
+
+func NewHandler(service *Service, options ...HandlerOption) *Handler {
+	h := &Handler{service: service}
+	for _, option := range options {
+		option(h)
+	}
+	return h
 }
 
 func (h *Handler) Routes(r chi.Router) {
-	r.Post("/api/v1/demo/seed", h.seedDemo)
+	if h.demoRoutes {
+		r.Post("/api/v1/demo/seed", h.seedDemo)
+		r.Post("/api/v1/transfers/mock/inbound", h.mockInbound)
+		r.Post("/api/v1/transfers/mock/outbound", h.mockOutbound)
+	}
 	r.Get("/api/v1/customers/{customer_id}/accounts", h.listCustomerAccounts)
 	r.Get("/api/v1/accounts/{account_id}/balance", h.getBalance)
 	r.Get("/api/v1/accounts/{account_id}/transactions", h.getTransactions)
-	r.Post("/api/v1/transfers/mock/inbound", h.mockInbound)
-	r.Post("/api/v1/transfers/mock/outbound", h.mockOutbound)
 	r.Get("/api/v1/transfers/{transfer_id}", h.getTransfer)
 	r.Post("/api/v1/transfers/{transfer_id}/reverse", h.reverseTransfer)
 	r.Get("/api/v1/admin/ledger/journal/{journal_entry_id}", h.getJournal)
@@ -56,7 +71,10 @@ func (h *Handler) mockInbound(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	applyRequestScope(r, &req)
+	if err := applyRequestScope(r, &req); err != nil {
+		respond(w, nil, err)
+		return
+	}
 	transfer, err := h.service.MockInbound(r.Context(), req)
 	respond(w, transfer, err)
 }
@@ -67,7 +85,10 @@ func (h *Handler) mockOutbound(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	applyRequestScope(r, &req)
+	if err := applyRequestScope(r, &req); err != nil {
+		respond(w, nil, err)
+		return
+	}
 	transfer, err := h.service.MockOutbound(r.Context(), req)
 	respond(w, transfer, err)
 }
@@ -97,13 +118,19 @@ func decode(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
-func applyRequestScope(r *http.Request, req *TransferRequest) {
-	if req.InstitutionID == "" {
-		req.InstitutionID = institutionID(r)
+func applyRequestScope(r *http.Request, req *TransferRequest) error {
+	headerInstitutionID := institutionID(r)
+	if headerInstitutionID == "" {
+		return ErrInvalidRequest
 	}
+	if req.InstitutionID != "" && strings.TrimSpace(req.InstitutionID) != headerInstitutionID {
+		return ErrInvalidRequest
+	}
+	req.InstitutionID = headerInstitutionID
 	if req.IdempotencyKey == "" {
 		req.IdempotencyKey = idempotencyKey(r)
 	}
+	return nil
 }
 
 func institutionID(r *http.Request) string {

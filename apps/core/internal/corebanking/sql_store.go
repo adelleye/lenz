@@ -63,16 +63,16 @@ ON CONFLICT (id) DO UPDATE SET first_name = EXCLUDED.first_name, last_name = EXC
 	}
 	customerID := DemoCustomerID
 	if _, err = tx.ExecContext(ctx, `
-INSERT INTO accounts (id, institution_id, customer_id, account_number, name, kind, currency_id, normal_balance, status, created_at, updated_at)
-VALUES ($1, $2, $3, '9990000001', 'Ada Demo Wallet', 'customer', 'NGN', 'credit', 'active', $4, $4)
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
+INSERT INTO accounts (id, institution_id, customer_id, account_number, name, kind, product_type, allow_negative_balance, currency_id, normal_balance, status, created_at, updated_at)
+VALUES ($1, $2, $3, '9990000001', 'Ada Demo Wallet', 'customer', 'standard_wallet', false, 'NGN', 'credit', 'active', $4, $4)
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, product_type = EXCLUDED.product_type, allow_negative_balance = EXCLUDED.allow_negative_balance, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
 		DemoCustomerAccountID, DemoInstitutionID, customerID, now); err != nil {
 		return nil, err
 	}
 	if _, err = tx.ExecContext(ctx, `
-INSERT INTO accounts (id, institution_id, customer_id, account_number, name, kind, currency_id, normal_balance, status, created_at, updated_at)
-VALUES ($1, $2, NULL, '9999999999', 'Mock NIP Clearing', 'internal', 'NGN', 'debit', 'active', $3, $3)
-ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
+INSERT INTO accounts (id, institution_id, customer_id, account_number, name, kind, product_type, allow_negative_balance, currency_id, normal_balance, status, created_at, updated_at)
+VALUES ($1, $2, NULL, '9999999999', 'Mock NIP Clearing', 'internal', 'internal', true, 'NGN', 'debit', 'active', $3, $3)
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, product_type = EXCLUDED.product_type, allow_negative_balance = EXCLUDED.allow_negative_balance, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
 		DemoClearingAccountID, DemoInstitutionID, now); err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (s *SQLStore) seedResult(ctx context.Context) (*SeedResult, error) {
 	return &out, nil
 }
 
-const accountSelectSQL = `SELECT id, institution_id, customer_id, account_number, name, kind, currency_id, normal_balance, status, created_at, updated_at FROM accounts`
+const accountSelectSQL = `SELECT id, institution_id, customer_id, account_number, name, kind, product_type, allow_negative_balance, currency_id, normal_balance, status, created_at, updated_at FROM accounts`
 
 func (s *SQLStore) ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error) {
 	var accounts []Account
@@ -279,7 +279,7 @@ func (s *SQLStore) ReverseTransfer(ctx context.Context, input ReverseTransferInp
 	return transfer, nil
 }
 
-const transferSelectSQL = `SELECT id, institution_id, account_id, direction, status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, failure_reason, narration, created_at, updated_at FROM transfers`
+const transferSelectSQL = `SELECT id, institution_id, account_id, direction, status, provider_status, ledger_status, reconciliation_status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, failure_reason, narration, created_at, updated_at FROM transfers`
 
 func recordTransferTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInput) (*Transfer, error) {
 	if existing, err := getTransferByIdempotencyTx(ctx, tx, input.InstitutionID, input.IdempotencyKey); err == nil {
@@ -294,6 +294,15 @@ func recordTransferTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInpu
 			return nil, err
 		}
 	}
+
+	if input.ProviderReference != "" && input.Status != TransferStatusPending {
+		if pending, err := getPendingTransferByProviderReferenceTx(ctx, tx, input.InstitutionID, input.Provider, input.ProviderReference, input.Direction); err == nil {
+			return settlePendingTransferTx(ctx, tx, *pending, input)
+		} else if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+	}
+
 	account, err := lockAccountBalanceTx(ctx, tx, input.InstitutionID, input.AccountID)
 	if err != nil {
 		return nil, err
@@ -302,11 +311,17 @@ func recordTransferTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInpu
 		return nil, err
 	}
 
+	providerStatus := input.Status
 	status := input.Status
 	failureReason := input.FailureReason
-	if status == TransferStatusSucceeded && input.Direction == TransferDirectionOutbound && input.ReversalOfTransferID == "" && account.Balance.AvailableMinor < input.AmountMinor {
+	if customerInitiatedOutbound(input) && !canUseAvailableBalance(account.Account, account.Balance.AvailableMinor, input.AmountMinor) {
 		status = TransferStatusFailed
 		failureReason = "insufficient_funds"
+	}
+	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	if status == TransferStatusSucceeded && wouldCreateReversalDeficit(account.Account, account.Balance, input) {
+		ledgerStatus = LedgerStatusReversalDeficit
+		reconciliationStatus = ReconciliationStatusManualReview
 	}
 
 	transferID := newID()
@@ -325,10 +340,7 @@ func recordTransferTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInpu
 	}
 
 	if input.ProviderEventID != "" {
-		if _, err = tx.ExecContext(ctx, `
-INSERT INTO provider_events (id, institution_id, provider, provider_event_id, provider_reference, transfer_id, created_at)
-VALUES ($1, $2, $3, $4, $5, NULL, $6)`,
-			newID(), input.InstitutionID, input.Provider, input.ProviderEventID, input.ProviderReference, now); err != nil {
+		if err = insertProviderEventTx(ctx, tx, input, "", now); err != nil {
 			if isUniqueViolation(err) {
 				return getTransferByProviderEventTx(ctx, tx, input.InstitutionID, input.Provider, input.ProviderEventID)
 			}
@@ -338,7 +350,7 @@ VALUES ($1, $2, $3, $4, $5, NULL, $6)`,
 
 	var journalEntryID *string
 	if status == TransferStatusSucceeded {
-		journalID, err := postJournalTx(ctx, tx, input, transferID, now)
+		journalID, err := postJournalTx(ctx, tx, input, transferID, now, postingBalanceOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -351,6 +363,9 @@ VALUES ($1, $2, $3, $4, $5, NULL, $6)`,
 		AccountID:            input.AccountID,
 		Direction:            input.Direction,
 		Status:               status,
+		ProviderStatus:       providerStatus,
+		LedgerStatus:         ledgerStatus,
+		ReconciliationStatus: reconciliationStatus,
 		AmountMinor:          input.AmountMinor,
 		CurrencyID:           input.CurrencyID,
 		IdempotencyKey:       input.IdempotencyKey,
@@ -366,12 +381,17 @@ VALUES ($1, $2, $3, $4, $5, NULL, $6)`,
 	}
 
 	if _, err = tx.NamedExecContext(ctx, `
-INSERT INTO transfers (id, institution_id, account_id, direction, status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, failure_reason, narration, created_at, updated_at)
-VALUES (:id, :institution_id, :account_id, :direction, :status, :amount_minor, :currency_id, :idempotency_key, :provider, :provider_reference, :provider_event_id, :journal_entry_id, :reversal_of_transfer_id, :failure_reason, :narration, :created_at, :updated_at)`, transfer); err != nil {
+INSERT INTO transfers (id, institution_id, account_id, direction, status, provider_status, ledger_status, reconciliation_status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, failure_reason, narration, created_at, updated_at)
+VALUES (:id, :institution_id, :account_id, :direction, :status, :provider_status, :ledger_status, :reconciliation_status, :amount_minor, :currency_id, :idempotency_key, :provider, :provider_reference, :provider_event_id, :journal_entry_id, :reversal_of_transfer_id, :failure_reason, :narration, :created_at, :updated_at)`, transfer); err != nil {
 		if isUniqueViolation(err) {
 			return getTransferByIdempotencyTx(ctx, tx, input.InstitutionID, input.IdempotencyKey)
 		}
 		return nil, err
+	}
+	if status == TransferStatusPending && input.Direction == TransferDirectionOutbound && input.ReversalOfTransferID == "" {
+		if err = createHoldTx(ctx, tx, transfer, now); err != nil {
+			return nil, err
+		}
 	}
 	if input.ProviderEventID != "" {
 		if _, err = tx.ExecContext(ctx, `UPDATE provider_events SET transfer_id = $1 WHERE institution_id = $2 AND provider = $3 AND provider_event_id = $4`, transfer.ID, input.InstitutionID, input.Provider, input.ProviderEventID); err != nil {
@@ -379,6 +399,113 @@ VALUES (:id, :institution_id, :account_id, :direction, :status, :amount_minor, :
 		}
 	}
 	return &transfer, nil
+}
+
+func settlePendingTransferTx(ctx context.Context, tx *sqlx.Tx, pending Transfer, input RecordTransferInput) (*Transfer, error) {
+	if pending.Direction != input.Direction || pending.AccountID != input.AccountID || pending.AmountMinor != input.AmountMinor || pending.CurrencyID != input.CurrencyID {
+		return nil, ErrConflict
+	}
+	account, err := lockAccountBalanceTx(ctx, tx, pending.InstitutionID, pending.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = lockAccountBalanceTx(ctx, tx, pending.InstitutionID, input.ClearingAccountID); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	if input.ProviderEventID != "" {
+		if err = insertProviderEventTx(ctx, tx, input, pending.ID, now); err != nil {
+			if isUniqueViolation(err) {
+				return getTransferByProviderEventTx(ctx, tx, input.InstitutionID, input.Provider, input.ProviderEventID)
+			}
+			return nil, err
+		}
+	}
+
+	status := input.Status
+	failureReason := input.FailureReason
+	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	var journalEntryID *string
+
+	switch status {
+	case TransferStatusSucceeded:
+		if customerInitiatedOutbound(input) && !account.AllowNegative {
+			if _, err = getActiveHoldForTransferTx(ctx, tx, pending.InstitutionID, pending.ID); err != nil {
+				return nil, err
+			}
+		}
+		if wouldCreateReversalDeficit(account.Account, account.Balance, input) {
+			ledgerStatus = LedgerStatusReversalDeficit
+			reconciliationStatus = ReconciliationStatusManualReview
+		}
+		options := postingBalanceOptions{}
+		if pending.Direction == TransferDirectionOutbound && pending.ReversalOfTransferID == nil {
+			options.HeldAccountID = pending.AccountID
+		}
+		journalID, err := postJournalTx(ctx, tx, input, pending.ID, now, options)
+		if err != nil {
+			return nil, err
+		}
+		journalEntryID = &journalID
+		if options.HeldAccountID != "" {
+			if err = consumeHoldTx(ctx, tx, pending.InstitutionID, pending.ID, now); err != nil {
+				return nil, err
+			}
+		}
+	case TransferStatusFailed:
+		if pending.Direction == TransferDirectionOutbound && pending.ReversalOfTransferID == nil {
+			if err = releaseHoldTx(ctx, tx, pending.InstitutionID, pending.ID, now); err != nil {
+				return nil, err
+			}
+		}
+	default:
+		return nil, ErrInvalidRequest
+	}
+
+	var providerEventID *string
+	if input.ProviderEventID != "" {
+		providerEventID = &input.ProviderEventID
+	} else {
+		providerEventID = pending.ProviderEventID
+	}
+	var failure *string
+	if failureReason != "" {
+		failure = &failureReason
+	}
+	narration := strings.TrimSpace(input.Narration)
+	if narration == "" {
+		narration = pending.Narration
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+UPDATE transfers
+SET status = $1,
+    provider_status = $2,
+    ledger_status = $3,
+    reconciliation_status = $4,
+    provider_event_id = $5,
+    journal_entry_id = $6,
+    failure_reason = $7,
+    narration = $8,
+    updated_at = $9
+WHERE institution_id = $10 AND id = $11`,
+		status, input.Status, ledgerStatus, reconciliationStatus, providerEventID, journalEntryID, failure, narration, now, pending.InstitutionID, pending.ID); err != nil {
+		return nil, err
+	}
+	return getTransferTx(ctx, tx, pending.InstitutionID, pending.ID)
+}
+
+func insertProviderEventTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInput, transferID string, now time.Time) error {
+	var linkedTransferID *string
+	if transferID != "" {
+		linkedTransferID = &transferID
+	}
+	_, err := tx.ExecContext(ctx, `
+INSERT INTO provider_events (id, institution_id, provider, provider_event_id, provider_reference, transfer_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		newID(), input.InstitutionID, input.Provider, input.ProviderEventID, input.ProviderReference, linkedTransferID, now)
+	return err
 }
 
 type lockedAccountBalance struct {
@@ -397,7 +524,11 @@ func lockAccountBalanceTx(ctx context.Context, tx *sqlx.Tx, institutionID, accou
 	return &out, nil
 }
 
-func postJournalTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInput, transferID string, now time.Time) (string, error) {
+type postingBalanceOptions struct {
+	HeldAccountID string
+}
+
+func postJournalTx(ctx context.Context, tx *sqlx.Tx, input RecordTransferInput, transferID string, now time.Time, options postingBalanceOptions) (string, error) {
 	journalID := newID()
 	entryDirection := input.Direction
 	if input.ReversalOfTransferID != "" {
@@ -430,14 +561,19 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			newID(), input.InstitutionID, journalID, posting.accountID, posting.direction, input.AmountMinor, input.CurrencyID, now); err != nil {
 			return "", err
 		}
-		if err := applyPostingBalanceTx(ctx, tx, input.InstitutionID, posting.accountID, posting.direction, input.AmountMinor, journalID, now); err != nil {
+		availableDeltaOverride := false
+		availableDelta := int64(0)
+		if posting.accountID == options.HeldAccountID {
+			availableDeltaOverride = true
+		}
+		if err := applyPostingBalanceTx(ctx, tx, input.InstitutionID, posting.accountID, posting.direction, input.AmountMinor, journalID, now, availableDeltaOverride, availableDelta); err != nil {
 			return "", err
 		}
 	}
 	return journalID, nil
 }
 
-func applyPostingBalanceTx(ctx context.Context, tx *sqlx.Tx, institutionID, accountID, direction string, amountMinor int64, journalID string, now time.Time) error {
+func applyPostingBalanceTx(ctx context.Context, tx *sqlx.Tx, institutionID, accountID, direction string, amountMinor int64, journalID string, now time.Time, availableDeltaOverride bool, availableDelta int64) error {
 	var normalBalance string
 	if err := tx.GetContext(ctx, &normalBalance, `SELECT normal_balance FROM accounts WHERE institution_id = $1 AND id = $2`, institutionID, accountID); err != nil {
 		return normalizeSQLError(err)
@@ -446,13 +582,16 @@ func applyPostingBalanceTx(ctx context.Context, tx *sqlx.Tx, institutionID, acco
 	if (normalBalance == NormalBalanceDebit && direction == PostingDebit) || (normalBalance == NormalBalanceCredit && direction == PostingCredit) {
 		delta = amountMinor
 	}
+	if !availableDeltaOverride {
+		availableDelta = delta
+	}
 	_, err := tx.ExecContext(ctx, `
 UPDATE account_balances
 SET available_minor = available_minor + $1,
-    ledger_minor = ledger_minor + $1,
-    last_journal_entry_id = $2,
-    updated_at = $3
-WHERE institution_id = $4 AND account_id = $5`, delta, journalID, now, institutionID, accountID)
+    ledger_minor = ledger_minor + $2,
+    last_journal_entry_id = $3,
+    updated_at = $4
+WHERE institution_id = $5 AND account_id = $6`, availableDelta, delta, journalID, now, institutionID, accountID)
 	return err
 }
 
@@ -475,6 +614,20 @@ func getTransferByProviderEventTx(ctx context.Context, tx *sqlx.Tx, institutionI
 	SELECT transfer_id FROM provider_events
 	WHERE institution_id = $1 AND provider = $2 AND provider_event_id = $3 AND transfer_id IS NOT NULL
  )`, institutionID, provider, providerEventID)
+	return &transfer, normalizeSQLError(err)
+}
+
+func getPendingTransferByProviderReferenceTx(ctx context.Context, tx *sqlx.Tx, institutionID, provider, providerReference, direction string) (*Transfer, error) {
+	var transfer Transfer
+	err := tx.GetContext(ctx, &transfer, transferSelectSQL+`
+ WHERE institution_id = $1
+   AND provider = $2
+   AND provider_reference = $3
+   AND direction = $4
+   AND status = 'pending'
+ ORDER BY created_at
+ LIMIT 1
+ FOR UPDATE`, institutionID, provider, providerReference, direction)
 	return &transfer, normalizeSQLError(err)
 }
 
