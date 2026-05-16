@@ -1,12 +1,13 @@
 package httpmiddleware
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"runtime/debug"
+	"strings"
 
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/render"
 )
 
 func Recover(handler http.Handler) http.Handler {
@@ -25,12 +26,24 @@ func Recover(handler http.Handler) http.Handler {
 				log.Printf("Recovered from panic: %v\n%s", err, string(debug.Stack()))
 				log.Printf("Request: %s %s\n", r.Method, r.URL.RequestURI())
 
-				// TODO: use default error handler
-				render.Status(r, http.StatusInternalServerError)
-				render.JSON(w, r, map[string]string{
-					"error": http.StatusText(http.StatusInternalServerError),
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"message":    "internal_server_error",
+					"request_id": requestID(r),
 				})
 			}
 		}()
+		handler.ServeHTTP(w, r)
 	})
+}
+
+func requestID(r *http.Request) string {
+	if requestID := strings.TrimSpace(middleware.GetReqID(r.Context())); requestID != "" {
+		return requestID
+	}
+	if requestID := strings.TrimSpace(r.Header.Get("X-Request-ID")); requestID != "" {
+		return requestID
+	}
+	return "unknown"
 }

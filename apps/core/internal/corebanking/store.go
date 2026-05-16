@@ -17,7 +17,7 @@ type AccountRepository interface {
 	ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error)
 	GetAccount(ctx context.Context, institutionID, accountID string) (*Account, error)
 	GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error)
-	ListTransactions(ctx context.Context, institutionID, accountID string) ([]Transaction, error)
+	ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error)
 }
 
 type LedgerRepository interface {

@@ -54,6 +54,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)`,
 		{accountID: debitAccountID, direction: PostingDebit},
 		{accountID: creditAccountID, direction: PostingCredit},
 	}
+	normalBalances, err := r.normalBalances(ctx, tx, input.InstitutionID, debitAccountID, creditAccountID)
+	if err != nil {
+		return "", err
+	}
 	for _, posting := range postings {
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO postings (id, institution_id, journal_entry_id, account_id, direction, amount_minor, currency_id, created_at)
@@ -66,18 +70,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		if posting.accountID == options.HeldAccountID {
 			availableDeltaOverride = true
 		}
-		if err := r.applyPostingBalance(ctx, tx, input.InstitutionID, posting.accountID, posting.direction, input.AmountMinor, journalID, now, availableDeltaOverride, availableDelta); err != nil {
+		if err := r.applyPostingBalance(ctx, tx, input.InstitutionID, posting.accountID, normalBalances[posting.accountID], posting.direction, input.AmountMinor, journalID, now, availableDeltaOverride, availableDelta); err != nil {
 			return "", err
 		}
 	}
 	return journalID, nil
 }
 
-func (r *sqlLedgerRepository) applyPostingBalance(ctx context.Context, tx TxRunner, institutionID, accountID, direction string, amountMinor int64, journalID string, now time.Time, availableDeltaOverride bool, availableDelta int64) error {
-	var normalBalance string
-	if err := tx.GetContext(ctx, &normalBalance, `SELECT normal_balance FROM accounts WHERE institution_id = $1 AND id = $2`, institutionID, accountID); err != nil {
-		return normalizeSQLError(err)
-	}
+func (r *sqlLedgerRepository) applyPostingBalance(ctx context.Context, tx TxRunner, institutionID, accountID, normalBalance, direction string, amountMinor int64, journalID string, now time.Time, availableDeltaOverride bool, availableDelta int64) error {
 	delta := -amountMinor
 	if (normalBalance == NormalBalanceDebit && direction == PostingDebit) || (normalBalance == NormalBalanceCredit && direction == PostingCredit) {
 		delta = amountMinor
@@ -93,4 +93,28 @@ SET available_minor = available_minor + $1,
     updated_at = $4
 WHERE institution_id = $5 AND account_id = $6`, availableDelta, delta, journalID, now, institutionID, accountID)
 	return err
+}
+
+func (r *sqlLedgerRepository) normalBalances(ctx context.Context, tx TxRunner, institutionID, firstAccountID, secondAccountID string) (map[string]string, error) {
+	rows := []struct {
+		ID            string `db:"id"`
+		NormalBalance string `db:"normal_balance"`
+	}{}
+	if err := tx.SelectContext(ctx, &rows, `
+SELECT id, normal_balance
+FROM accounts
+WHERE institution_id = $1 AND id IN ($2, $3)`, institutionID, firstAccountID, secondAccountID); err != nil {
+		return nil, err
+	}
+	balances := make(map[string]string, len(rows))
+	for _, row := range rows {
+		balances[row.ID] = row.NormalBalance
+	}
+	if _, ok := balances[firstAccountID]; !ok {
+		return nil, ErrNotFound
+	}
+	if _, ok := balances[secondAccountID]; !ok {
+		return nil, ErrNotFound
+	}
+	return balances, nil
 }

@@ -58,7 +58,14 @@ var (
 	ErrNotFound       = errors.New("not found")
 	ErrInsufficient   = errors.New("insufficient funds")
 	ErrInvalidRequest = errors.New("invalid request")
+	ErrUnauthorized   = errors.New("unauthorized")
+	ErrForbidden      = errors.New("forbidden")
 	ErrConflict       = errors.New("conflict")
+)
+
+const (
+	DefaultTransactionHistoryLimit = 100
+	MaxTransactionHistoryLimit     = 200
 )
 
 type SeedResult struct {
@@ -207,6 +214,11 @@ type Transaction struct {
 	CurrencyID     string    `json:"currency_id" db:"currency_id"`
 	Narration      string    `json:"narration" db:"narration"`
 	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+}
+
+type ListTransactionsOptions struct {
+	Limit           int
+	BeforeCreatedAt *time.Time
 }
 
 type TransferRequest struct {

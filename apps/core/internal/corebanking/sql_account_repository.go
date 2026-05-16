@@ -2,6 +2,7 @@ package corebanking
 
 import (
 	"context"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -30,8 +31,13 @@ func (r *sqlAccountRepository) GetBalance(ctx context.Context, institutionID, ac
 	return &balance, normalizeSQLError(err)
 }
 
-func (r *sqlAccountRepository) ListTransactions(ctx context.Context, institutionID, accountID string) ([]Transaction, error) {
+func (r *sqlAccountRepository) ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
+	options = normalizeListTransactionsOptions(options)
 	var txns []Transaction
+	var beforeCreatedAt *time.Time
+	if options.BeforeCreatedAt != nil && !options.BeforeCreatedAt.IsZero() {
+		beforeCreatedAt = options.BeforeCreatedAt
+	}
 	err := r.db.SelectContext(ctx, &txns, `
 SELECT
 	t.id::text || ':' || COALESCE(p.id::text, 'pending') AS id,
@@ -54,7 +60,9 @@ FROM transfers t
 JOIN accounts a ON a.institution_id = t.institution_id AND a.id = t.account_id
 LEFT JOIN postings p ON p.institution_id = t.institution_id AND p.journal_entry_id = t.journal_entry_id AND p.account_id = t.account_id
 WHERE t.institution_id = $1 AND t.account_id = $2
-ORDER BY t.created_at DESC`, institutionID, accountID)
+  AND ($3::timestamptz IS NULL OR t.created_at < $3)
+ORDER BY t.created_at DESC, t.id DESC
+LIMIT $4`, institutionID, accountID, beforeCreatedAt, options.Limit)
 	return txns, err
 }
 

@@ -4,7 +4,7 @@ import (
 	"lenz-core/apps/auth/authn"
 	"lenz-core/apps/core/internal/corebanking"
 	"lenz-core/apps/core/server"
-	"os"
+	"log"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/joho/godotenv"
@@ -21,9 +21,13 @@ func main() {
 
 func routes(r *chi.Mux, deps server.Deps) {
 	store := corebanking.NewSQLStore(deps.Cfg.DBConn)
+	demoRoutes, err := corebanking.DemoRoutesEnabled()
+	if err != nil {
+		log.Fatal(err)
+	}
 	handler := corebanking.NewHandler(
 		corebanking.NewService(store, corebanking.NewMockNIPProvider()),
-		corebanking.WithDemoRoutes(os.Getenv("LENZ_DEMO_MODE") == "true"),
+		corebanking.WithDemoRoutes(demoRoutes),
 	)
 	handler.Routes(r)
 }

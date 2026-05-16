@@ -43,6 +43,17 @@ func TestSuccessfulTransferOutPostsBalancedLedger(t *testing.T) {
 	assertJournalBalanced(t, store, transfer)
 }
 
+func TestPostingDeltasRespectCreditAndDebitNormalBalances(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 80000, IdempotencyKey: "normal-in", ProviderEventID: "evt-normal-in"})
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 80000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoClearingAccountID, 80000)
+
+	mockOutbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 30000, IdempotencyKey: "normal-out"})
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 50000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoClearingAccountID, 50000)
+}
+
 func TestPendingOutboundCreatesHoldAndReducesAvailable(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "hold-fund", ProviderEventID: "evt-hold-fund"})
@@ -185,7 +196,7 @@ func TestPendingTransferAppearsInHistory(t *testing.T) {
 		Status:          TransferStatusPending,
 	})
 
-	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID)
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +317,7 @@ func TestTenantScopingPreventsCrossTenantReads(t *testing.T) {
 	if _, err := svc.GetBalance(ctx, "99999999-9999-9999-9999-999999999999", DemoCustomerAccountID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected cross-tenant balance read to fail, got %v", err)
 	}
-	if _, err := svc.GetTransactions(ctx, "99999999-9999-9999-9999-999999999999", DemoCustomerAccountID); err != nil {
+	if _, err := svc.GetTransactions(ctx, "99999999-9999-9999-9999-999999999999", DemoCustomerAccountID, ListTransactionsOptions{}); err != nil {
 		t.Fatalf("empty cross-tenant history should not error: %v", err)
 	}
 }
@@ -317,7 +328,7 @@ func TestProductionReadsRequireInstitutionScope(t *testing.T) {
 	if _, err := svc.GetBalance(ctx, "", DemoCustomerAccountID); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected missing institution scope to fail, got %v", err)
 	}
-	if _, err := svc.GetTransactions(ctx, "", DemoCustomerAccountID); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := svc.GetTransactions(ctx, "", DemoCustomerAccountID, ListTransactionsOptions{}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected missing institution scope to fail for history, got %v", err)
 	}
 	if _, err := svc.ListTransfers(ctx, ""); !errors.Is(err, ErrInvalidRequest) {
@@ -330,7 +341,7 @@ func TestTransactionHistoryComesFromLenzRecords(t *testing.T) {
 	inbound := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 12000, IdempotencyKey: "hist-in", ProviderEventID: "evt-hist-in"})
 	outbound := mockOutbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 2000, IdempotencyKey: "hist-out"})
 
-	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID)
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,6 +357,78 @@ func TestTransactionHistoryComesFromLenzRecords(t *testing.T) {
 			t.Fatalf("succeeded history row must come from Lenz journal/posting record: %+v", txn)
 		}
 	}
+}
+
+func TestTransactionHistoryDefaultsToOneHundredAndOrdersNewestFirst(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	base := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	var newestID string
+	for i := 0; i < 105; i++ {
+		transfer := mockInbound(t, svc, ctx, TransferRequest{
+			AccountID:       DemoCustomerAccountID,
+			AmountMinor:     1000 + int64(i),
+			IdempotencyKey:  "hist-default-in-" + uuid.NewString(),
+			ProviderEventID: "hist-default-event-" + uuid.NewString(),
+		})
+		createdAt := base.Add(time.Duration(i) * time.Minute)
+		setTransferCreatedAt(t, store, transfer.ID, createdAt)
+		if i == 104 {
+			newestID = transfer.ID
+		}
+	}
+
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != DefaultTransactionHistoryLimit {
+		t.Fatalf("expected default limit %d, got %d", DefaultTransactionHistoryLimit, len(history))
+	}
+	if history[0].TransferID != newestID {
+		t.Fatalf("expected newest transaction first, got %+v", history[0])
+	}
+	assertHistoryNewestFirst(t, history)
+}
+
+func TestTransactionHistoryCapsLimitAndPaginatesBeforeCreatedAt(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	base := time.Date(2026, 5, 16, 13, 0, 0, 0, time.UTC)
+	for i := 0; i < 205; i++ {
+		transfer := mockInbound(t, svc, ctx, TransferRequest{
+			AccountID:       DemoCustomerAccountID,
+			AmountMinor:     2000 + int64(i),
+			IdempotencyKey:  "hist-page-in-" + uuid.NewString(),
+			ProviderEventID: "hist-page-event-" + uuid.NewString(),
+		})
+		setTransferCreatedAt(t, store, transfer.ID, base.Add(time.Duration(i)*time.Minute))
+	}
+
+	capped, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{Limit: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != MaxTransactionHistoryLimit {
+		t.Fatalf("expected limit capped at %d, got %d", MaxTransactionHistoryLimit, len(capped))
+	}
+	assertHistoryNewestFirst(t, capped)
+
+	cursor := capped[49].CreatedAt
+	page, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{
+		Limit:           25,
+		BeforeCreatedAt: &cursor,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 25 {
+		t.Fatalf("expected 25 paged rows, got %d", len(page))
+	}
+	for _, txn := range page {
+		if !txn.CreatedAt.Before(cursor) {
+			t.Fatalf("paged row was not before cursor %s: %+v", cursor, txn)
+		}
+	}
+	assertHistoryNewestFirst(t, page)
 }
 
 func TestMockOutboundCallsProviderAdapter(t *testing.T) {
@@ -528,6 +611,24 @@ func assertJournalBalanced(t *testing.T, store *memoryStore, transfer *Transfer)
 	}
 }
 
+func assertHistoryNewestFirst(t *testing.T, history []Transaction) {
+	t.Helper()
+	for i := 1; i < len(history); i++ {
+		if history[i].CreatedAt.After(history[i-1].CreatedAt) {
+			t.Fatalf("history is not ordered newest first at %d: %s after %s", i, history[i].CreatedAt, history[i-1].CreatedAt)
+		}
+	}
+}
+
+func setTransferCreatedAt(t *testing.T, store *memoryStore, transferID string, createdAt time.Time) {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	transfer := store.transfers[transferID]
+	transfer.CreatedAt = createdAt
+	store.transfers[transferID] = transfer
+}
+
 type memoryStore struct {
 	mu             sync.Mutex
 	institutions   map[string]Institution
@@ -654,12 +755,16 @@ func (m *memoryStore) GetJournal(ctx context.Context, institutionID, journalEntr
 	return &JournalWithPostings{JournalEntry: journal, Postings: append([]Posting(nil), m.postings[journalEntryID]...), Balanced: journal.TotalDebitMinor == journal.TotalCreditMinor}, nil
 }
 
-func (m *memoryStore) ListTransactions(ctx context.Context, institutionID, accountID string) ([]Transaction, error) {
+func (m *memoryStore) ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	options = normalizeListTransactionsOptions(options)
 	var txns []Transaction
 	for _, transfer := range m.transfers {
 		if transfer.InstitutionID != institutionID || transfer.AccountID != accountID {
+			continue
+		}
+		if options.BeforeCreatedAt != nil && !transfer.CreatedAt.Before(*options.BeforeCreatedAt) {
 			continue
 		}
 		signed := int64(0)
@@ -678,6 +783,9 @@ func (m *memoryStore) ListTransactions(ctx context.Context, institutionID, accou
 		txns = append(txns, Transaction{ID: transfer.ID, TransferID: transfer.ID, JournalEntryID: transfer.JournalEntryID, AccountID: accountID, Direction: transfer.Direction, Status: transfer.Status, AmountMinor: transfer.AmountMinor, SignedMinor: signed, CurrencyID: transfer.CurrencyID, Narration: transfer.Narration, CreatedAt: transfer.CreatedAt})
 	}
 	sort.Slice(txns, func(i, j int) bool { return txns[i].CreatedAt.After(txns[j].CreatedAt) })
+	if len(txns) > options.Limit {
+		txns = txns[:options.Limit]
+	}
 	return txns, nil
 }
 

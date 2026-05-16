@@ -104,9 +104,9 @@ func (s *Server) setGlobalMiddlewares() {
 		_, _ = w.Write([]byte(`{"message": "Endpoint does not exist"}`))
 	})
 
-	s.router.Use(middleware.Recoverer)
-	s.router.Use(s.cors.Handler)
 	s.router.Use(middleware.RequestID)
+	s.router.Use(httpmiddleware.Recover)
+	s.router.Use(s.cors.Handler)
 	s.router.Use(middleware.RealIP) // TODO: implement realip in httpmiddleware
 	// s.router.Use(httpmiddleware.RealIPWithContext)
 	s.router.Use(httpmiddleware.BodyLimit)
@@ -126,10 +126,14 @@ func (s *Server) setGlobalMiddlewares() {
 
 func defaultServerConf() *Server {
 	config := config.New()
+	corsMiddleware, err := newCORSFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalln(err)
+	}
 	return &Server{
 		cfg:    config,
 		router: chi.NewRouter(),
-		cors:   cors.New(cors.Options{}), // set cors
+		cors:   corsMiddleware,
 	}
 }
 

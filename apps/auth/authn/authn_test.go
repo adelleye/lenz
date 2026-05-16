@@ -1,6 +1,7 @@
 package authn
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,6 +30,53 @@ func TestRequiredAuthAcceptsConfiguredDevelopmentToken(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestRequiredAuthAttachesDevelopmentPrincipal(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", "99999999-9999-9999-9999-999999999999")
+	t.Setenv("LENZ_DEV_AUTH_ROLES", "operator, auditor")
+	t.Setenv("LENZ_DEV_AUTH_SCOPES", "accounts:read, transfers:write")
+
+	handler := Authentication(AuthRequiredScope)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := PrincipalFromRequest(r)
+		if !ok {
+			t.Fatal("expected principal on request context")
+		}
+		_ = json.NewEncoder(w).Encode(principal)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/demo/balance", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var principal Principal
+	if err := json.Unmarshal(rec.Body.Bytes(), &principal); err != nil {
+		t.Fatal(err)
+	}
+	if principal.InstitutionID != "99999999-9999-9999-9999-999999999999" {
+		t.Fatalf("wrong institution scope: %+v", principal)
+	}
+	if len(principal.Roles) != 2 || principal.Roles[0] != "operator" || len(principal.Scopes) != 2 || principal.Scopes[1] != "transfers:write" {
+		t.Fatalf("wrong roles/scopes: %+v", principal)
+	}
+}
+
+func TestRequiredAuthRejectsQueryStringAccessToken(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	handler := Authentication(AuthRequiredScope)(okHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/demo/balance?access_token=test-token", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected query token to be rejected with 401, got %d", rec.Code)
 	}
 }
 

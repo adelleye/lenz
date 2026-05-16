@@ -14,6 +14,15 @@ const (
 	AuthOptionalScope AuthScope = "AuthOptional.scopes"
 )
 
+const (
+	EnvDevAuthToken     = "LENZ_DEV_AUTH_TOKEN"
+	EnvDevInstitutionID = "LENZ_DEV_INSTITUTION_ID"
+	EnvDevAuthRoles     = "LENZ_DEV_AUTH_ROLES"
+	EnvDevAuthScopes    = "LENZ_DEV_AUTH_SCOPES"
+
+	defaultDevInstitutionID = "11111111-1111-1111-1111-111111111111"
+)
+
 func CoreAuthn(scopes ...AuthScope) {
 
 }
@@ -26,16 +35,18 @@ func Authentication(scopes ...AuthScope) func(http.Handler) http.Handler {
 				return
 			}
 
-			token := VerifyTokens(r, getTokenFromQuery, getTokenFromHeader)
+			token := VerifyTokens(r, getTokenFromHeader)
 			if !requiresAuth(scopes) && token == "" {
 				h.ServeHTTP(w, r)
 				return
 			}
-			if !validDevelopmentToken(token) {
+			principal, ok := developmentPrincipal(token)
+			if !ok {
 				writeUnauthorized(w)
 				return
 			}
 
+			r = RequestWithPrincipal(r, principal)
 			h.ServeHTTP(w, r)
 		})
 	}
@@ -51,17 +62,15 @@ func VerifyTokens(r *http.Request, fn ...func(r *http.Request) string) string {
 	return ""
 }
 
-func getTokenFromQuery(r *http.Request) string {
-	return r.URL.Query().Get("access_token")
-}
-
 func getTokenFromHeader(r *http.Request) string {
-	bearer := r.Header.Get("Authorization")
-	if len(bearer) > 7 && strings.ToUpper(bearer[0:6]) == "BEARER" {
-		return bearer[7:]
+	value := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(value) < len("Bearer ") || !strings.EqualFold(value[:len("Bearer")], "Bearer") {
+		return ""
 	}
-
-	return ""
+	if value[len("Bearer")] != ' ' {
+		return ""
+	}
+	return strings.TrimSpace(value[len("Bearer "):])
 }
 
 func requiresAuth(scopes []AuthScope) bool {
@@ -74,8 +83,38 @@ func requiresAuth(scopes []AuthScope) bool {
 }
 
 func validDevelopmentToken(token string) bool {
-	expected := strings.TrimSpace(os.Getenv("LENZ_DEV_AUTH_TOKEN"))
+	expected := strings.TrimSpace(os.Getenv(EnvDevAuthToken))
 	return expected != "" && token == expected
+}
+
+func developmentPrincipal(token string) (Principal, bool) {
+	if !validDevelopmentToken(token) {
+		return Principal{}, false
+	}
+	institutionID := strings.TrimSpace(os.Getenv(EnvDevInstitutionID))
+	if institutionID == "" {
+		institutionID = defaultDevInstitutionID
+	}
+	return Principal{
+		InstitutionID: institutionID,
+		Roles:         envCSV(EnvDevAuthRoles, []string{"developer"}),
+		Scopes:        envCSV(EnvDevAuthScopes, []string{"corebanking:read", "corebanking:write"}),
+	}, true
+}
+
+func envCSV(name string, fallback []string) []string {
+	raw := os.Getenv(name)
+	var out []string
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string(nil), fallback...)
+	}
+	return out
 }
 
 func isPublicPath(path string) bool {

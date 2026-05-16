@@ -3,6 +3,8 @@ package corebanking
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"lenz-core/apps/auth/authn"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,7 +27,7 @@ func TestDemoRoutesAreDisabledByDefault(t *testing.T) {
 	}
 }
 
-func TestMockRoutesRequireInstitutionHeader(t *testing.T) {
+func TestMockRoutesRequireAuthenticatedPrincipal(t *testing.T) {
 	_, svc, _ := newTestService(t)
 	router := chi.NewRouter()
 	NewHandler(svc, WithDemoRoutes(true)).Routes(router)
@@ -37,12 +39,12 @@ func TestMockRoutesRequireInstitutionHeader(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected missing institution scope to return 400, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing principal to return 401, got %d", rec.Code)
 	}
 }
 
-func TestMockRoutesRejectInstitutionMismatch(t *testing.T) {
+func TestMockRoutesRejectBodyInstitutionMismatch(t *testing.T) {
 	_, svc, _ := newTestService(t)
 	router := chi.NewRouter()
 	NewHandler(svc, WithDemoRoutes(true)).Routes(router)
@@ -50,13 +52,110 @@ func TestMockRoutesRejectInstitutionMismatch(t *testing.T) {
 	body := `{"institution_id":"99999999-9999-9999-9999-999999999999","account_id":"` + DemoCustomerAccountID + `","amount_minor":1000}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/transfers/mock/outbound", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Institution-ID", DemoInstitutionID)
 	req.Header.Set("Idempotency-Key", "institution-mismatch")
+	req = withTestPrincipal(req, DemoInstitutionID)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected institution mismatch to return 400, got %d", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected institution mismatch to return 403, got %d", rec.Code)
+	}
+}
+
+func TestCoreRoutesDeriveInstitutionFromAuthenticatedPrincipal(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected principal-scoped request without X-Institution-ID to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var balance AccountBalance
+	if err := json.Unmarshal(rec.Body.Bytes(), &balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance.InstitutionID != DemoInstitutionID {
+		t.Fatalf("handler did not use principal institution scope: %+v", balance)
+	}
+}
+
+func TestMismatchedInstitutionHeaderIsRejected(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched X-Institution-ID to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPrincipalCannotMutateAnotherInstitution(t *testing.T) {
+	store := newMemoryStore()
+	provider := &spyTransferProvider{}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc, WithDemoRoutes(true)).Routes(router)
+
+	body := `{"institution_id":"99999999-9999-9999-9999-999999999999","account_id":"` + DemoCustomerAccountID + `","amount_minor":1000}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/transfers/mock/outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "cross-tenant-mutate")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected cross-tenant mutation attempt to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if provider.initiateCalls != 0 {
+		t.Fatalf("cross-tenant request should be rejected before provider call, got %d calls", provider.initiateCalls)
+	}
+}
+
+func TestInternalErrorsAreSanitized(t *testing.T) {
+	store := &failingBalanceStore{memoryStore: newMemoryStore()}
+	svc := NewService(store, NewMockNIPProvider())
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+	req.Header.Set("X-Request-ID", "req-test-500")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "database password=secret") {
+		t.Fatalf("raw internal error leaked to client: %s", rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["message"] != "internal_server_error" || body["request_id"] != "req-test-500" {
+		t.Fatalf("unexpected sanitized error body: %+v", body)
 	}
 }
 
@@ -98,8 +197,8 @@ func TestGeneratedMockOutboundRouteCallsService(t *testing.T) {
 	body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"narration":"through generated route"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/transfers/mock/outbound", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Institution-ID", DemoInstitutionID)
 	req.Header.Set("Idempotency-Key", "generated-route-out")
+	req = withTestPrincipal(req, DemoInstitutionID)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -132,8 +231,8 @@ func TestInvalidMockOutboundRequestRejectsBeforeServiceExecution(t *testing.T) {
 	body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":0}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/transfers/mock/outbound", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Institution-ID", DemoInstitutionID)
 	req.Header.Set("Idempotency-Key", "invalid-generated-route")
+	req = withTestPrincipal(req, DemoInstitutionID)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -143,4 +242,20 @@ func TestInvalidMockOutboundRequestRejectsBeforeServiceExecution(t *testing.T) {
 	if provider.initiateCalls != 0 {
 		t.Fatalf("invalid request should be rejected before service/provider execution, got %d provider calls", provider.initiateCalls)
 	}
+}
+
+func withTestPrincipal(req *http.Request, institutionID string) *http.Request {
+	return authn.RequestWithPrincipal(req, authn.Principal{
+		InstitutionID: institutionID,
+		Roles:         []string{"test"},
+		Scopes:        []string{"corebanking:read", "corebanking:write"},
+	})
+}
+
+type failingBalanceStore struct {
+	*memoryStore
+}
+
+func (s *failingBalanceStore) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
+	return nil, errors.New("database password=secret connection failed")
 }

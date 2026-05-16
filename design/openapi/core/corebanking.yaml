@@ -88,6 +88,22 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+          description: Maximum number of transactions to return. Defaults to 100 and is capped at 200.
+        - name: before_created_at
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Return transactions created before this timestamp, ordered newest first.
       responses:
         "200":
           description: Account transaction history.
@@ -258,7 +274,8 @@ components:
     InstitutionID:
       name: X-Institution-ID
       in: header
-      required: true
+      required: false
+      description: Optional consistency check. Protected handlers derive institution scope from the authenticated principal.
       schema:
         type: string
         format: uuid
@@ -286,6 +303,9 @@ components:
       required: [message]
       properties:
         message:
+          type: string
+          minLength: 1
+        request_id:
           type: string
           minLength: 1
 

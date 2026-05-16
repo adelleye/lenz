@@ -55,6 +55,37 @@ go run ./apps/core
 Then follow [docs/TRANSFER_ENGINE_DEMO.md](docs/TRANSFER_ENGINE_DEMO.md) for
 the exact API calls and expected output shape.
 
+## Security-Sensitive Local Configuration
+
+Authenticated local requests use the dev bearer token only:
+
+```sh
+export LENZ_DEV_AUTH_TOKEN='choose-a-local-token'
+export LENZ_DEV_INSTITUTION_ID='11111111-1111-1111-1111-111111111111'
+```
+
+`X-Institution-ID` is optional and is only a consistency check against the
+authenticated principal institution. Do not pass access tokens in query strings.
+
+CORS is explicit. Set allowed browser origins as a comma-separated list:
+
+```sh
+export LENZ_CORS_ALLOWED_ORIGINS='http://localhost:5173,http://127.0.0.1:5173'
+```
+
+Production must configure concrete origins. Wildcard production CORS is rejected
+at startup.
+
+Demo/mock mutation routes are disabled by default. To run the local transfer
+spine demo:
+
+```sh
+export LENZ_DEMO_MODE=true
+export APP_ENV=development
+```
+
+`LENZ_DEMO_MODE=true` fails fast when `APP_ENV` or `ENV` is production.
+
 ## Verification
 
 ```sh

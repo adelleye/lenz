@@ -42,12 +42,12 @@ func (s *Service) GetBalance(ctx context.Context, institutionID, accountID strin
 	return s.store.GetBalance(ctx, institutionID, accountID)
 }
 
-func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID string) ([]Transaction, error) {
+func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
 		return nil, err
 	}
-	return s.store.ListTransactions(ctx, institutionID, accountID)
+	return s.store.ListTransactions(ctx, institutionID, accountID, normalizeListTransactionsOptions(options))
 }
 
 func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error) {
@@ -320,4 +320,14 @@ func institutionIDOrDemo(institutionID string) string {
 		return DemoInstitutionID
 	}
 	return institutionID
+}
+
+func normalizeListTransactionsOptions(options ListTransactionsOptions) ListTransactionsOptions {
+	if options.Limit <= 0 {
+		options.Limit = DefaultTransactionHistoryLimit
+	}
+	if options.Limit > MaxTransactionHistoryLimit {
+		options.Limit = MaxTransactionHistoryLimit
+	}
+	return options
 }

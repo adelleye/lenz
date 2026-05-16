@@ -170,7 +170,7 @@ mkdir -p "$TMP_PARENT"
 TMP_DIR="$(mktemp -d "${TMP_PARENT%/}/lenz-core-demo.XXXXXX")"
 API_LOG="${TMP_DIR}/api.log"
 "$GO_BIN" build -o "${TMP_DIR}/lenz-core-api" ./apps/core
-DATABASE_URL="$DATABASE_URL" PORT="$API_PORT" LENZ_DEMO_MODE=true LENZ_DEV_AUTH_TOKEN="$AUTH_TOKEN" "${TMP_DIR}/lenz-core-api" >"$API_LOG" 2>&1 &
+DATABASE_URL="$DATABASE_URL" PORT="$API_PORT" APP_ENV=development LENZ_DEMO_MODE=true LENZ_DEV_AUTH_TOKEN="$AUTH_TOKEN" LENZ_DEV_INSTITUTION_ID="$INSTITUTION_ID" "${TMP_DIR}/lenz-core-api" >"$API_LOG" 2>&1 &
 API_PID="$!"
 wait_api
 pass "API started successfully"

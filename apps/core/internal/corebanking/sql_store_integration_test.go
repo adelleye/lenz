@@ -184,7 +184,7 @@ func TestSQLStoreTransferSpineIntegration(t *testing.T) {
 		t.Fatalf("expected unrelated idempotency key collision to fail, got %v", err)
 	}
 
-	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID)
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
