@@ -1,6 +1,7 @@
 package corebanking
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"lenz-core/apps/auth/authn"
@@ -10,12 +11,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/render"
 	"github.com/google/uuid"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
-var _ ServerInterface = (*HTTPServer)(nil)
+var _ StrictServerInterface = (*HTTPServer)(nil)
 
 type HTTPServer struct {
 	service    *Service
@@ -39,7 +39,11 @@ func NewHandler(service *Service, options ...HandlerOption) *HTTPServer {
 }
 
 func (h *HTTPServer) Routes(r chi.Router) {
-	HandlerWithOptions(h, ChiServerOptions{
+	strictHandler := NewStrictHandlerWithOptions(h, nil, StrictHTTPServerOptions{
+		RequestErrorHandlerFunc:  openAPIRequestError,
+		ResponseErrorHandlerFunc: openAPIResponseError,
+	})
+	HandlerWithOptions(strictHandler, ChiServerOptions{
 		BaseRouter:       r,
 		ErrorHandlerFunc: openAPIRequestError,
 	})
@@ -50,118 +54,143 @@ func openAPIRequestError(w http.ResponseWriter, r *http.Request, err error) {
 	writeError(w, http.StatusBadRequest, "invalid_request")
 }
 
-func (h *HTTPServer) SeedDemo(w http.ResponseWriter, r *http.Request) {
+func openAPIResponseError(w http.ResponseWriter, r *http.Request, err error) {
+	respond(w, r, nil, err)
+}
+
+func (h *HTTPServer) SeedDemo(ctx context.Context, request SeedDemoRequestObject) (SeedDemoResponseObject, error) {
 	if !h.demoRoutes {
-		writeError(w, http.StatusNotFound, "not_found")
-		return
+		return nil, ErrNotFound
 	}
-	if _, err := institutionScopeString(r, DemoInstitutionID); err != nil {
-		respond(w, r, nil, err)
-		return
+	if _, err := institutionScopeString(ctx, DemoInstitutionID); err != nil {
+		return nil, err
 	}
-	result, err := h.service.SeedDemo(r.Context())
-	respond(w, r, result, err)
-}
-
-func (h *HTTPServer) ListCustomerAccounts(w http.ResponseWriter, r *http.Request, customerID openapi_types.UUID, params ListCustomerAccountsParams) {
-	institutionID, err := institutionScope(r, params.XInstitutionID)
+	result, err := h.service.SeedDemo(ctx)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	accounts, err := h.service.ListCustomerAccounts(r.Context(), institutionID, customerID.String())
-	respond(w, r, accounts, err)
+	return okResponse(result), nil
 }
 
-func (h *HTTPServer) GetAccountBalance(w http.ResponseWriter, r *http.Request, accountID openapi_types.UUID, params GetAccountBalanceParams) {
-	institutionID, err := institutionScope(r, params.XInstitutionID)
+func (h *HTTPServer) ListCustomerAccounts(ctx context.Context, request ListCustomerAccountsRequestObject) (ListCustomerAccountsResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	balance, err := h.service.GetBalance(r.Context(), institutionID, accountID.String())
-	respond(w, r, balance, err)
-}
-
-func (h *HTTPServer) ListAccountTransactions(w http.ResponseWriter, r *http.Request, accountID openapi_types.UUID, params ListAccountTransactionsParams) {
-	institutionID, err := institutionScope(r, params.XInstitutionID)
+	accounts, err := h.service.ListCustomerAccounts(ctx, institutionID, request.CustomerId.String())
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	txns, err := h.service.GetTransactions(r.Context(), institutionID, accountID.String(), listTransactionsOptions(params))
-	respond(w, r, txns, err)
+	return okResponse(accounts), nil
 }
 
-func (h *HTTPServer) MockInboundTransfer(w http.ResponseWriter, r *http.Request, params MockInboundTransferParams) {
+func (h *HTTPServer) GetAccountBalance(ctx context.Context, request GetAccountBalanceRequestObject) (GetAccountBalanceResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	balance, err := h.service.GetBalance(ctx, institutionID, request.AccountId.String())
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(balance), nil
+}
+
+func (h *HTTPServer) ListAccountTransactions(ctx context.Context, request ListAccountTransactionsRequestObject) (ListAccountTransactionsResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	txns, err := h.service.GetTransactions(ctx, institutionID, request.AccountId.String(), listTransactionsOptions(request.Params))
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(txns), nil
+}
+
+func (h *HTTPServer) MockInboundTransfer(ctx context.Context, request MockInboundTransferRequestObject) (MockInboundTransferResponseObject, error) {
 	if !h.demoRoutes {
-		writeError(w, http.StatusNotFound, "not_found")
-		return
+		return nil, ErrNotFound
 	}
-	req, err := bindMockTransferRequest(r, params.IdempotencyKey)
+	req, err := bindMockTransferRequest(ctx, request.Body, request.Params.XInstitutionID, request.Params.IdempotencyKey)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	transfer, err := h.service.MockInbound(r.Context(), req)
-	respond(w, r, transfer, err)
+	transfer, err := h.service.MockInbound(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(transfer), nil
 }
 
-func (h *HTTPServer) MockOutboundTransfer(w http.ResponseWriter, r *http.Request, params MockOutboundTransferParams) {
+func (h *HTTPServer) MockOutboundTransfer(ctx context.Context, request MockOutboundTransferRequestObject) (MockOutboundTransferResponseObject, error) {
 	if !h.demoRoutes {
-		writeError(w, http.StatusNotFound, "not_found")
-		return
+		return nil, ErrNotFound
 	}
-	req, err := bindMockTransferRequest(r, params.IdempotencyKey)
+	req, err := bindMockTransferRequest(ctx, request.Body, request.Params.XInstitutionID, request.Params.IdempotencyKey)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	transfer, err := h.service.MockOutbound(r.Context(), req)
-	respond(w, r, transfer, err)
+	transfer, err := h.service.MockOutbound(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(transfer), nil
 }
 
-func (h *HTTPServer) GetTransfer(w http.ResponseWriter, r *http.Request, transferID openapi_types.UUID, params GetTransferParams) {
-	institutionID, err := institutionScope(r, params.XInstitutionID)
+func (h *HTTPServer) GetTransfer(ctx context.Context, request GetTransferRequestObject) (GetTransferResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	transfer, err := h.service.GetTransfer(r.Context(), institutionID, transferID.String())
-	respond(w, r, transfer, err)
+	transfer, err := h.service.GetTransfer(ctx, institutionID, request.TransferId.String())
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(transfer), nil
 }
 
-func (h *HTTPServer) ReverseTransfer(w http.ResponseWriter, r *http.Request, transferID openapi_types.UUID, params ReverseTransferParams) {
-	institutionID, err := institutionScope(r, params.XInstitutionID)
+func (h *HTTPServer) ReverseTransfer(ctx context.Context, request ReverseTransferRequestObject) (ReverseTransferResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	transfer, err := h.service.ReverseTransfer(r.Context(), institutionID, transferID.String(), params.IdempotencyKey)
-	respond(w, r, transfer, err)
+	transfer, err := h.service.ReverseTransfer(ctx, institutionID, request.TransferId.String(), request.Params.IdempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(transfer), nil
 }
 
-func (h *HTTPServer) GetJournal(w http.ResponseWriter, r *http.Request, journalEntryID openapi_types.UUID, params GetJournalParams) {
-	institutionID, err := institutionScope(r, params.XInstitutionID)
+func (h *HTTPServer) GetJournal(ctx context.Context, request GetJournalRequestObject) (GetJournalResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	journal, err := h.service.GetJournal(r.Context(), institutionID, journalEntryID.String())
-	respond(w, r, journal, err)
+	journal, err := h.service.GetJournal(ctx, institutionID, request.JournalEntryId.String())
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(journal), nil
 }
 
-func (h *HTTPServer) ListTransfers(w http.ResponseWriter, r *http.Request, params ListTransfersParams) {
-	institutionID, err := institutionScope(r, params.XInstitutionID)
+func (h *HTTPServer) ListTransfers(ctx context.Context, request ListTransfersRequestObject) (ListTransfersResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
-		respond(w, r, nil, err)
-		return
+		return nil, err
 	}
-	transfers, err := h.service.ListTransfers(r.Context(), institutionID)
-	respond(w, r, transfers, err)
+	transfers, err := h.service.ListTransfers(ctx, institutionID)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(transfers), nil
 }
 
 func (req *MockTransferRequest) Bind(r *http.Request) error {
+	return validateMockTransferRequest(req)
+}
+
+func validateMockTransferRequest(req *MockTransferRequest) error {
 	if req == nil {
 		return ErrInvalidRequest
 	}
@@ -200,9 +229,11 @@ func validMockTransferScenario(scenario MockTransferRequestScenario) bool {
 	}
 }
 
-func bindMockTransferRequest(r *http.Request, headerIdempotencyKey string) (TransferRequest, error) {
-	var body MockTransferRequest
-	if err := render.Bind(r, &body); err != nil {
+func bindMockTransferRequest(ctx context.Context, body *MockTransferRequest, headerInstitutionID *InstitutionID, headerIdempotencyKey string) (TransferRequest, error) {
+	if body == nil {
+		return TransferRequest{}, ErrInvalidRequest
+	}
+	if err := validateMockTransferRequest(body); err != nil {
 		return TransferRequest{}, ErrInvalidRequest
 	}
 	req := TransferRequest{
@@ -218,14 +249,14 @@ func bindMockTransferRequest(r *http.Request, headerIdempotencyKey string) (Tran
 		Scenario:          optionalEnumString(body.Scenario),
 		DelaySeconds:      optionalInt64(body.DelaySeconds),
 	}
-	if err := applyRequestScope(r, &req); err != nil {
+	if err := applyRequestScope(ctx, headerInstitutionID, headerIdempotencyKey, &req); err != nil {
 		return TransferRequest{}, err
 	}
 	return req, nil
 }
 
-func applyRequestScope(r *http.Request, req *TransferRequest) error {
-	institutionID, err := institutionScopeString(r, institutionID(r))
+func applyRequestScope(ctx context.Context, headerInstitutionID *InstitutionID, headerIdempotencyKey string, req *TransferRequest) error {
+	institutionID, err := institutionScope(ctx, headerInstitutionID)
 	if err != nil {
 		return err
 	}
@@ -234,21 +265,21 @@ func applyRequestScope(r *http.Request, req *TransferRequest) error {
 	}
 	req.InstitutionID = institutionID
 	if req.IdempotencyKey == "" {
-		req.IdempotencyKey = idempotencyKey(r)
+		req.IdempotencyKey = strings.TrimSpace(headerIdempotencyKey)
 	}
 	return nil
 }
 
-func institutionScope(r *http.Request, headerInstitutionID *InstitutionID) (string, error) {
+func institutionScope(ctx context.Context, headerInstitutionID *InstitutionID) (string, error) {
 	header := ""
 	if headerInstitutionID != nil {
 		header = headerInstitutionID.String()
 	}
-	return institutionScopeString(r, header)
+	return institutionScopeString(ctx, header)
 }
 
-func institutionScopeString(r *http.Request, headerInstitutionID string) (string, error) {
-	principal, ok := authn.PrincipalFromRequest(r)
+func institutionScopeString(ctx context.Context, headerInstitutionID string) (string, error) {
+	principal, ok := authn.PrincipalFromContext(ctx)
 	if !ok {
 		return "", ErrUnauthorized
 	}
@@ -261,14 +292,6 @@ func institutionScopeString(r *http.Request, headerInstitutionID string) (string
 		return "", ErrForbidden
 	}
 	return institutionID, nil
-}
-
-func institutionID(r *http.Request) string {
-	return strings.TrimSpace(r.Header.Get("X-Institution-ID"))
-}
-
-func idempotencyKey(r *http.Request) string {
-	return strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 }
 
 func optionalString(value *string) string {
@@ -311,6 +334,59 @@ func listTransactionsOptions(params ListAccountTransactionsParams) ListTransacti
 	return options
 }
 
+type strictJSONResponse struct {
+	status int
+	body   any
+}
+
+func okResponse(body any) strictJSONResponse {
+	return strictJSONResponse{status: http.StatusOK, body: body}
+}
+
+func (response strictJSONResponse) write(w http.ResponseWriter) error {
+	return writeJSONResponse(w, response.status, response.body)
+}
+
+func (response strictJSONResponse) VisitGetAccountBalanceResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitListAccountTransactionsResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitGetJournalResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitListTransfersResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitListCustomerAccountsResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitSeedDemoResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitMockInboundTransferResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitMockOutboundTransferResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitGetTransferResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitReverseTransferResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
 func respond(w http.ResponseWriter, r *http.Request, v any, err error) {
 	if err == nil {
 		writeJSON(w, http.StatusOK, v)
@@ -335,8 +411,13 @@ func respond(w http.ResponseWriter, r *http.Request, v any, err error) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	_ = writeJSONResponse(w, status, v)
+}
+
+func writeJSONResponse(w http.ResponseWriter, status int, v any) error {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	return json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
