@@ -5,7 +5,9 @@ package corebanking
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/jmoiron/sqlx"
@@ -268,6 +270,139 @@ func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 	}
 }
 
+func TestSQLStoreTransferSpineIntegrationConcurrentReplay(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+
+	t.Run("provider_event_replay", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+
+		const eventID = "sql-concurrent-provider-event"
+		const amount = int64(3333)
+		results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+			return svc.MockInbound(ctx, TransferRequest{
+				AccountID:         DemoCustomerAccountID,
+				AmountMinor:       amount,
+				IdempotencyKey:    fmt.Sprintf("sql-concurrent-provider-event-%02d", i),
+				ProviderEventID:   eventID,
+				ProviderReference: "sql-concurrent-provider-ref",
+				Narration:         "SQL concurrent provider event replay",
+			})
+		})
+
+		transfer := assertConcurrentReplay(t, results)
+		assertStatus(t, transfer, TransferStatusSucceeded)
+		assertSQLBalance(t, svc, ctx, amount)
+		assertSQLJournalBalanced(t, svc, ctx, transfer, amount)
+		assertSQLTransferCountByProviderEvent(t, ctx, db, eventID, 1)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
+	t.Run("inbound_idempotency_replay", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+
+		const idempotencyKey = "sql-concurrent-inbound-idempotency"
+		const amount = int64(2222)
+		results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+			return svc.MockInbound(ctx, TransferRequest{
+				AccountID:       DemoCustomerAccountID,
+				AmountMinor:     amount,
+				IdempotencyKey:  idempotencyKey,
+				ProviderEventID: fmt.Sprintf("sql-concurrent-inbound-idempotency-event-%02d", i),
+				Narration:       "SQL concurrent inbound idempotency replay",
+			})
+		})
+
+		transfer := assertConcurrentReplay(t, results)
+		assertStatus(t, transfer, TransferStatusSucceeded)
+		assertSQLBalance(t, svc, ctx, amount)
+		assertSQLJournalBalanced(t, svc, ctx, transfer, amount)
+		assertSQLTransferCountByIdempotency(t, ctx, db, idempotencyKey, 1)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
+	t.Run("outbound_idempotency_replay", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+		mockInbound(t, svc, ctx, TransferRequest{
+			AccountID:       DemoCustomerAccountID,
+			AmountMinor:     50000,
+			IdempotencyKey:  "sql-concurrent-outbound-funding",
+			ProviderEventID: "sql-concurrent-outbound-funding-event",
+			Narration:       "SQL concurrent outbound funding",
+		})
+
+		const idempotencyKey = "sql-concurrent-outbound-idempotency"
+		const amount = int64(12000)
+		results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+			return svc.MockOutbound(ctx, TransferRequest{
+				AccountID:         DemoCustomerAccountID,
+				AmountMinor:       amount,
+				IdempotencyKey:    idempotencyKey,
+				ProviderReference: "sql-concurrent-outbound-idempotency-ref",
+				Narration:         "SQL concurrent outbound idempotency replay",
+			})
+		})
+
+		transfer := assertConcurrentReplay(t, results)
+		assertStatus(t, transfer, TransferStatusSucceeded)
+		assertSQLBalance(t, svc, ctx, 50000-amount)
+		assertSQLJournalBalanced(t, svc, ctx, transfer, amount)
+		assertSQLTransferCountByIdempotency(t, ctx, db, idempotencyKey, 1)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
+	t.Run("pending_settlement_replay", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+		mockInbound(t, svc, ctx, TransferRequest{
+			AccountID:       DemoCustomerAccountID,
+			AmountMinor:     50000,
+			IdempotencyKey:  "sql-concurrent-settlement-funding",
+			ProviderEventID: "sql-concurrent-settlement-funding-event",
+			Narration:       "SQL concurrent settlement funding",
+		})
+
+		const providerReference = "sql-concurrent-settlement-ref"
+		const amount = int64(7000)
+		pending := mockOutbound(t, svc, ctx, TransferRequest{
+			AccountID:         DemoCustomerAccountID,
+			AmountMinor:       amount,
+			IdempotencyKey:    "sql-concurrent-settlement-pending",
+			ProviderReference: providerReference,
+			Status:            TransferStatusPending,
+			Narration:         "SQL concurrent settlement pending outbound",
+		})
+		assertStatus(t, pending, TransferStatusPending)
+		assertSQLBalancePair(t, svc, ctx, 50000-amount, 50000)
+
+		results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+			return svc.MockOutbound(ctx, TransferRequest{
+				AccountID:         DemoCustomerAccountID,
+				AmountMinor:       amount,
+				IdempotencyKey:    fmt.Sprintf("sql-concurrent-settlement-%02d", i),
+				ProviderReference: providerReference,
+				ProviderEventID:   fmt.Sprintf("sql-concurrent-settlement-event-%02d", i),
+				Status:            TransferStatusSucceeded,
+				Narration:         "SQL concurrent pending settlement replay",
+			})
+		})
+
+		transfer := assertConcurrentReplay(t, results)
+		if transfer.ID != pending.ID {
+			t.Fatalf("settlement replay returned different transfer: pending=%s got=%s", pending.ID, transfer.ID)
+		}
+		assertStatus(t, transfer, TransferStatusSucceeded)
+		assertSQLBalance(t, svc, ctx, 50000-amount)
+		assertSQLJournalBalanced(t, svc, ctx, transfer, amount)
+		assertSQLTransferCountByProviderReference(t, ctx, db, providerReference, TransferDirectionOutbound, 1)
+		assertSQLJournalCountByProviderReference(t, ctx, db, providerReference, TransferDirectionOutbound, 1)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+}
+
 func integrationDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 
@@ -291,6 +426,60 @@ func integrationDB(t *testing.T) *sqlx.DB {
 	return db
 }
 
+type concurrentTransferResult struct {
+	transfer *Transfer
+	err      error
+}
+
+func seededSQLService(t *testing.T, db *sqlx.DB, ctx context.Context) *Service {
+	t.Helper()
+	svc := NewService(NewSQLStore(db), NewMockNIPProvider())
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return svc
+}
+
+func runConcurrentTransfers(t *testing.T, count int, fn func(int) (*Transfer, error)) []concurrentTransferResult {
+	t.Helper()
+	start := make(chan struct{})
+	results := make([]concurrentTransferResult, count)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			transfer, err := fn(i)
+			results[i] = concurrentTransferResult{transfer: transfer, err: err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	return results
+}
+
+func assertConcurrentReplay(t *testing.T, results []concurrentTransferResult) *Transfer {
+	t.Helper()
+	var first *Transfer
+	for i, result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent replay request %d returned error: %v", i, result.err)
+		}
+		if result.transfer == nil {
+			t.Fatalf("concurrent replay request %d returned nil transfer", i)
+		}
+		if first == nil {
+			first = result.transfer
+			continue
+		}
+		if result.transfer.ID != first.ID {
+			t.Fatalf("concurrent replay request %d returned transfer %s, want %s", i, result.transfer.ID, first.ID)
+		}
+	}
+	return first
+}
+
 func assertRepositoryBalance(t *testing.T, repo *SQLRepository, ctx context.Context, wantAvailable, wantLedger int64) {
 	t.Helper()
 	balance, err := repo.GetBalance(ctx, DemoInstitutionID, DemoCustomerAccountID)
@@ -299,6 +488,112 @@ func assertRepositoryBalance(t *testing.T, repo *SQLRepository, ctx context.Cont
 	}
 	if balance.AvailableMinor != wantAvailable || balance.LedgerMinor != wantLedger {
 		t.Fatalf("balance mismatch: got available=%d ledger=%d want available=%d ledger=%d", balance.AvailableMinor, balance.LedgerMinor, wantAvailable, wantLedger)
+	}
+}
+
+func assertSQLReplayIntegrity(t *testing.T, ctx context.Context, db *sqlx.DB) {
+	t.Helper()
+	if err := assertAllSQLJournalsBalanced(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	assertNoSQLDuplicateProviderEvents(t, ctx, db)
+	assertNoSQLDuplicateIdempotencyKeys(t, ctx, db)
+	t.Log("journal_mismatches=0 balance_mismatches=0 provider_event_duplicate_count=0 idempotency_duplicate_count=0")
+}
+
+func assertNoSQLDuplicateProviderEvents(t *testing.T, ctx context.Context, db *sqlx.DB) {
+	t.Helper()
+	var duplicates int
+	if err := db.GetContext(ctx, &duplicates, `
+SELECT COUNT(*)
+FROM (
+	SELECT institution_id, provider, provider_event_id
+	FROM provider_events
+	GROUP BY institution_id, provider, provider_event_id
+	HAVING COUNT(*) > 1
+) duplicate_provider_events`); err != nil {
+		t.Fatal(err)
+	}
+	if duplicates != 0 {
+		t.Fatalf("provider_event duplicate count = %d, want 0", duplicates)
+	}
+}
+
+func assertNoSQLDuplicateIdempotencyKeys(t *testing.T, ctx context.Context, db *sqlx.DB) {
+	t.Helper()
+	var duplicates int
+	if err := db.GetContext(ctx, &duplicates, `
+SELECT COUNT(*)
+FROM (
+	SELECT institution_id, idempotency_key
+	FROM transfers
+	GROUP BY institution_id, idempotency_key
+	HAVING COUNT(*) > 1
+) duplicate_idempotency_keys`); err != nil {
+		t.Fatal(err)
+	}
+	if duplicates != 0 {
+		t.Fatalf("idempotency duplicate count = %d, want 0", duplicates)
+	}
+}
+
+func assertSQLTransferCountByProviderEvent(t *testing.T, ctx context.Context, db *sqlx.DB, providerEventID string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM transfers
+WHERE institution_id = $1 AND provider_event_id = $2`, DemoInstitutionID, providerEventID); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("transfer count for provider_event_id %q = %d, want %d", providerEventID, count, want)
+	}
+}
+
+func assertSQLTransferCountByIdempotency(t *testing.T, ctx context.Context, db *sqlx.DB, idempotencyKey string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM transfers
+WHERE institution_id = $1 AND idempotency_key = $2`, DemoInstitutionID, idempotencyKey); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("transfer count for idempotency_key %q = %d, want %d", idempotencyKey, count, want)
+	}
+}
+
+func assertSQLTransferCountByProviderReference(t *testing.T, ctx context.Context, db *sqlx.DB, providerReference, direction string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM transfers
+WHERE institution_id = $1 AND provider_reference = $2 AND direction = $3`, DemoInstitutionID, providerReference, direction); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("transfer count for provider_reference %q direction %q = %d, want %d", providerReference, direction, count, want)
+	}
+}
+
+func assertSQLJournalCountByProviderReference(t *testing.T, ctx context.Context, db *sqlx.DB, providerReference, direction string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM transfers t
+JOIN journal_entries je ON je.institution_id = t.institution_id AND je.transfer_id = t.id
+WHERE t.institution_id = $1 AND t.provider_reference = $2 AND t.direction = $3`, DemoInstitutionID, providerReference, direction); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("journal count for provider_reference %q direction %q = %d, want %d", providerReference, direction, count, want)
 	}
 }
 

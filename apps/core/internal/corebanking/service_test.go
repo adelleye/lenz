@@ -186,6 +186,23 @@ func TestDuplicateProviderEventDoesNotDoubleCredit(t *testing.T) {
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 10000)
 }
 
+func TestUnsupportedProviderWebhookRejectedBeforeMoneyMovement(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	_, err := svc.MockProviderWebhook(ctx, "unsupported_provider", []byte(`{
+		"account_id":"44444444-4444-4444-4444-444444444444",
+		"amount_minor":10000,
+		"idempotency_key":"unsupported-provider",
+		"provider_event_id":"unsupported-provider-event"
+	}`), map[string]string{"X-Institution-ID": DemoInstitutionID})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected unsupported provider to be rejected, got %v", err)
+	}
+	if len(store.transfers) != 0 || len(store.journals) != 0 || len(store.postings) != 0 {
+		t.Fatalf("unsupported provider should not move money: transfers=%d journals=%d postings=%d", len(store.transfers), len(store.journals), len(store.postings))
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
+}
+
 func TestPendingTransferAppearsInHistory(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	transfer := mockInbound(t, svc, ctx, TransferRequest{

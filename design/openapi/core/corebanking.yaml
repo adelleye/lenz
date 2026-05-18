@@ -22,8 +22,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APISeedResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/customers/{customer_id}/accounts:
     get:
@@ -47,8 +53,14 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/APIAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/accounts/{account_id}/balance:
     get:
@@ -70,10 +82,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APIAccountBalance"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
         "404":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/accounts/{account_id}/transactions:
     get:
@@ -93,10 +111,8 @@ paths:
           required: false
           schema:
             type: integer
-            minimum: 1
-            maximum: 200
             default: 100
-          description: Maximum number of transactions to return. Defaults to 100 and is capped at 200.
+          description: Maximum number of transactions to return. Non-positive values use the 100 default, and values above 200 are capped.
         - name: before_created_at
           in: query
           required: false
@@ -113,8 +129,14 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/APITransaction"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/transfers/mock/inbound:
     post:
@@ -137,12 +159,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Conflict"
         "422":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/transfers/mock/outbound:
     post:
@@ -165,12 +195,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Conflict"
         "422":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/transfers/{transfer_id}:
     get:
@@ -192,10 +230,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
         "404":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/transfers/{transfer_id}/reverse:
     post:
@@ -218,12 +262,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
         "404":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/admin/ledger/journal/{journal_entry_id}:
     get:
@@ -245,10 +295,16 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/APIJournalWithPostings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
         "404":
-          $ref: "#/components/responses/Error"
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /api/v1/admin/transfers:
     get:
@@ -266,8 +322,14 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "400":
           $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
 components:
   parameters:
@@ -287,11 +349,46 @@ components:
       schema:
         type: string
         minLength: 1
-        maxLength: 128
 
   responses:
     Error:
       description: Error response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid authenticated principal.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Authenticated principal is not allowed for the requested institution scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource was not found or the demo route is disabled.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Request conflicts with existing transfer state or idempotency state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    UnprocessableEntity:
+      description: Request is valid but cannot be applied.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalServerError:
+      description: Unexpected server error. Includes request_id when available.
       content:
         application/json:
           schema:
@@ -569,7 +666,6 @@ components:
     MockTransferRequest:
       type: object
       required: [account_id, amount_minor]
-      additionalProperties: false
       properties:
         institution_id:
           type: string
@@ -605,7 +701,7 @@ components:
         delay_seconds:
           type: integer
           format: int64
-          minimum: 0
+          description: Optional delay in seconds for delayed scenarios. Non-positive values use the provider default.
 
     APIJournalEntry:
       type: object
