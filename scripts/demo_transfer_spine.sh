@@ -167,7 +167,7 @@ echo "Running unit tests..."
 pass "unit test suite passed"
 
 echo "Running Postgres-backed integration tests..."
-LENZ_INTEGRATION_DATABASE_URL="$DATABASE_URL" "$GO_BIN" test -count=1 -tags=integration ./apps/core/internal/corebanking -run TestSQLStoreTransferSpineIntegration
+LENZ_INTEGRATION_DATABASE_URL="$DATABASE_URL" "$GO_BIN" test -count=1 -tags=integration ./apps/core/internal/corebanking -run TestSQLRepositoryTransferSpineIntegration
 pass "SQL integration test suite passed"
 
 TMP_PARENT="${TMPDIR:-/tmp}"

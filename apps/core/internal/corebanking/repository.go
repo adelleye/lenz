@@ -2,7 +2,7 @@ package corebanking
 
 import "context"
 
-type Store interface {
+type Repository interface {
 	DemoRepository
 	AccountRepository
 	LedgerRepository

@@ -8,11 +8,11 @@ import (
 )
 
 type Service struct {
-	store     Store
+	store     Repository
 	providers map[string]TransferProvider
 }
 
-func NewService(store Store, providers ...TransferProvider) *Service {
+func NewService(store Repository, providers ...TransferProvider) *Service {
 	s := &Service{store: store, providers: map[string]TransferProvider{}}
 	for _, provider := range providers {
 		if provider == nil {

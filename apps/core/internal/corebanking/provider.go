@@ -3,14 +3,15 @@ package corebanking
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 )
 
 var (
-	ErrProviderCapabilityUnavailable = errors.New("provider capability unavailable")
-	ErrProviderPreSubmissionFailure  = errors.New("provider transfer was not submitted")
-	ErrProviderStatusUnknown         = errors.New("provider transfer status unknown")
+	ErrProviderStatusUnknown = errors.New("provider transfer status unknown")
 )
+
+const providerUnknownFailureReason = "provider_status_unknown"
 
 type Provider interface {
 	Name() string
@@ -82,4 +83,28 @@ type ProviderWebhookEvent struct {
 	Scenario             string
 	Delayed              bool
 	DelayedUntil         *time.Time
+}
+
+func providerUnknownTransferResult(provider TransferProvider, request ProviderTransferRequest) *ProviderTransferResult {
+	return &ProviderTransferResult{
+		Provider:          provider.Name(),
+		ProviderReference: providerTransferReference(request),
+		Status:            TransferStatusPending,
+		ProviderStatus:    TransferProviderStatusUnknown,
+		FailureReason:     providerUnknownFailureReason,
+		Narration:         strings.TrimSpace(request.Narration),
+	}
+}
+
+func providerTransferStatusUnknown(err error) bool {
+	return errors.Is(err, ErrProviderStatusUnknown) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+func providerTransferReference(request ProviderTransferRequest) string {
+	if providerReference := strings.TrimSpace(request.ProviderReference); providerReference != "" {
+		return providerReference
+	}
+	return strings.TrimSpace(request.IdempotencyKey)
 }

@@ -14,10 +14,10 @@ import (
 	_ "github.com/lib/pq"
 )
 
-func TestSQLStoreTransferSpineIntegration(t *testing.T) {
+func TestSQLRepositoryTransferSpineIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
-	svc := NewService(NewSQLStore(db), NewMockNIPProvider())
+	svc := NewService(NewSQLRepository(db), NewMockNIPProvider())
 
 	seed, err := svc.SeedDemo(ctx)
 	if err != nil {
@@ -270,7 +270,7 @@ func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 	}
 }
 
-func TestSQLStoreTransferSpineIntegrationConcurrentReplay(t *testing.T) {
+func TestSQLRepositoryTransferSpineIntegrationConcurrentReplay(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
 
@@ -433,7 +433,7 @@ type concurrentTransferResult struct {
 
 func seededSQLService(t *testing.T, db *sqlx.DB, ctx context.Context) *Service {
 	t.Helper()
-	svc := NewService(NewSQLStore(db), NewMockNIPProvider())
+	svc := NewService(NewSQLRepository(db), NewMockNIPProvider())
 	if _, err := svc.SeedDemo(ctx); err != nil {
 		t.Fatal(err)
 	}

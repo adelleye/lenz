@@ -238,7 +238,7 @@ What remains:
 What changed:
 - Added automated tests for all required scenarios:
   successful transfer-in, successful transfer-out, insufficient funds, duplicate idempotency key, duplicate provider event, pending history, failed transfer, reversal, tenant scoping, and Lenz-derived history.
-- Added Postgres-backed integration coverage for the SQL store with aggregate checks for balanced journals and balances matching postings.
+- Added Postgres-backed integration coverage for the SQL repository with aggregate checks for balanced journals and balances matching postings.
 
 Command run:
 

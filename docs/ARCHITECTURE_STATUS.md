@@ -23,7 +23,7 @@ and calls the service only after request validation succeeds.
 
 ## Repository Layer
 
-The service depends on repository interfaces in `store.go`, not direct SQL.
+The service depends on repository interfaces in `repository.go`, not direct SQL.
 The SQL implementation is split by concern:
 
 - `sql_account_repository.go` handles account, balance, and transaction-history
@@ -37,8 +37,8 @@ The SQL implementation is split by concern:
   protection and transfer linking.
 - `sql_demo_repository.go` keeps demo seed writes separate from money movement.
 
-`NewSQLStore` remains as a compatibility constructor, but it now returns the
-repository implementation. New code can use `NewSQLRepository` directly.
+`NewSQLRepository` is the constructor used by `apps/core/main.go` through the
+existing `server.Deps` wiring.
 
 ## Transaction Helper
 
@@ -64,9 +64,9 @@ from transfer-specific capability:
 adapter for transfer-spine proof flows and is not a real Monnify, Interswitch,
 NIBSS, Providus, BankOne, SkyPay, MFB, or sponsor-bank integration.
 
-This shape leaves room for future provider capabilities such as collections,
-virtual accounts, statements, and bill payments without changing ledger
-posting logic.
+Fallback-provider scaffolding is not part of the current code path. Future
+provider work should be a production-shaped slice with explicit credentials,
+signed webhooks, requery, and reconciliation rules.
 
 ## Mock/Demo vs Production-Shaped
 

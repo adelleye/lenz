@@ -21,6 +21,11 @@ Worktree note: this run started with a dirty worktree:
 ?? docs/TEST_RESULTS.md
 ```
 
+Current repo note: later cleanup renamed the persistence surface to the module
+repository convention and removed fallback-provider scaffolding. The historical
+pass/fail judgement below is kept for evidence, but current code should be read
+through `repository.go`, `sql_repository.go`, and the demo-only mock provider.
+
 I did not change money logic during this verification pass. The only intended
 repo edits from this run are the two docs. `go generate` recreated ignored
 generated files locally.
@@ -223,14 +228,9 @@ forced_db_down_server_log=2026/05/18 09:15:50 internal_error request_id=operator
 postgres_status_after_db_down=healthy
 ```
 
-HybridProvider and service-level safety tests:
+Provider and service-level safety tests:
 
 ```text
---- PASS: TestHybridProviderPrimaryTransferSuccess
---- PASS: TestHybridProviderNameEnquiryFallsBackWhenPrimaryFails
---- PASS: TestHybridProviderTransferDoesNotFallbackOnTimeoutOrUnknownStatus
---- PASS: TestHybridProviderTransferFallbackRequiresPreSubmissionFailure
---- PASS: TestHybridProviderRequeryUsesOriginalTransferProvider
 --- PASS: TestUnsupportedProviderWebhookRejectedBeforeMoneyMovement
 --- PASS: TestTenantScopingPreventsCrossTenantReads
 --- PASS: TestInternalErrorsAreSanitized
@@ -252,7 +252,7 @@ exit status 1
 $ rg -n "audit_events" . -g '!**/*.gen.go'
 migrations/20260516000100_transaction_spine.up.sql:161:CREATE TABLE IF NOT EXISTS audit_events (
 migrations/20260516000100_transaction_spine.down.sql:1:DROP TABLE IF EXISTS audit_events;
-apps/core/internal/corebanking/sql_store_integration_test.go:604:	audit_events,
+apps/core/internal/corebanking/sql_repository_integration_test.go:604:	audit_events,
 ```
 
 Full `staticcheck` also reported generated-file style warnings in
@@ -314,61 +314,56 @@ candidates because generated files must not be hand-edited.
 | 49 | Reversal on insufficient balance creates manual-review deficit | PASS | demo and focused test |
 | 50 | Reversal cannot be performed across institutions | PASS | tenant A reversing tenant B transfer returned 404 |
 | 51 | Duplicate reversal does not double-reverse | PASS | focused idempotency/reversal test |
-| 52 | Primary provider success does not call fallback | PASS | HybridProvider unit test |
-| 53 | Name enquiry/read-only failure can use fallback | PASS | HybridProvider unit test |
-| 54 | Transfer timeout/unknown does not fallback | PASS | HybridProvider unit test |
-| 55 | Transfer may fallback only on definite pre-submission failure | PASS | HybridProvider unit test |
-| 56 | Requery uses original provider | PASS | HybridProvider unit test |
-| 57 | Wrong provider/reference webhook rejected/manual_review | PARTIAL | service rejects unsupported provider before money movement; no real webhook endpoint/signature path exists |
-| 58 | Provider unknown status does not duplicate money | PASS | focused provider-unknown test |
-| 59 | Institution A cannot read B balance | PASS | HTTP 404 for B account |
-| 60 | Institution A cannot list B transactions | PASS WITH ISSUE | no rows leaked, but body was `null` instead of `[]` |
-| 61 | Institution A cannot inspect B journal | PASS | HTTP 404 |
-| 62 | Institution A cannot reverse B transfer | PASS | HTTP 404 |
-| 63 | Mismatched `X-Institution-ID` rejected | PASS | HTTP 403 |
-| 64 | Missing principal/institution context rejected | PASS | no token 401 |
-| 65 | Caller cannot choose tenant by header | PASS | principal-derived scope test and HTTP mismatch 403 |
-| 66 | No token rejected on non-health routes | PASS | HTTP 401 |
-| 67 | Wrong bearer token rejected | PASS | HTTP 401 |
-| 68 | Query-string `access_token` rejected | PASS | HTTP 401 |
-| 69 | CORS rejects untrusted origins | PASS | no `Access-Control-Allow-Origin` |
-| 70 | CORS allows configured safe dev origins | PASS | `http://localhost:5173` allowed |
-| 71 | Demo routes disabled by default | PASS | demo-off routes returned 404 |
-| 72 | Demo routes work only when enabled in development | PASS | enabled seed 200; disabled 404 |
-| 73 | Demo mode true in production fails startup | PASS | process exited 1 with explicit guard log |
-| 74 | Demo/mock routes cannot mutate ledger when off | PASS | demo-off mutation 404, balance delta 0 |
-| 75 | Unexpected internal errors generic with request ID | PASS | forced DB-down returned generic 500 with request ID |
-| 76 | Raw DB/provider/internal strings not exposed | PASS | client body did not include DB error |
-| 77 | Detailed errors logged server-side only | PASS | server log contained connection-refused detail |
-| 78 | Invalid UUID rejected | PASS | HTTP 400 |
-| 79 | Negative amount rejected | PASS | HTTP 400 |
-| 80 | Zero amount rejected | PASS | HTTP 400 |
-| 81 | Missing idempotency key rejected | PASS | HTTP 400 |
-| 82 | Unknown provider status/scenario rejected | PASS | HTTP 400 |
-| 83 | Invalid/missing institution context rejected | PASS | 401/403 probes |
-| 84 | Oversized request body rejected | PASS | HTTP 413 |
-| 85 | Two simultaneous outbounds cannot overspend | PASS | one succeeded, one failed, balance delta one debit |
-| 86 | Outbound and reversal racing leaves valid ledger | PASS | both calls completed and SQL mismatches stayed 0 |
-| 87 | Concurrent provider settlement/requery no double-post | PASS | HTTP and SQL pending-settlement replay |
-| 88 | Race detector for corebanking tests | PASS | `go test -race` passed |
-| 89 | Fresh database migration works | PASS | clean Docker demo migrations applied |
-| 90 | Migration runner safe repeatedly | PASS | rerun reported `skip` |
-| 91 | Pending provider-reference settlement index exists | PASS | `transfers_pending_provider_reference_idx` |
-| 92 | Institution transfer listing by created_at index exists | PASS | `transfers_institution_created_idx` |
-| 93 | Unique constraints for idempotency/provider events | PASS | transfer and provider-event unique indexes |
-| 94 | Transaction history account/date index exists | PASS | `transfers_account_idx`, `postings_account_idx` |
-| 95 | Clean clone can regenerate and test | PASS WITH NOTE | committed `HEAD` clone passed; dirty worktree not included |
-| 96 | Every money action leaves audit/event trail | PARTIAL | transfers/journals/postings exist; `audit_events_count=0` |
-| 97 | Transfer traceability fields exist | PASS | institution/account/provider/reference/status/timestamps present |
-| 98 | Manual-review reversal deficits visible to ops/admin paths | PASS | demo reversal deficit and admin transfer list |
-| 99 | Maker-checker gaps documented | DOCUMENTED GAP | not implemented |
-| 100 | Real CBN/MFB production gaps documented | DOCUMENTED GAP | real auth/RBAC, KYC/BVN, limits, fraud, reconciliation, statements, regulatory returns, provider signatures, audit immutability |
+| 52 | Wrong provider/reference webhook rejected/manual_review | PARTIAL | service rejects unsupported provider before money movement; no real webhook endpoint/signature path exists |
+| 53 | Provider unknown status does not duplicate money | PASS | focused provider-unknown test |
+| 54 | Institution A cannot read B balance | PASS | HTTP 404 for B account |
+| 55 | Institution A cannot list B transactions | PASS WITH ISSUE | no rows leaked, but body was `null` instead of `[]` |
+| 56 | Institution A cannot inspect B journal | PASS | HTTP 404 |
+| 57 | Institution A cannot reverse B transfer | PASS | HTTP 404 |
+| 58 | Mismatched `X-Institution-ID` rejected | PASS | HTTP 403 |
+| 59 | Missing principal/institution context rejected | PASS | no token 401 |
+| 60 | Caller cannot choose tenant by header | PASS | principal-derived scope test and HTTP mismatch 403 |
+| 61 | No token rejected on non-health routes | PASS | HTTP 401 |
+| 62 | Wrong bearer token rejected | PASS | HTTP 401 |
+| 63 | Query-string `access_token` rejected | PASS | HTTP 401 |
+| 64 | CORS rejects untrusted origins | PASS | no `Access-Control-Allow-Origin` |
+| 65 | CORS allows configured safe dev origins | PASS | `http://localhost:5173` allowed |
+| 66 | Demo routes disabled by default | PASS | demo-off routes returned 404 |
+| 67 | Demo routes work only when enabled in development | PASS | enabled seed 200; disabled 404 |
+| 68 | Demo mode true in production fails startup | PASS | process exited 1 with explicit guard log |
+| 69 | Demo/mock routes cannot mutate ledger when off | PASS | demo-off mutation 404, balance delta 0 |
+| 70 | Unexpected internal errors generic with request ID | PASS | forced DB-down returned generic 500 with request ID |
+| 71 | Raw DB/provider/internal strings not exposed | PASS | client body did not include DB error |
+| 72 | Detailed errors logged server-side only | PASS | server log contained connection-refused detail |
+| 73 | Invalid UUID rejected | PASS | HTTP 400 |
+| 74 | Negative amount rejected | PASS | HTTP 400 |
+| 75 | Zero amount rejected | PASS | HTTP 400 |
+| 76 | Missing idempotency key rejected | PASS | HTTP 400 |
+| 77 | Unknown provider status/scenario rejected | PASS | HTTP 400 |
+| 78 | Invalid/missing institution context rejected | PASS | 401/403 probes |
+| 79 | Oversized request body rejected | PASS | HTTP 413 |
+| 80 | Two simultaneous outbounds cannot overspend | PASS | one succeeded, one failed, balance delta one debit |
+| 81 | Outbound and reversal racing leaves valid ledger | PASS | both calls completed and SQL mismatches stayed 0 |
+| 82 | Concurrent provider settlement/requery no double-post | PASS | HTTP and SQL pending-settlement replay |
+| 83 | Race detector for corebanking tests | PASS | `go test -race` passed |
+| 84 | Fresh database migration works | PASS | clean Docker demo migrations applied |
+| 85 | Migration runner safe repeatedly | PASS | rerun reported `skip` |
+| 86 | Pending provider-reference settlement index exists | PASS | `transfers_pending_provider_reference_idx` |
+| 87 | Institution transfer listing by created_at index exists | PASS | `transfers_institution_created_idx` |
+| 88 | Unique constraints for idempotency/provider events | PASS | transfer and provider-event unique indexes |
+| 89 | Transaction history account/date index exists | PASS | `transfers_account_idx`, `postings_account_idx` |
+| 90 | Clean clone can regenerate and test | PASS WITH NOTE | committed `HEAD` clone passed; dirty worktree not included |
+| 91 | Every money action leaves audit/event trail | PARTIAL | transfers/journals/postings exist; `audit_events_count=0` |
+| 92 | Transfer traceability fields exist | PASS | institution/account/provider/reference/status/timestamps present |
+| 93 | Manual-review reversal deficits visible to ops/admin paths | PASS | demo reversal deficit and admin transfer list |
+| 94 | Maker-checker gaps documented | DOCUMENTED GAP | not implemented |
+| 95 | Real CBN/MFB production gaps documented | DOCUMENTED GAP | real auth/RBAC, KYC/BVN, limits, fraud, reconciliation, statements, regulatory returns, provider signatures, audit immutability |
 
 ## Failed Or Issue Scenarios
 
 ### F1: Empty transaction list returns `null`, not `[]`
 
-Related scenario: 60.
+Related scenario: 55.
 
 Evidence:
 
@@ -387,7 +382,7 @@ the SQL repository or normalize nil slices in the handler response path.
 
 ### F2: `audit_events` table is unused
 
-Related scenario: 96.
+Related scenario: 91.
 
 Evidence:
 
@@ -396,7 +391,7 @@ audit_events_count=0
 rg -n "audit_events" . -g '!**/*.gen.go'
 migrations/20260516000100_transaction_spine.up.sql:161:CREATE TABLE IF NOT EXISTS audit_events (
 migrations/20260516000100_transaction_spine.down.sql:1:DROP TABLE IF EXISTS audit_events;
-apps/core/internal/corebanking/sql_store_integration_test.go:604:	audit_events,
+apps/core/internal/corebanking/sql_repository_integration_test.go:604:	audit_events,
 ```
 
 Risk: the ledger event trail is strong for money reconstruction, but there is
@@ -433,8 +428,8 @@ oapi-codegen strict request binding.
 
 - No real provider was connected.
 - No real provider webhook signature verification exists or was tested.
-- `HybridProvider` is covered by unit tests but is not wired into the running
-  API server; the API currently uses `MockNIPProvider`.
+- Fallback-provider scaffolding is intentionally not part of the running API;
+  the API currently uses `MockNIPProvider` for demo routes.
 - No frontend, customer UI, statements, limits engine, maker-checker, KYC/BVN,
   regulatory returns, fraud monitoring, or production RBAC was tested.
 - No long-running load test was run beyond targeted race/concurrency probes.

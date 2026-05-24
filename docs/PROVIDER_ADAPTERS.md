@@ -45,11 +45,11 @@ A future Monnify, Interswitch, NIBSS, Providus, sponsor-bank, or BankOne
 adapter should implement `TransferProvider` and be registered when constructing
 `corebanking.Service`.
 
-`HybridProvider` can wrap a primary and fallback provider. It falls back for
-name enquiry, but transfer initiation only falls back when the primary returns
-`ErrProviderPreSubmissionFailure`. Timeouts, cancellations, and
-`ErrProviderStatusUnknown` are recorded as `provider_unknown` for manual review
-and requery instead of trying a second money movement.
+No fallback provider is wired into the prototype. That is intentional: the
+current provider boundary is demo scaffolding, not the production CBA provider
+architecture. A real NIBSS/NIP or sponsor-bank adapter should be designed as a
+production slice with tenant credentials, signed webhooks, requery, and
+reconciliation behavior, not hidden behind the mock routes.
 
 The adapter should:
 

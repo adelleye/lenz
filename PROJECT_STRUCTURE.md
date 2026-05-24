@@ -119,13 +119,13 @@ See `Taskfile.yml` or run the commands directly:
 ## Next Steps
 
 1. Run the documented demo flow against Docker-backed Postgres
-2. Add live integration tests for the SQL store
+2. Keep expanding SQL repository integration coverage around real CBA slices
 3. Add real auth and institution context middleware
-4. Replace the mock provider with production adapters behind the same boundary
+4. Design production provider integration explicitly before adding NIBSS/NIP
 
 ## Notes
 
-- `apps/core/internal/corebanking` contains the first real vertical slice
+- `apps/core/internal/corebanking` contains the verified prototype transaction-spine slice
 - SQL migrations for the transfer engine are ready to run
 - Docker Compose setup is complete
 - Tenant scoping is enforced with `institution_id` in SQL queries and tests

@@ -3,8 +3,9 @@
 A next-generation, multi-tenant Core Banking Application for Nigeria (and beyond).
 
 ## Overview
-This repository currently contains the first working transaction-spine slice for
-Lenz Core:
+This repository currently contains a verified prototype transaction-spine slice
+for Lenz Core. It proves local ledger and transfer behavior, but it is not the
+production CBA architecture:
 
 - demo institution, branch, customer, customer account, and internal mock NIP
   clearing account

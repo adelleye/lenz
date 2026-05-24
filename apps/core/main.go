@@ -20,13 +20,17 @@ func main() {
 }
 
 func routes(r *chi.Mux, deps server.Deps) {
-	store := corebanking.NewSQLStore(deps.Cfg.DBConn)
+	repository := corebanking.NewSQLRepository(deps.Cfg.DBConn)
 	demoRoutes, err := corebanking.DemoRoutesEnabled()
 	if err != nil {
 		log.Fatal(err)
 	}
+	var providers []corebanking.TransferProvider
+	if demoRoutes {
+		providers = append(providers, corebanking.NewMockNIPProvider())
+	}
 	handler := corebanking.NewHandler(
-		corebanking.NewService(store, corebanking.NewMockNIPProvider()),
+		corebanking.NewService(repository, providers...),
 		corebanking.WithDemoRoutes(demoRoutes),
 	)
 	handler.Routes(r)
