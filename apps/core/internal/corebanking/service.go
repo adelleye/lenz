@@ -8,12 +8,12 @@ import (
 )
 
 type Service struct {
-	store     Repository
-	providers map[string]TransferProvider
+	repository Repository
+	providers  map[string]TransferProvider
 }
 
-func NewService(store Repository, providers ...TransferProvider) *Service {
-	s := &Service{store: store, providers: map[string]TransferProvider{}}
+func NewService(repository Repository, providers ...TransferProvider) *Service {
+	s := &Service{repository: repository, providers: map[string]TransferProvider{}}
 	for _, provider := range providers {
 		if provider == nil {
 			continue
@@ -24,7 +24,7 @@ func NewService(store Repository, providers ...TransferProvider) *Service {
 }
 
 func (s *Service) SeedDemo(ctx context.Context) (*SeedResult, error) {
-	return s.store.EnsureDemoData(ctx)
+	return s.repository.EnsureDemoData(ctx)
 }
 
 func (s *Service) ListCustomerAccounts(ctx context.Context, institutionID, customerID string) ([]Account, error) {
@@ -32,7 +32,7 @@ func (s *Service) ListCustomerAccounts(ctx context.Context, institutionID, custo
 	if err != nil {
 		return nil, err
 	}
-	return s.store.ListAccountsByCustomer(ctx, institutionID, customerID)
+	return s.repository.ListAccountsByCustomer(ctx, institutionID, customerID)
 }
 
 func (s *Service) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
@@ -40,7 +40,7 @@ func (s *Service) GetBalance(ctx context.Context, institutionID, accountID strin
 	if err != nil {
 		return nil, err
 	}
-	return s.store.GetBalance(ctx, institutionID, accountID)
+	return s.repository.GetBalance(ctx, institutionID, accountID)
 }
 
 func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
@@ -48,7 +48,7 @@ func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID 
 	if err != nil {
 		return nil, err
 	}
-	return s.store.ListTransactions(ctx, institutionID, accountID, normalizeListTransactionsOptions(options))
+	return s.repository.ListTransactions(ctx, institutionID, accountID, normalizeListTransactionsOptions(options))
 }
 
 func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error) {
@@ -56,7 +56,7 @@ func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID str
 	if err != nil {
 		return nil, err
 	}
-	return s.store.GetTransfer(ctx, institutionID, transferID)
+	return s.repository.GetTransfer(ctx, institutionID, transferID)
 }
 
 func (s *Service) RequeryTransfer(ctx context.Context, institutionID, transferID string) (*ProviderTransferResult, error) {
@@ -76,7 +76,7 @@ func (s *Service) ListTransfers(ctx context.Context, institutionID string) ([]Tr
 	if err != nil {
 		return nil, err
 	}
-	return s.store.ListTransfers(ctx, institutionID)
+	return s.repository.ListTransfers(ctx, institutionID)
 }
 
 func (s *Service) GetJournal(ctx context.Context, institutionID, journalEntryID string) (*JournalWithPostings, error) {
@@ -84,7 +84,7 @@ func (s *Service) GetJournal(ctx context.Context, institutionID, journalEntryID 
 	if err != nil {
 		return nil, err
 	}
-	return s.store.GetJournal(ctx, institutionID, journalEntryID)
+	return s.repository.GetJournal(ctx, institutionID, journalEntryID)
 }
 
 func (s *Service) MockInbound(ctx context.Context, req TransferRequest) (*Transfer, error) {
@@ -106,7 +106,7 @@ func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Trans
 	if err := normalizeTransferRequest(&req); err != nil {
 		return nil, err
 	}
-	existing, err := s.store.GetTransferByIdempotency(ctx, req.InstitutionID, req.IdempotencyKey)
+	existing, err := s.repository.GetTransferByIdempotency(ctx, req.InstitutionID, req.IdempotencyKey)
 	if err == nil {
 		return existing, nil
 	}
@@ -160,7 +160,7 @@ func (s *Service) ReverseTransfer(ctx context.Context, institutionID, transferID
 	if err != nil {
 		return nil, err
 	}
-	return s.store.ReverseTransfer(ctx, ReverseTransferInput{
+	return s.repository.ReverseTransfer(ctx, ReverseTransferInput{
 		InstitutionID:  institutionID,
 		TransferID:     strings.TrimSpace(transferID),
 		IdempotencyKey: strings.TrimSpace(idempotencyKey),
@@ -216,7 +216,7 @@ func (s *Service) recordProviderWebhookEvent(ctx context.Context, event Provider
 		if strings.TrimSpace(event.ReversalOfTransferID) == "" {
 			return nil, ErrInvalidRequest
 		}
-		return s.store.ReverseTransfer(ctx, ReverseTransferInput{
+		return s.repository.ReverseTransfer(ctx, ReverseTransferInput{
 			InstitutionID:     event.InstitutionID,
 			TransferID:        strings.TrimSpace(event.ReversalOfTransferID),
 			IdempotencyKey:    event.IdempotencyKey,
@@ -233,7 +233,7 @@ func (s *Service) recordProviderWebhookEvent(ctx context.Context, event Provider
 	if event.AccountID == "" || event.AmountMinor <= 0 {
 		return nil, ErrInvalidRequest
 	}
-	return s.store.RecordTransfer(ctx, RecordTransferInput{
+	return s.repository.RecordTransfer(ctx, RecordTransferInput{
 		InstitutionID:     event.InstitutionID,
 		AccountID:         event.AccountID,
 		ClearingAccountID: DemoClearingAccountID,
@@ -289,7 +289,7 @@ func (s *Service) recordProviderTransfer(ctx context.Context, direction string, 
 	if providerEventID == "" {
 		providerEventID = req.ProviderEventID
 	}
-	return s.store.RecordTransfer(ctx, RecordTransferInput{
+	return s.repository.RecordTransfer(ctx, RecordTransferInput{
 		InstitutionID:     req.InstitutionID,
 		AccountID:         req.AccountID,
 		ClearingAccountID: DemoClearingAccountID,

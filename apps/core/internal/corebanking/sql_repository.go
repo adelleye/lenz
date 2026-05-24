@@ -11,7 +11,11 @@ type SQLRepository struct {
 	*sqlTransferRepository
 }
 
-func NewSQLRepository(db *sqlx.DB) *SQLRepository {
+func NewRepository(db *sqlx.DB) Repository {
+	return newSQLRepository(db)
+}
+
+func newSQLRepository(db *sqlx.DB) *SQLRepository {
 	ledger := &sqlLedgerRepository{db: db}
 	holds := &sqlHoldRepository{}
 	providerEvents := &sqlProviderEventRepository{}

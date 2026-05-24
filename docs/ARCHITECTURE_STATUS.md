@@ -37,7 +37,7 @@ The SQL implementation is split by concern:
   protection and transfer linking.
 - `sql_demo_repository.go` keeps demo seed writes separate from money movement.
 
-`NewSQLRepository` is the constructor used by `apps/core/main.go` through the
+`NewRepository` is the constructor used by `apps/core/main.go` through the
 existing `server.Deps` wiring.
 
 ## Transaction Helper

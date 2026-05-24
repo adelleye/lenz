@@ -17,7 +17,7 @@ import (
 func TestSQLRepositoryTransferSpineIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
-	svc := NewService(NewSQLRepository(db), NewMockNIPProvider())
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
 
 	seed, err := svc.SeedDemo(ctx)
 	if err != nil {
@@ -207,7 +207,7 @@ func TestSQLRepositoryTransferSpineIntegration(t *testing.T) {
 func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
-	repo := NewSQLRepository(db)
+	repo := newSQLRepository(db)
 
 	if _, err := repo.EnsureDemoData(ctx); err != nil {
 		t.Fatal(err)
@@ -433,7 +433,7 @@ type concurrentTransferResult struct {
 
 func seededSQLService(t *testing.T, db *sqlx.DB, ctx context.Context) *Service {
 	t.Helper()
-	svc := NewService(NewSQLRepository(db), NewMockNIPProvider())
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
 	if _, err := svc.SeedDemo(ctx); err != nil {
 		t.Fatal(err)
 	}

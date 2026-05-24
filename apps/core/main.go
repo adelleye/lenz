@@ -20,7 +20,7 @@ func main() {
 }
 
 func routes(r *chi.Mux, deps server.Deps) {
-	repository := corebanking.NewSQLRepository(deps.Cfg.DBConn)
+	repository := corebanking.NewRepository(deps.Cfg.DBConn)
 	demoRoutes, err := corebanking.DemoRoutesEnabled()
 	if err != nil {
 		log.Fatal(err)
