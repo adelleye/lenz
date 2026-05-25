@@ -154,6 +154,9 @@ func unsafeAuditMetadataKey(key string) bool {
 		strings.Contains(key, "token") ||
 		strings.Contains(key, "secret") ||
 		strings.Contains(key, "password") ||
+		strings.Contains(key, "credential") ||
+		strings.Contains(key, "api_key") ||
+		strings.Contains(key, "apikey") ||
 		key == "bvn" ||
 		key == "nin"
 }
@@ -169,6 +172,10 @@ func sanitizeAuditMetadataValue(value string) string {
 		strings.Contains(lower, "token") ||
 		strings.Contains(lower, "secret") ||
 		strings.Contains(lower, "password") ||
+		strings.Contains(lower, "credential") ||
+		strings.Contains(lower, "api key") ||
+		strings.Contains(lower, "api_key") ||
+		strings.Contains(lower, "apikey") ||
 		strings.Contains(lower, "bvn") ||
 		strings.Contains(lower, "nin") {
 		return "[redacted]"

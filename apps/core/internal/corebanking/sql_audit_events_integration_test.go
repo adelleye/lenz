@@ -57,6 +57,12 @@ func TestSQLAuditEventsGoal09(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertAuditActorContext(t, events, "staff", "sql-staff-001", "req-sql-audit", map[string]string{
+		"actor_roles":  "operations",
+		"actor_scopes": "corebanking:write",
+		"source_ip":    "203.0.113.20",
+		"user_agent":   "SQLAuditTest/1.0",
+	})
 	assertAuditEventPresent(t, events, AuditActionCustomerCreated, func(event AuditEvent) bool {
 		return auditString(event.CustomerID) != "" &&
 			event.ActorType == "staff" &&

@@ -107,7 +107,11 @@ func TestAuditEventUsesRequestPrincipalContext(t *testing.T) {
 		Action:        AuditActionInternalCreditPosted,
 		EntityType:    "transfer",
 		EntityID:      "transfer-001",
-		Metadata:      map[string]string{"reason": "ops correction"},
+		Metadata: map[string]string{
+			"provider_credentials": "provider-api-key",
+			"reason":               "ops correction",
+			"support_note":         "provider credential rotated",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -119,8 +123,12 @@ func TestAuditEventUsesRequestPrincipalContext(t *testing.T) {
 		event.Metadata["actor_scopes"] != "corebanking:write" ||
 		event.Metadata["source_ip"] != "203.0.113.10" ||
 		event.Metadata["user_agent"] != "AuditTest/1.0" ||
-		event.Metadata["reason"] != "ops correction" {
+		event.Metadata["reason"] != "ops correction" ||
+		event.Metadata["support_note"] != "[redacted]" {
 		t.Fatalf("audit metadata did not capture request context: %+v", event.Metadata)
+	}
+	if _, ok := event.Metadata["provider_credentials"]; ok {
+		t.Fatalf("audit metadata persisted provider credentials: %+v", event.Metadata)
 	}
 }
 
@@ -169,6 +177,20 @@ func assertAuditMetadataSafe(t *testing.T, events []AuditEvent) {
 	}
 }
 
+func assertAuditActorContext(t *testing.T, events []AuditEvent, actorType, actorID, requestID string, metadata map[string]string) {
+	t.Helper()
+	for _, event := range events {
+		if event.ActorType != actorType || event.ActorID != actorID || event.RequestID != requestID {
+			t.Fatalf("audit event missing actor/request context: %+v", event)
+		}
+		for key, want := range metadata {
+			if got := event.Metadata[key]; got != want {
+				t.Fatalf("audit event metadata %s=%q, want %q in %+v", key, got, want, event)
+			}
+		}
+	}
+}
+
 func containsSensitiveAuditText(value string) bool {
 	value = strings.ToLower(value)
 	return strings.Contains(value, "authorization") ||
@@ -176,6 +198,10 @@ func containsSensitiveAuditText(value string) bool {
 		strings.Contains(value, "token") ||
 		strings.Contains(value, "secret") ||
 		strings.Contains(value, "password") ||
+		strings.Contains(value, "credential") ||
+		strings.Contains(value, "api key") ||
+		strings.Contains(value, "api_key") ||
+		strings.Contains(value, "apikey") ||
 		strings.Contains(value, "bvn") ||
 		strings.Contains(value, "nin")
 }
