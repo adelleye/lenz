@@ -6,6 +6,7 @@ type SQLRepository struct {
 	db *sqlx.DB
 
 	*sqlDemoRepository
+	*sqlCustomerRepository
 	*sqlAccountRepository
 	*sqlLedgerRepository
 	*sqlTransferRepository
@@ -22,6 +23,7 @@ func newSQLRepository(db *sqlx.DB) *SQLRepository {
 	return &SQLRepository{
 		db:                    db,
 		sqlDemoRepository:     &sqlDemoRepository{db: db},
+		sqlCustomerRepository: &sqlCustomerRepository{db: db},
 		sqlAccountRepository:  &sqlAccountRepository{db: db},
 		sqlLedgerRepository:   ledger,
 		sqlTransferRepository: &sqlTransferRepository{db: db, ledger: ledger, holds: holds, providerEvents: providerEvents},

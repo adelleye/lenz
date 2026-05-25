@@ -4,6 +4,7 @@ import "context"
 
 type Repository interface {
 	DemoRepository
+	CustomerRepository
 	AccountRepository
 	LedgerRepository
 	TransferRepository
@@ -11,6 +12,11 @@ type Repository interface {
 
 type DemoRepository interface {
 	EnsureDemoData(ctx context.Context) (*SeedResult, error)
+}
+
+type CustomerRepository interface {
+	CreateCustomer(ctx context.Context, input CreateCustomerInput) (*Customer, error)
+	GetCustomer(ctx context.Context, institutionID, customerID string) (*Customer, error)
 }
 
 type AccountRepository interface {

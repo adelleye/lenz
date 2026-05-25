@@ -159,6 +159,158 @@ func TestInternalErrorsAreSanitized(t *testing.T) {
 	}
 }
 
+func TestCreateCustomerRouteCreatesAndGetsCustomer(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected customer create to return 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var created Customer
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.InstitutionID != DemoInstitutionID || created.BranchID != DemoBranchID || created.Email != "adaeze@example.com" {
+		t.Fatalf("created customer response has wrong scope/data: %+v", created)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/customers/"+created.ID, nil)
+	getReq = withTestPrincipal(getReq, DemoInstitutionID)
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected get customer to return 200, got %d body=%s", getRec.Code, getRec.Body.String())
+	}
+	var got Customer
+	if err := json.Unmarshal(getRec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != created.ID || got.InstitutionID != DemoInstitutionID {
+		t.Fatalf("get customer response mismatch: got %+v created %+v", got, created)
+	}
+}
+
+func TestCreateCustomerRouteRejectsInvalidInput(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"branch_id":"` + DemoBranchID + `","first_name":"","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid customer request to return 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateCustomerRouteRequiresAuth(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateCustomerRouteRejectsMismatchedInstitutionHeader(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched X-Institution-ID to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetCustomerRouteDeniesCrossInstitutionRead(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		FirstName:     "Adaeze",
+		LastName:      "Okafor",
+		Email:         "adaeze@example.com",
+		Phone:         "+2348012345678",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/customers/"+customer.ID, nil)
+	req = withTestPrincipal(req, "99999999-9999-9999-9999-999999999999")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected cross-institution read to return 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCustomerCreateInternalErrorsAreSanitized(t *testing.T) {
+	store := &failingCreateCustomerStore{memoryStore: newMemoryStore()}
+	svc := NewService(store, NewMockNIPProvider())
+	if _, err := svc.SeedDemo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-customer-500")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "database password=secret") {
+		t.Fatalf("raw internal error leaked to client: %s", rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["message"] != "internal_server_error" || response["request_id"] != "req-customer-500" {
+		t.Fatalf("unexpected sanitized error body: %+v", response)
+	}
+}
+
 func TestGeneratedMockOutboundRouteCallsService(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
@@ -257,5 +409,13 @@ type failingBalanceStore struct {
 }
 
 func (s *failingBalanceStore) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
+	return nil, errors.New("database password=secret connection failed")
+}
+
+type failingCreateCustomerStore struct {
+	*memoryStore
+}
+
+func (s *failingCreateCustomerStore) CreateCustomer(ctx context.Context, input CreateCustomerInput) (*Customer, error) {
 	return nil, errors.New("database password=secret connection failed")
 }

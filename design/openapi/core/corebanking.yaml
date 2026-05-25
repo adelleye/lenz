@@ -31,6 +31,68 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/customers:
+    post:
+      operationId: createCustomer
+      summary: Create a customer inside an institution branch
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCustomerRequest"
+      responses:
+        "201":
+          description: Created customer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APICustomer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/customers/{customer_id}:
+    get:
+      operationId: getCustomer
+      summary: Get a customer inside an institution
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: customer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Customer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APICustomer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/customers/{customer_id}/accounts:
     get:
       operationId: listCustomerAccounts
@@ -403,6 +465,27 @@ components:
           type: string
           minLength: 1
         request_id:
+          type: string
+          minLength: 1
+
+    CreateCustomerRequest:
+      type: object
+      required: [branch_id, first_name, last_name, email, phone]
+      properties:
+        branch_id:
+          type: string
+          format: uuid
+        first_name:
+          type: string
+          minLength: 1
+        last_name:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+          minLength: 1
+        phone:
           type: string
           minLength: 1
 

@@ -112,6 +112,15 @@ type Customer struct {
 	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
 }
 
+type CreateCustomerInput struct {
+	InstitutionID string
+	BranchID      string
+	FirstName     string
+	LastName      string
+	Email         string
+	Phone         string
+}
+
 type Account struct {
 	ID            string    `json:"id" db:"id"`
 	InstitutionID string    `json:"institution_id" db:"institution_id"`

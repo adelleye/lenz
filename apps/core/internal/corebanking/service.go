@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/mail"
 	"strings"
 )
 
@@ -25,6 +26,39 @@ func NewService(repository Repository, providers ...TransferProvider) *Service {
 
 func (s *Service) SeedDemo(ctx context.Context) (*SeedResult, error) {
 	return s.repository.EnsureDemoData(ctx)
+}
+
+func (s *Service) CreateCustomer(ctx context.Context, input CreateCustomerInput) (*Customer, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input.InstitutionID = institutionID
+	input.BranchID = strings.TrimSpace(input.BranchID)
+	input.FirstName = strings.TrimSpace(input.FirstName)
+	input.LastName = strings.TrimSpace(input.LastName)
+	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
+	input.Phone = strings.TrimSpace(input.Phone)
+	if input.BranchID == "" || input.FirstName == "" || input.LastName == "" || input.Email == "" || input.Phone == "" {
+		return nil, ErrInvalidRequest
+	}
+	address, err := mail.ParseAddress(input.Email)
+	if err != nil || address.Address != input.Email {
+		return nil, ErrInvalidRequest
+	}
+	return s.repository.CreateCustomer(ctx, input)
+}
+
+func (s *Service) GetCustomer(ctx context.Context, institutionID, customerID string) (*Customer, error) {
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	customerID = strings.TrimSpace(customerID)
+	if customerID == "" {
+		return nil, ErrInvalidRequest
+	}
+	return s.repository.GetCustomer(ctx, institutionID, customerID)
 }
 
 func (s *Service) ListCustomerAccounts(ctx context.Context, institutionID, customerID string) ([]Account, error) {

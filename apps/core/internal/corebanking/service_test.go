@@ -3,6 +3,7 @@ package corebanking
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -11,6 +12,73 @@ import (
 
 	"github.com/google/uuid"
 )
+
+func TestCreateCustomerStoresCustomerInInstitutionBranch(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		FirstName:     "  Adaeze ",
+		LastName:      " Okafor ",
+		Email:         " ADAEZE@example.com ",
+		Phone:         " +2348012345678 ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.ID == "" || customer.InstitutionID != DemoInstitutionID || customer.BranchID != DemoBranchID {
+		t.Fatalf("created customer has wrong scope: %+v", customer)
+	}
+	if customer.FirstName != "Adaeze" || customer.LastName != "Okafor" || customer.Email != "adaeze@example.com" || customer.Phone != "+2348012345678" || customer.Status != "active" {
+		t.Fatalf("created customer was not normalized: %+v", customer)
+	}
+
+	got, err := svc.GetCustomer(ctx, DemoInstitutionID, customer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != customer.ID || got.Email != customer.Email {
+		t.Fatalf("get customer mismatch: got %+v want %+v", got, customer)
+	}
+}
+
+func TestCreateCustomerRejectsInvalidInput(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	tests := []CreateCustomerInput{
+		{InstitutionID: "", BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "ada@example.com", Phone: "+2348012345678"},
+		{InstitutionID: DemoInstitutionID, BranchID: "", FirstName: "Ada", LastName: "Demo", Email: "ada@example.com", Phone: "+2348012345678"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "", LastName: "Demo", Email: "ada@example.com", Phone: "+2348012345678"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "", Email: "ada@example.com", Phone: "+2348012345678"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "not-email", Phone: "+2348012345678"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "ada@example.com", Phone: ""},
+	}
+	for i, input := range tests {
+		t.Run(fmt.Sprintf("invalid_%d", i), func(t *testing.T) {
+			_, err := svc.CreateCustomer(ctx, input)
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("expected invalid request, got %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateCustomerRequiresBranchInInstitution(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	_, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: "99999999-9999-9999-9999-999999999999",
+		BranchID:      DemoBranchID,
+		FirstName:     "Ada",
+		LastName:      "Demo",
+		Email:         "ada@example.com",
+		Phone:         "+2348012345678",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-institution branch lookup to fail as not found, got %v", err)
+	}
+}
 
 func TestSuccessfulTransferInPostsBalancedLedger(t *testing.T) {
 	ctx, svc, store := newTestService(t)
@@ -809,6 +877,41 @@ func (m *memoryStore) seedResultLocked() *SeedResult {
 		Account:     m.accounts[DemoCustomerAccountID],
 		Clearing:    m.accounts[DemoClearingAccountID],
 	}
+}
+
+func (m *memoryStore) CreateCustomer(ctx context.Context, input CreateCustomerInput) (*Customer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	branch, ok := m.branches[input.BranchID]
+	if !ok || branch.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	customer := Customer{
+		ID:            uuid.Must(uuid.NewRandom()).String(),
+		InstitutionID: input.InstitutionID,
+		BranchID:      input.BranchID,
+		FirstName:     input.FirstName,
+		LastName:      input.LastName,
+		Email:         input.Email,
+		Phone:         input.Phone,
+		Status:        "active",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	m.customers[customer.ID] = customer
+	return copyOf(customer), nil
+}
+
+func (m *memoryStore) GetCustomer(ctx context.Context, institutionID, customerID string) (*Customer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	customer, ok := m.customers[customerID]
+	if !ok || customer.InstitutionID != institutionID {
+		return nil, ErrNotFound
+	}
+	return copyOf(customer), nil
 }
 
 func (m *memoryStore) ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error) {

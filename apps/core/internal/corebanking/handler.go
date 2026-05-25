@@ -72,6 +72,34 @@ func (h *HTTPServer) SeedDemo(ctx context.Context, request SeedDemoRequestObject
 	return okResponse(result), nil
 }
 
+func (h *HTTPServer) CreateCustomer(ctx context.Context, request CreateCustomerRequestObject) (CreateCustomerResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input, err := bindCreateCustomerRequest(institutionID, request.Body)
+	if err != nil {
+		return nil, err
+	}
+	customer, err := h.service.CreateCustomer(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return createdResponse(customer), nil
+}
+
+func (h *HTTPServer) GetCustomer(ctx context.Context, request GetCustomerRequestObject) (GetCustomerResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	customer, err := h.service.GetCustomer(ctx, institutionID, request.CustomerId.String())
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(customer), nil
+}
+
 func (h *HTTPServer) ListCustomerAccounts(ctx context.Context, request ListCustomerAccountsRequestObject) (ListCustomerAccountsResponseObject, error) {
 	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
@@ -186,6 +214,24 @@ func (h *HTTPServer) ListTransfers(ctx context.Context, request ListTransfersReq
 	return okResponse(transfers), nil
 }
 
+func (req *CreateCustomerRequest) Bind(r *http.Request) error {
+	return validateCreateCustomerRequest(req)
+}
+
+func validateCreateCustomerRequest(req *CreateCustomerRequest) error {
+	if req == nil {
+		return ErrInvalidRequest
+	}
+	if req.BranchId.String() == "00000000-0000-0000-0000-000000000000" ||
+		strings.TrimSpace(req.FirstName) == "" ||
+		strings.TrimSpace(req.LastName) == "" ||
+		strings.TrimSpace(string(req.Email)) == "" ||
+		strings.TrimSpace(req.Phone) == "" {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
 func (req *MockTransferRequest) Bind(r *http.Request) error {
 	return validateMockTransferRequest(req)
 }
@@ -253,6 +299,20 @@ func bindMockTransferRequest(ctx context.Context, body *MockTransferRequest, hea
 		return TransferRequest{}, err
 	}
 	return req, nil
+}
+
+func bindCreateCustomerRequest(institutionID string, body *CreateCustomerRequest) (CreateCustomerInput, error) {
+	if err := validateCreateCustomerRequest(body); err != nil {
+		return CreateCustomerInput{}, ErrInvalidRequest
+	}
+	return CreateCustomerInput{
+		InstitutionID: institutionID,
+		BranchID:      body.BranchId.String(),
+		FirstName:     body.FirstName,
+		LastName:      body.LastName,
+		Email:         string(body.Email),
+		Phone:         body.Phone,
+	}, nil
 }
 
 func applyRequestScope(ctx context.Context, headerInstitutionID *InstitutionID, headerIdempotencyKey string, req *TransferRequest) error {
@@ -343,8 +403,20 @@ func okResponse(body any) strictJSONResponse {
 	return strictJSONResponse{status: http.StatusOK, body: body}
 }
 
+func createdResponse(body any) strictJSONResponse {
+	return strictJSONResponse{status: http.StatusCreated, body: body}
+}
+
 func (response strictJSONResponse) write(w http.ResponseWriter) error {
 	return writeJSONResponse(w, response.status, response.body)
+}
+
+func (response strictJSONResponse) VisitCreateCustomerResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitGetCustomerResponse(w http.ResponseWriter) error {
+	return response.write(w)
 }
 
 func (response strictJSONResponse) VisitGetAccountBalanceResponse(w http.ResponseWriter) error {

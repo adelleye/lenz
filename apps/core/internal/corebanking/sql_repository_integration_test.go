@@ -204,6 +204,61 @@ func TestSQLRepositoryTransferSpineIntegration(t *testing.T) {
 	}
 }
 
+func TestSQLRepositoryCustomerCreateGetIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
+
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		FirstName:     "Adaeze",
+		LastName:      "Okafor",
+		Email:         "adaeze.sql@example.com",
+		Phone:         "+2348012345678",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.ID == "" || customer.InstitutionID != DemoInstitutionID || customer.BranchID != DemoBranchID || customer.Status != "active" {
+		t.Fatalf("created customer has wrong scope/data: %+v", customer)
+	}
+
+	got, err := svc.GetCustomer(ctx, DemoInstitutionID, customer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != customer.ID || got.Email != customer.Email {
+		t.Fatalf("get customer mismatch: got %+v want %+v", got, customer)
+	}
+
+	var row Customer
+	if err := db.GetContext(ctx, &row, customerSelectSQL+` WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, customer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if row.ID != customer.ID || row.FirstName != "Adaeze" || row.Phone != "+2348012345678" {
+		t.Fatalf("customer row was not created correctly: %+v", row)
+	}
+
+	if _, err := svc.GetCustomer(ctx, "99999999-9999-9999-9999-999999999999", customer.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-institution customer read to fail as not found, got %v", err)
+	}
+	if _, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      "99999999-9999-9999-9999-999999999999",
+		FirstName:     "Ada",
+		LastName:      "Missing",
+		Email:         "ada.missing@example.com",
+		Phone:         "+2348012340000",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected missing branch to fail as not found, got %v", err)
+	}
+}
+
 func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
