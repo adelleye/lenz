@@ -163,11 +163,8 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 		}
 	}
 
-	account, err := lockAccountBalance(ctx, tx, input.InstitutionID, input.AccountID)
+	account, _, err := lockTransferAccountBalances(ctx, tx, input.InstitutionID, input.AccountID, input.ClearingAccountID)
 	if err != nil {
-		return nil, err
-	}
-	if _, err = lockAccountBalance(ctx, tx, input.InstitutionID, input.ClearingAccountID); err != nil {
 		return nil, err
 	}
 
@@ -180,7 +177,11 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 		status = TransferStatusPending
 	}
 	failureReason := input.FailureReason
-	if customerInitiatedOutbound(input) && !canUseAvailableBalance(account.Account, account.Balance.AvailableMinor, input.AmountMinor) {
+	insufficient := customerInitiatedOutbound(input) && !canUseAvailableBalance(account.Account, account.Balance.AvailableMinor, input.AmountMinor)
+	if customerInitiatedOutbound(input) && input.RequireAvailable && account.Balance.AvailableMinor < input.AmountMinor {
+		insufficient = true
+	}
+	if insufficient {
 		if input.RejectInsufficient {
 			return nil, ErrInsufficient
 		}
@@ -275,11 +276,8 @@ func (r *sqlTransferRepository) settlePendingTransfer(ctx context.Context, tx Tx
 	if pending.Direction != input.Direction || pending.AccountID != input.AccountID || pending.AmountMinor != input.AmountMinor || pending.CurrencyID != input.CurrencyID {
 		return nil, ErrConflict
 	}
-	account, err := lockAccountBalance(ctx, tx, pending.InstitutionID, pending.AccountID)
+	account, _, err := lockTransferAccountBalances(ctx, tx, pending.InstitutionID, pending.AccountID, input.ClearingAccountID)
 	if err != nil {
-		return nil, err
-	}
-	if _, err = lockAccountBalance(ctx, tx, pending.InstitutionID, input.ClearingAccountID); err != nil {
 		return nil, err
 	}
 

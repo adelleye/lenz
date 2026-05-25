@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -595,6 +596,255 @@ func TestInternalDebitRejectsInvalidInput(t *testing.T) {
 				tt.mutate(store)
 			}
 			_, err := svc.InternalDebit(ctx, tt.input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("expected %v, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestInternalTransferPostsBalancedLedgerAndBothHistories(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	destination := createMemoryCustomerAccount(t, svc, ctx, "Transfer", "Receiver", "transfer.receiver@example.com", "9990000002")
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "internal-transfer-fund-001",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transfer, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      DemoCustomerAccountID,
+		DestinationAccountID: destination.ID,
+		AmountMinor:          12000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "internal-transfer-001",
+		Reference:            "internal-transfer-ref-001",
+		Narration:            "wallet to wallet",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStatus(t, transfer, TransferStatusSucceeded)
+	if transfer.AccountID != DemoCustomerAccountID || transfer.Direction != TransferDirectionOutbound || transfer.Provider != ProviderLedgerInternal || transfer.ProviderReference != "internal-transfer-ref-001" {
+		t.Fatalf("internal transfer metadata mismatch: %+v", transfer)
+	}
+	if transfer.ProviderStatus != TransferStatusSucceeded || transfer.LedgerStatus != LedgerStatusPosted || transfer.ReconciliationStatus != ReconciliationStatusMatched {
+		t.Fatalf("internal transfer statuses mismatch: %+v", transfer)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 38000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, destination.ID, 12000)
+	assertJournalBalanced(t, store, transfer)
+
+	journal, err := store.GetJournal(ctx, DemoInstitutionID, *transfer.JournalEntryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postings := map[string]string{}
+	for _, posting := range journal.Postings {
+		postings[posting.AccountID] = posting.Direction
+	}
+	if postings[DemoCustomerAccountID] != PostingDebit || postings[destination.ID] != PostingCredit {
+		t.Fatalf("internal transfer postings should debit source and credit destination: %+v", journal.Postings)
+	}
+
+	sourceHistory, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sourceHistory) != 2 || sourceHistory[0].TransferID != transfer.ID || sourceHistory[0].SignedMinor != -12000 || sourceHistory[0].Direction != TransferDirectionOutbound {
+		t.Fatalf("source history mismatch: %+v", sourceHistory)
+	}
+	destinationHistory, err := svc.GetTransactions(ctx, DemoInstitutionID, destination.ID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(destinationHistory) != 1 || destinationHistory[0].TransferID != transfer.ID || destinationHistory[0].SignedMinor != 12000 || destinationHistory[0].Direction != TransferDirectionInbound {
+		t.Fatalf("destination history mismatch: %+v", destinationHistory)
+	}
+}
+
+func TestInternalTransferIdempotencyDoesNotDoublePost(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	destination := createMemoryCustomerAccount(t, svc, ctx, "Idem", "Receiver", "transfer.idem@example.com", "9990000003")
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    30000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "internal-transfer-idem-fund",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	input := InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      DemoCustomerAccountID,
+		DestinationAccountID: destination.ID,
+		AmountMinor:          10000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "internal-transfer-idem",
+		Narration:            "idempotent wallet transfer",
+	}
+
+	first, err := svc.InternalTransfer(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.InternalTransfer(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("duplicate idempotency key posted a new transfer: first=%s second=%s", first.ID, second.ID)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 20000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, destination.ID, 10000)
+}
+
+func TestInternalTransferRejectsInsufficientFundsWithoutTransfer(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	destination := createMemoryCustomerAccount(t, svc, ctx, "NoFunds", "Receiver", "transfer.nofunds@example.com", "9990000004")
+	_, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      DemoCustomerAccountID,
+		DestinationAccountID: destination.ID,
+		AmountMinor:          10000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "internal-transfer-no-funds",
+	})
+	if !errors.Is(err, ErrInsufficient) {
+		t.Fatalf("expected insufficient funds, got %v", err)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
+	assertBalance(t, svc, ctx, DemoInstitutionID, destination.ID, 0)
+
+	transfers, err := svc.ListTransfers(ctx, DemoInstitutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, transfer := range transfers {
+		if transfer.IdempotencyKey == "internal-transfer-no-funds" {
+			t.Fatalf("insufficient internal transfer should not create transfer: %+v", transfer)
+		}
+	}
+}
+
+func TestInternalTransferRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   func(destinationID string) InternalTransferInput
+		mutate  func(*memoryStore, string)
+		wantErr error
+	}{
+		{
+			name: "missing institution",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-missing-institution"}
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "invalid source account id",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: "not-a-uuid", DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-invalid-source"}
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "invalid destination account id",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: "not-a-uuid", AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-invalid-destination"}
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "missing source account",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: "99999999-9999-9999-9999-999999999999", DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-missing-source"}
+			},
+			wantErr: ErrNotFound,
+		},
+		{
+			name: "missing destination account",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: "99999999-9999-9999-9999-999999999999", AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-missing-destination"}
+			},
+			wantErr: ErrNotFound,
+		},
+		{
+			name: "same source and destination",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-same-account"}
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "cross institution account",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: "99999999-9999-9999-9999-999999999999", SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-cross-institution"}
+			},
+			wantErr: ErrNotFound,
+		},
+		{
+			name: "zero amount",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 0, CurrencyID: "NGN", IdempotencyKey: "transfer-zero-amount"}
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "unsupported currency",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "USD", IdempotencyKey: "transfer-bad-currency"}
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "missing idempotency",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN"}
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "closed source account",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-closed-source"}
+			},
+			mutate: func(store *memoryStore, destinationID string) {
+				setMemoryAccountStatus(store, DemoCustomerAccountID, "closed")
+			},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "frozen destination account",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-frozen-destination"}
+			},
+			mutate:  func(store *memoryStore, destinationID string) { setMemoryAccountStatus(store, destinationID, "frozen") },
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name: "cross currency account",
+			input: func(destinationID string) InternalTransferInput {
+				return InternalTransferInput{InstitutionID: DemoInstitutionID, SourceAccountID: DemoCustomerAccountID, DestinationAccountID: destinationID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "transfer-cross-currency"}
+			},
+			mutate:  func(store *memoryStore, destinationID string) { setMemoryAccountCurrency(store, destinationID, "USD") },
+			wantErr: ErrInvalidRequest,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, svc, store := newTestService(t)
+			destination := createMemoryCustomerAccount(t, svc, ctx, "Invalid", "Receiver", "transfer.invalid."+uuid.NewString()+"@example.com", uniqueAccountNumber("71"))
+			if tt.mutate != nil {
+				tt.mutate(store, destination.ID)
+			}
+			_, err := svc.InternalTransfer(ctx, tt.input(destination.ID))
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("expected %v, got %v", tt.wantErr, err)
 			}
@@ -1305,6 +1555,40 @@ func newTestService(t *testing.T) (context.Context, *Service, *memoryStore) {
 	return ctx, svc, store
 }
 
+func createMemoryCustomerAccount(t *testing.T, svc *Service, ctx context.Context, firstName, lastName, email, accountNumber string) *Account {
+	t.Helper()
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
+		FirstName:     firstName,
+		LastName:      lastName,
+		Email:         email,
+		Phone:         "+2348012345678",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    customer.ID,
+		AccountNumber: accountNumber,
+		Name:          firstName + " " + lastName + " Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return account
+}
+
+var testAccountNumberSequence uint64
+
+func uniqueAccountNumber(prefix string) string {
+	return fmt.Sprintf("%s%08d", prefix, atomic.AddUint64(&testAccountNumberSequence, 1))
+}
+
 func mustTransfer(t *testing.T, transfer *Transfer, err error) *Transfer {
 	t.Helper()
 	if err != nil {
@@ -1386,6 +1670,20 @@ func assertHistoryNewestFirst(t *testing.T, history []Transaction) {
 	}
 }
 
+func transactionDirectionFromSigned(signedMinor int64, fallback string) string {
+	if fallback == TransferDirectionReversal {
+		return fallback
+	}
+	switch {
+	case signedMinor > 0:
+		return TransferDirectionInbound
+	case signedMinor < 0:
+		return TransferDirectionOutbound
+	default:
+		return fallback
+	}
+}
+
 func setTransferCreatedAt(t *testing.T, store *memoryStore, transferID string, createdAt time.Time) {
 	t.Helper()
 	store.mu.Lock()
@@ -1401,6 +1699,17 @@ func setMemoryAccountStatus(store *memoryStore, accountID, status string) {
 	account := store.accounts[accountID]
 	account.Status = status
 	store.accounts[accountID] = account
+}
+
+func setMemoryAccountCurrency(store *memoryStore, accountID, currencyID string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	account := store.accounts[accountID]
+	account.CurrencyID = currencyID
+	store.accounts[accountID] = account
+	balance := store.balances[accountID]
+	balance.CurrencyID = currencyID
+	store.balances[accountID] = balance
 }
 
 type memoryStore struct {
@@ -1647,13 +1956,15 @@ func (m *memoryStore) ListTransactions(ctx context.Context, institutionID, accou
 	options = normalizeListTransactionsOptions(options)
 	var txns []Transaction
 	for _, transfer := range m.transfers {
-		if transfer.InstitutionID != institutionID || transfer.AccountID != accountID {
+		if transfer.InstitutionID != institutionID {
 			continue
 		}
 		if options.BeforeCreatedAt != nil && !transfer.CreatedAt.Before(*options.BeforeCreatedAt) {
 			continue
 		}
 		signed := int64(0)
+		direction := transfer.Direction
+		postedForAccount := false
 		if transfer.Status == TransferStatusSucceeded && transfer.JournalEntryID != nil {
 			for _, posting := range m.postings[*transfer.JournalEntryID] {
 				if posting.AccountID == accountID {
@@ -1663,10 +1974,15 @@ func (m *memoryStore) ListTransactions(ctx context.Context, institutionID, accou
 					} else {
 						signed = -posting.AmountMinor
 					}
+					direction = transactionDirectionFromSigned(signed, transfer.Direction)
+					postedForAccount = true
 				}
 			}
 		}
-		txns = append(txns, Transaction{ID: transfer.ID, TransferID: transfer.ID, JournalEntryID: transfer.JournalEntryID, AccountID: accountID, Direction: transfer.Direction, Status: transfer.Status, AmountMinor: transfer.AmountMinor, SignedMinor: signed, CurrencyID: transfer.CurrencyID, Narration: transfer.Narration, CreatedAt: transfer.CreatedAt})
+		if transfer.AccountID != accountID && !postedForAccount {
+			continue
+		}
+		txns = append(txns, Transaction{ID: transfer.ID, TransferID: transfer.ID, JournalEntryID: transfer.JournalEntryID, AccountID: accountID, Direction: direction, Status: transfer.Status, AmountMinor: transfer.AmountMinor, SignedMinor: signed, CurrencyID: transfer.CurrencyID, Narration: transfer.Narration, CreatedAt: transfer.CreatedAt})
 	}
 	sort.Slice(txns, func(i, j int) bool { return txns[i].CreatedAt.After(txns[j].CreatedAt) })
 	if len(txns) > options.Limit {
@@ -1763,7 +2079,11 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	}
 	failureReason := input.FailureReason
 	balance := m.balances[input.AccountID]
-	if customerInitiatedOutbound(input) && !canUseAvailableBalance(account, balance.AvailableMinor, input.AmountMinor) {
+	insufficient := customerInitiatedOutbound(input) && !canUseAvailableBalance(account, balance.AvailableMinor, input.AmountMinor)
+	if customerInitiatedOutbound(input) && input.RequireAvailable && balance.AvailableMinor < input.AmountMinor {
+		insufficient = true
+	}
+	if insufficient {
 		if input.RejectInsufficient {
 			return nil, ErrInsufficient
 		}
