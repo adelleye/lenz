@@ -183,7 +183,7 @@ func (s *Service) InternalCredit(ctx context.Context, input InternalCreditInput)
 	if err != nil {
 		return nil, err
 	}
-	if account.Kind != AccountKindCustomer || account.Status != "active" || account.CurrencyID != input.CurrencyID {
+	if !validCreditCustomerAccount(*account, input.InstitutionID, input.CurrencyID) {
 		return nil, ErrInvalidRequest
 	}
 
@@ -247,7 +247,7 @@ func (s *Service) InternalDebit(ctx context.Context, input InternalDebitInput) (
 	if err != nil {
 		return nil, err
 	}
-	if account.Kind != AccountKindCustomer || account.Status != "active" || account.CurrencyID != input.CurrencyID {
+	if !validDebitCustomerAccount(*account, input.InstitutionID, input.CurrencyID) {
 		return nil, ErrInvalidRequest
 	}
 
@@ -317,8 +317,8 @@ func (s *Service) InternalTransfer(ctx context.Context, input InternalTransferIn
 	if err != nil {
 		return nil, err
 	}
-	if !validInternalTransferCustomerAccount(*source, input.InstitutionID, input.CurrencyID) ||
-		!validInternalTransferCustomerAccount(*destination, input.InstitutionID, input.CurrencyID) {
+	if !validDebitCustomerAccount(*source, input.InstitutionID, input.CurrencyID) ||
+		!validCreditCustomerAccount(*destination, input.InstitutionID, input.CurrencyID) {
 		return nil, ErrInvalidRequest
 	}
 
@@ -706,15 +706,23 @@ func validInternalSettlementAccount(account Account, institutionID, currencyID s
 		account.AllowNegative &&
 		account.CurrencyID == currencyID &&
 		account.NormalBalance == NormalBalanceDebit &&
-		account.Status == "active"
+		account.Status == AccountStatusActive
 }
 
-func validInternalTransferCustomerAccount(account Account, institutionID, currencyID string) bool {
+func validDebitCustomerAccount(account Account, institutionID, currencyID string) bool {
 	return account.InstitutionID == institutionID &&
 		account.Kind == AccountKindCustomer &&
 		account.CurrencyID == currencyID &&
 		account.NormalBalance == NormalBalanceCredit &&
-		account.Status == "active"
+		account.Status == AccountStatusActive
+}
+
+func validCreditCustomerAccount(account Account, institutionID, currencyID string) bool {
+	return account.InstitutionID == institutionID &&
+		account.Kind == AccountKindCustomer &&
+		account.CurrencyID == currencyID &&
+		account.NormalBalance == NormalBalanceCredit &&
+		(account.Status == AccountStatusActive || account.Status == AccountStatusPostNoDebit)
 }
 
 func isTenDigitAccountNumber(accountNumber string) bool {

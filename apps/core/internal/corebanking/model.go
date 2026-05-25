@@ -17,6 +17,11 @@ const (
 	AccountKindCustomer = "customer"
 	AccountKindInternal = "internal"
 
+	AccountStatusActive      = "active"
+	AccountStatusFrozen      = "frozen"
+	AccountStatusPostNoDebit = "post_no_debit"
+	AccountStatusClosed      = "closed"
+
 	AccountProductStandardWallet  = "standard_wallet"
 	AccountProductStandardCurrent = "standard_current"
 	AccountProductStandardSavings = "standard_savings"
@@ -186,6 +191,30 @@ type InternalTransferInput struct {
 	Reference            string
 }
 
+type AccountControlInput struct {
+	InstitutionID string
+	AccountID     string
+	Reference     string
+	Reason        string
+}
+
+type AccountLienInput struct {
+	InstitutionID string
+	AccountID     string
+	AmountMinor   int64
+	CurrencyID    string
+	Reference     string
+	Reason        string
+}
+
+type ReleaseLienInput struct {
+	InstitutionID string
+	AccountID     string
+	LienID        string
+	Reference     string
+	Reason        string
+}
+
 type Account struct {
 	ID            string    `json:"id" db:"id"`
 	InstitutionID string    `json:"institution_id" db:"institution_id"`
@@ -262,11 +291,12 @@ type AccountHold struct {
 	ID            string     `json:"id" db:"id"`
 	InstitutionID string     `json:"institution_id" db:"institution_id"`
 	AccountID     string     `json:"account_id" db:"account_id"`
-	TransferID    string     `json:"transfer_id" db:"transfer_id"`
+	TransferID    *string    `json:"transfer_id,omitempty" db:"transfer_id"`
 	AmountMinor   int64      `json:"amount_minor" db:"amount_minor"`
 	CurrencyID    string     `json:"currency_id" db:"currency_id"`
 	Status        string     `json:"status" db:"status"`
 	Reason        string     `json:"reason" db:"reason"`
+	Reference     string     `json:"reference" db:"reference"`
 	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
 	ReleasedAt    *time.Time `json:"released_at,omitempty" db:"released_at"`

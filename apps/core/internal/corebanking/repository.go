@@ -23,9 +23,12 @@ type AccountRepository interface {
 	CreateAccount(ctx context.Context, input CreateAccountInput) (*Account, error)
 	ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error)
 	GetAccount(ctx context.Context, institutionID, accountID string) (*Account, error)
+	SetAccountStatus(ctx context.Context, institutionID, accountID, status string) (*Account, error)
 	GetDefaultInternalSettlementAccount(ctx context.Context, institutionID, currencyID string) (*Account, error)
 	GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error)
 	ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error)
+	PlaceAccountLien(ctx context.Context, input AccountLienInput) (*AccountHold, error)
+	ReleaseAccountLien(ctx context.Context, input ReleaseLienInput) (*AccountHold, error)
 }
 
 type LedgerRepository interface {

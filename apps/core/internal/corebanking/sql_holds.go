@@ -12,9 +12,9 @@ type sqlHoldRepository struct{}
 
 func (r *sqlHoldRepository) create(ctx context.Context, tx TxRunner, transfer Transfer, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO account_holds (id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, 'active', 'pending_outbound_transfer', $7, $7)`,
-		uuid.Must(uuid.NewRandom()).String(), transfer.InstitutionID, transfer.AccountID, transfer.ID, transfer.AmountMinor, transfer.CurrencyID, now); err != nil {
+INSERT INTO account_holds (id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, reference, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, 'active', 'pending_outbound_transfer', $7, $8, $8)`,
+		uuid.Must(uuid.NewRandom()).String(), transfer.InstitutionID, transfer.AccountID, transfer.ID, transfer.AmountMinor, transfer.CurrencyID, transfer.ProviderReference, now); err != nil {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `
@@ -66,7 +66,7 @@ WHERE institution_id = $2 AND id = $3`, now, institutionID, hold.ID)
 func (r *sqlHoldRepository) getActiveForTransfer(ctx context.Context, tx TxRunner, institutionID, transferID string) (*AccountHold, error) {
 	var hold AccountHold
 	err := tx.GetContext(ctx, &hold, `
-SELECT id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, created_at, updated_at, released_at
+SELECT id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, reference, created_at, updated_at, released_at
 FROM account_holds
 WHERE institution_id = $1 AND transfer_id = $2 AND status = 'active'
 FOR UPDATE`, institutionID, transferID)

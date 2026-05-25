@@ -163,8 +163,11 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 		}
 	}
 
-	account, _, err := lockTransferAccountBalances(ctx, tx, input.InstitutionID, input.AccountID, input.ClearingAccountID)
+	account, clearing, err := lockTransferAccountBalances(ctx, tx, input.InstitutionID, input.AccountID, input.ClearingAccountID)
 	if err != nil {
+		return nil, err
+	}
+	if err := enforceTransferControls(input, account.Account, clearing.Account); err != nil {
 		return nil, err
 	}
 
@@ -276,7 +279,7 @@ func (r *sqlTransferRepository) settlePendingTransfer(ctx context.Context, tx Tx
 	if pending.Direction != input.Direction || pending.AccountID != input.AccountID || pending.AmountMinor != input.AmountMinor || pending.CurrencyID != input.CurrencyID {
 		return nil, ErrConflict
 	}
-	account, _, err := lockTransferAccountBalances(ctx, tx, pending.InstitutionID, pending.AccountID, input.ClearingAccountID)
+	account, clearing, err := lockTransferAccountBalances(ctx, tx, pending.InstitutionID, pending.AccountID, input.ClearingAccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +312,9 @@ func (r *sqlTransferRepository) settlePendingTransfer(ctx context.Context, tx Tx
 
 	switch status {
 	case TransferStatusSucceeded:
+		if err := enforceTransferControls(input, account.Account, clearing.Account); err != nil {
+			return nil, err
+		}
 		if customerInitiatedOutbound(input) && !account.AllowNegative {
 			if _, err = r.holds.getActiveForTransfer(ctx, tx, pending.InstitutionID, pending.ID); err != nil {
 				return nil, err

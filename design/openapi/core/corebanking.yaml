@@ -219,6 +219,234 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/accounts/{account_id}/freeze:
+    post:
+      operationId: freezeAccount
+      summary: Freeze an account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountControlRequest"
+      responses:
+        "200":
+          description: Frozen account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/accounts/{account_id}/unfreeze:
+    post:
+      operationId: unfreezeAccount
+      summary: Unfreeze an account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountControlRequest"
+      responses:
+        "200":
+          description: Active account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/accounts/{account_id}/post-no-debit:
+    post:
+      operationId: activatePostNoDebit
+      summary: Activate post-no-debit on an account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountControlRequest"
+      responses:
+        "200":
+          description: Post-no-debit account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      operationId: deactivatePostNoDebit
+      summary: Deactivate post-no-debit on an account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountControlRequest"
+      responses:
+        "200":
+          description: Active account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/accounts/{account_id}/liens:
+    post:
+      operationId: placeAccountLien
+      summary: Place an operational lien on an account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountLienRequest"
+      responses:
+        "200":
+          description: Active lien.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccountHold"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/accounts/{account_id}/liens/{lien_id}:
+    delete:
+      operationId: releaseAccountLien
+      summary: Release an operational lien
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: lien_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseLienRequest"
+      responses:
+        "200":
+          description: Released lien.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccountHold"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/accounts/{account_id}/transactions:
     get:
       operationId: listAccountTransactions
@@ -770,6 +998,45 @@ components:
         reference:
           type: string
 
+    AccountControlRequest:
+      type: object
+      required: [reference, reason]
+      properties:
+        reference:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+          minLength: 1
+
+    AccountLienRequest:
+      type: object
+      required: [amount_minor, currency_id, reference, reason]
+      properties:
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+        reference:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+          minLength: 1
+
+    ReleaseLienRequest:
+      type: object
+      required: [reference]
+      properties:
+        reference:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+
     APISeedResult:
       type: object
       required: [institution, branch, customer, account, clearing_account]
@@ -957,6 +1224,46 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    APIAccountHold:
+      type: object
+      required: [id, institution_id, account_id, amount_minor, currency_id, status, reason, reference, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        transfer_id:
+          type: string
+          format: uuid
+          nullable: true
+        amount_minor:
+          type: integer
+          format: int64
+        currency_id:
+          type: string
+        status:
+          type: string
+          enum: [active, released, consumed]
+        reason:
+          type: string
+        reference:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        released_at:
+          type: string
+          format: date-time
+          nullable: true
 
     APITransfer:
       type: object

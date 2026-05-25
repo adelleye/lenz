@@ -1899,6 +1899,19 @@ func (m *memoryStore) GetDefaultInternalSettlementAccount(ctx context.Context, i
 	return defaultAccount, nil
 }
 
+func (m *memoryStore) SetAccountStatus(ctx context.Context, institutionID, accountID, status string) (*Account, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	account, ok := m.accounts[accountID]
+	if !ok || account.InstitutionID != institutionID {
+		return nil, ErrNotFound
+	}
+	account.Status = status
+	account.UpdatedAt = time.Now().UTC()
+	m.accounts[accountID] = account
+	return copyOf(account), nil
+}
+
 func (m *memoryStore) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1907,6 +1920,59 @@ func (m *memoryStore) GetBalance(ctx context.Context, institutionID, accountID s
 		return nil, ErrNotFound
 	}
 	return copyOf(balance), nil
+}
+
+func (m *memoryStore) PlaceAccountLien(ctx context.Context, input AccountLienInput) (*AccountHold, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	account, ok := m.accounts[input.AccountID]
+	if !ok || account.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	balance, ok := m.balances[input.AccountID]
+	if !ok || balance.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	if account.Kind != AccountKindCustomer || account.CurrencyID != input.CurrencyID || account.Status == AccountStatusClosed {
+		return nil, ErrInvalidRequest
+	}
+	for _, hold := range m.holds {
+		if hold.InstitutionID == input.InstitutionID && hold.AccountID == input.AccountID && hold.TransferID == nil && hold.Status == HoldStatusActive && hold.Reference == input.Reference {
+			return copyOf(hold), nil
+		}
+	}
+	if balance.AvailableMinor < input.AmountMinor {
+		return nil, ErrInsufficient
+	}
+	now := time.Now().UTC()
+	hold := AccountHold{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: input.InstitutionID, AccountID: input.AccountID, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, Status: HoldStatusActive, Reason: input.Reason, Reference: input.Reference, CreatedAt: now, UpdatedAt: now}
+	m.holds[hold.ID] = hold
+	balance.AvailableMinor -= input.AmountMinor
+	balance.UpdatedAt = now
+	m.balances[input.AccountID] = balance
+	return copyOf(hold), nil
+}
+
+func (m *memoryStore) ReleaseAccountLien(ctx context.Context, input ReleaseLienInput) (*AccountHold, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hold, ok := m.holds[input.LienID]
+	if !ok || hold.InstitutionID != input.InstitutionID || hold.AccountID != input.AccountID || hold.TransferID != nil {
+		return nil, ErrNotFound
+	}
+	if hold.Status != HoldStatusActive {
+		return copyOf(hold), nil
+	}
+	now := time.Now().UTC()
+	hold.Status = HoldStatusReleased
+	hold.UpdatedAt = now
+	hold.ReleasedAt = &now
+	m.holds[input.LienID] = hold
+	balance := m.balances[input.AccountID]
+	balance.AvailableMinor += hold.AmountMinor
+	balance.UpdatedAt = now
+	m.balances[input.AccountID] = balance
+	return copyOf(hold), nil
 }
 
 func (m *memoryStore) GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error) {
@@ -2107,6 +2173,9 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	if !ok || clearing.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
 	}
+	if err := enforceTransferControls(input, account, clearing); err != nil {
+		return nil, err
+	}
 	providerStatus := strings.ToLower(strings.TrimSpace(input.ProviderStatus))
 	if providerStatus == "" {
 		providerStatus = input.Status
@@ -2188,6 +2257,13 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 	}
 	switch status {
 	case TransferStatusSucceeded:
+		clearing, ok := m.accounts[input.ClearingAccountID]
+		if !ok || clearing.InstitutionID != input.InstitutionID {
+			return nil, ErrNotFound
+		}
+		if err := enforceTransferControls(input, account, clearing); err != nil {
+			return nil, err
+		}
 		heldAccountID := ""
 		if pending.Direction == TransferDirectionOutbound && pending.ReversalOfTransferID == nil {
 			if hold, ok := m.holds[pending.ID]; !ok || hold.Status != HoldStatusActive {
@@ -2272,7 +2348,8 @@ func (m *memoryStore) applyPostingLocked(posting Posting, journalID string, now 
 }
 
 func (m *memoryStore) createHoldLocked(transfer Transfer, now time.Time) {
-	m.holds[transfer.ID] = AccountHold{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: transfer.InstitutionID, AccountID: transfer.AccountID, TransferID: transfer.ID, AmountMinor: transfer.AmountMinor, CurrencyID: transfer.CurrencyID, Status: HoldStatusActive, Reason: "pending_outbound_transfer", CreatedAt: now, UpdatedAt: now}
+	transferID := transfer.ID
+	m.holds[transfer.ID] = AccountHold{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: transfer.InstitutionID, AccountID: transfer.AccountID, TransferID: &transferID, AmountMinor: transfer.AmountMinor, CurrencyID: transfer.CurrencyID, Status: HoldStatusActive, Reason: "pending_outbound_transfer", Reference: transfer.ProviderReference, CreatedAt: now, UpdatedAt: now}
 	balance := m.balances[transfer.AccountID]
 	balance.AvailableMinor -= transfer.AmountMinor
 	balance.UpdatedAt = now

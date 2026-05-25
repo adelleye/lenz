@@ -14,6 +14,38 @@ func canUseAvailableBalance(account Account, availableMinor, amountMinor int64) 
 	return availableMinor >= amountMinor
 }
 
+func enforceTransferControls(input RecordTransferInput, account, clearing Account) error {
+	if err := enforcePrimaryAccountControls(input, account); err != nil {
+		return err
+	}
+	return enforceCounterpartyAccountControls(input, clearing)
+}
+
+func enforcePrimaryAccountControls(input RecordTransferInput, account Account) error {
+	if account.Kind != AccountKindCustomer {
+		return nil
+	}
+	switch account.Status {
+	case AccountStatusFrozen, AccountStatusClosed:
+		return ErrInvalidRequest
+	case AccountStatusPostNoDebit:
+		if input.Direction == TransferDirectionOutbound {
+			return ErrInvalidRequest
+		}
+	}
+	return nil
+}
+
+func enforceCounterpartyAccountControls(input RecordTransferInput, account Account) error {
+	if account.Kind != AccountKindCustomer {
+		return nil
+	}
+	if account.Status == AccountStatusFrozen || account.Status == AccountStatusClosed {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
 func wouldCreateReversalDeficit(account Account, balance AccountBalance, input RecordTransferInput) bool {
 	if input.ReversalOfTransferID == "" || input.Direction != TransferDirectionOutbound {
 		return false

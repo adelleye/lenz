@@ -67,6 +67,12 @@ request() {
   curl -fsS -H "Authorization: Bearer ${AUTH_TOKEN}" "$@"
 }
 
+request_status() {
+  local response_path="$1"
+  shift
+  curl -sS -o "$response_path" -w "%{http_code}" -H "Authorization: Bearer ${AUTH_TOKEN}" "$@"
+}
+
 wait_container_healthy() {
   local name="$1"
   local status
@@ -96,11 +102,16 @@ assert_balance() {
 }
 
 assert_balance_pair() {
-  local want_available="$1"
-  local want_ledger="$2"
+  assert_account_balance_pair "$ACCOUNT_ID" "$1" "$2"
+}
+
+assert_account_balance_pair() {
+  local account_id="$1"
+  local want_available="$2"
+  local want_ledger="$3"
   local body
-  body="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/accounts/${ACCOUNT_ID}/balance")"
-  assert_json "$body" ".available_minor == ${want_available} and .ledger_minor == ${want_ledger}" "expected account balance available=${want_available} ledger=${want_ledger}"
+  body="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/accounts/${account_id}/balance")"
+  assert_json "$body" ".available_minor == ${want_available} and .ledger_minor == ${want_ledger}" "expected account ${account_id} balance available=${want_available} ledger=${want_ledger}"
 }
 
 assert_ledger_status() {
@@ -313,8 +324,100 @@ assert_json "$transactions" "[.[] | select(.transfer_id == \"${failed_id}\" and 
 assert_json "$transactions" "[.[] | select(.transfer_id == \"${reversal_id}\" and .direction == \"debit\" and .signed_amount_minor == -500000 and .journal_entry_id != null)] | length == 1" "history missing reversal debit row"
 pass "transaction history came from Lenz transfer/journal/posting records"
 
+control_customer="$(request -X POST "${BASE_URL}/api/v1/customers" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"branch_id\":\"${DEMO_BRANCH_ID:-22222222-2222-2222-2222-222222222222}\",\"customer_type\":\"individual\",\"first_name\":\"Control\",\"last_name\":\"Demo\",\"email\":\"control.demo@example.com\",\"phone\":\"+2348000000001\"}")"
+control_customer_id="$(json_get '.id' "$control_customer")"
+control_account="$(request -X POST "${BASE_URL}/api/v1/accounts" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"customer_id\":\"${control_customer_id}\",\"account_number\":\"9990000101\",\"name\":\"Control Demo Wallet\",\"product_type\":\"standard_wallet\",\"currency_id\":\"NGN\"}")"
+control_account_id="$(json_get '.id' "$control_account")"
+control_credit="$(request -X POST "${BASE_URL}/api/v1/internal/credits" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":50000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-credit-001\",\"reference\":\"demo-controls-credit-ref\"}")"
+assert_json "$control_credit" '.status == "succeeded" and .journal_entry_id != null' "control account funding failed"
+assert_account_balance_pair "$control_account_id" 50000 50000
+pass "control test account was created and funded"
+
+lien="$(request -X POST "${BASE_URL}/api/v1/accounts/${control_account_id}/liens" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d '{"amount_minor":15000,"currency_id":"NGN","reference":"demo-lien-ref-001","reason":"demo lien"}')"
+lien_id="$(json_get '.id' "$lien")"
+assert_json "$lien" '.status == "active" and .transfer_id == null and .amount_minor == 15000 and .reference == "demo-lien-ref-001"' "lien placement response mismatch"
+assert_account_balance_pair "$control_account_id" 35000 50000
+lien_db="$(docker exec lenzcore-postgres psql -U lenzcore -d lenzcore -tAc "SELECT status || '|' || amount_minor || '|' || reference || '|' || CASE WHEN transfer_id IS NULL THEN 'null_transfer' ELSE 'linked_transfer' END FROM account_holds WHERE id = '${lien_id}'")"
+[[ "$lien_db" == "active|15000|demo-lien-ref-001|null_transfer" ]] || fail "lien DB row mismatch: ${lien_db}"
+pass "lien reduced available balance and persisted an active hold row"
+
+control_fail_path="${TMP_DIR}/control-fail.json"
+control_debit_status="$(request_status "$control_fail_path" -X POST "${BASE_URL}/api/v1/internal/debits" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":40000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-over-lien-debit\"}")"
+[[ "$control_debit_status" == "422" ]] || fail "expected lien-limited debit to return 422, got ${control_debit_status}: $(cat "$control_fail_path")"
+pass "debit above lien-reduced available balance was rejected"
+
+released_lien="$(request -X DELETE "${BASE_URL}/api/v1/accounts/${control_account_id}/liens/${lien_id}" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d '{"reference":"demo-lien-release-ref-001"}')"
+assert_json "$released_lien" '.status == "released" and .released_at != null' "lien release response mismatch"
+assert_account_balance_pair "$control_account_id" 50000 50000
+pass "lien release restored available balance without deleting the hold"
+
+control_debit="$(request -X POST "${BASE_URL}/api/v1/internal/debits" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":40000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-post-lien-debit\",\"reference\":\"demo-controls-post-lien-debit-ref\"}")"
+assert_json "$control_debit" '.status == "succeeded" and .journal_entry_id != null' "post-lien debit did not succeed"
+assert_account_balance_pair "$control_account_id" 10000 10000
+pass "debit succeeded after lien release"
+
+frozen_account="$(request -X POST "${BASE_URL}/api/v1/accounts/${control_account_id}/freeze" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d '{"reference":"demo-freeze-ref-001","reason":"demo freeze"}')"
+assert_json "$frozen_account" '.status == "frozen"' "freeze did not mark account frozen"
+control_credit_status="$(request_status "$control_fail_path" -X POST "${BASE_URL}/api/v1/internal/credits" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-frozen-credit\"}")"
+[[ "$control_credit_status" == "400" ]] || fail "expected frozen credit to return 400, got ${control_credit_status}: $(cat "$control_fail_path")"
+control_debit_status="$(request_status "$control_fail_path" -X POST "${BASE_URL}/api/v1/internal/debits" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-frozen-debit\"}")"
+[[ "$control_debit_status" == "400" ]] || fail "expected frozen debit to return 400, got ${control_debit_status}: $(cat "$control_fail_path")"
+pass "frozen account blocked credits and debits"
+
+active_account="$(request -X POST "${BASE_URL}/api/v1/accounts/${control_account_id}/unfreeze" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d '{"reference":"demo-unfreeze-ref-001","reason":"demo unfreeze"}')"
+assert_json "$active_account" '.status == "active"' "unfreeze did not mark account active"
+pnd_account="$(request -X POST "${BASE_URL}/api/v1/accounts/${control_account_id}/post-no-debit" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d '{"reference":"demo-pnd-ref-001","reason":"demo pnd"}')"
+assert_json "$pnd_account" '.status == "post_no_debit"' "PND did not mark account post_no_debit"
+control_debit_status="$(request_status "$control_fail_path" -X POST "${BASE_URL}/api/v1/internal/debits" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-pnd-debit\"}")"
+[[ "$control_debit_status" == "400" ]] || fail "expected PND debit to return 400, got ${control_debit_status}: $(cat "$control_fail_path")"
+control_credit="$(request -X POST "${BASE_URL}/api/v1/internal/credits" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-pnd-credit\",\"reference\":\"demo-controls-pnd-credit-ref\"}")"
+assert_json "$control_credit" '.status == "succeeded" and .journal_entry_id != null' "PND account did not allow credit"
+pass "PND blocked debits while allowing credits"
+
 transfers="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/admin/transfers")"
-assert_json "$transfers" 'length == 7' "admin transfer list did not contain seven transfer records"
+assert_json "$transfers" 'length >= 10' "admin transfer list did not include demo and account-control transfer records"
 pass "admin transfer list returned all demo transfers"
 
 echo
