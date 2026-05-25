@@ -168,6 +168,22 @@ func (h *HTTPServer) CreateInternalCredit(ctx context.Context, request CreateInt
 	return okResponse(transfer), nil
 }
 
+func (h *HTTPServer) CreateInternalDebit(ctx context.Context, request CreateInternalDebitRequestObject) (CreateInternalDebitResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input, err := bindInternalDebitRequest(institutionID, request.Body)
+	if err != nil {
+		return nil, err
+	}
+	transfer, err := h.service.InternalDebit(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(transfer), nil
+}
+
 func (h *HTTPServer) ListAccountTransactions(ctx context.Context, request ListAccountTransactionsRequestObject) (ListAccountTransactionsResponseObject, error) {
 	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
@@ -300,6 +316,20 @@ func validateInternalCreditRequest(req *InternalCreditRequest) error {
 	return nil
 }
 
+func (req *InternalDebitRequest) Bind(r *http.Request) error {
+	return validateInternalDebitRequest(req)
+}
+
+func validateInternalDebitRequest(req *InternalDebitRequest) error {
+	if req == nil {
+		return ErrInvalidRequest
+	}
+	if req.AccountId.String() == "00000000-0000-0000-0000-000000000000" || req.AmountMinor <= 0 || string(req.CurrencyId) != "NGN" || strings.TrimSpace(req.IdempotencyKey) == "" {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
 func (req *MockTransferRequest) Bind(r *http.Request) error {
 	return validateMockTransferRequest(req)
 }
@@ -413,6 +443,22 @@ func bindInternalCreditRequest(institutionID string, body *InternalCreditRequest
 		IdempotencyKey:  body.IdempotencyKey,
 		Narration:       optionalString(body.Narration),
 		Reference:       optionalString(body.Reference),
+	}, nil
+}
+
+func bindInternalDebitRequest(institutionID string, body *InternalDebitRequest) (InternalDebitInput, error) {
+	if err := validateInternalDebitRequest(body); err != nil {
+		return InternalDebitInput{}, ErrInvalidRequest
+	}
+	return InternalDebitInput{
+		InstitutionID:        institutionID,
+		AccountID:            body.AccountId.String(),
+		DestinationAccountID: optionalUUIDString(body.DestinationAccountId),
+		AmountMinor:          body.AmountMinor,
+		CurrencyID:           string(body.CurrencyId),
+		IdempotencyKey:       body.IdempotencyKey,
+		Narration:            optionalString(body.Narration),
+		Reference:            optionalString(body.Reference),
 	}, nil
 }
 
@@ -547,6 +593,10 @@ func (response strictJSONResponse) VisitGetAccountBalanceResponse(w http.Respons
 }
 
 func (response strictJSONResponse) VisitCreateInternalCreditResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitCreateInternalDebitResponse(w http.ResponseWriter) error {
 	return response.write(w)
 }
 

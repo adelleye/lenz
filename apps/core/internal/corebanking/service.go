@@ -189,14 +189,14 @@ func (s *Service) InternalCredit(ctx context.Context, input InternalCreditInput)
 
 	source := (*Account)(nil)
 	if input.SourceAccountID == "" {
-		source, err = s.repository.GetDefaultInternalCreditSourceAccount(ctx, input.InstitutionID, input.CurrencyID)
+		source, err = s.repository.GetDefaultInternalSettlementAccount(ctx, input.InstitutionID, input.CurrencyID)
 	} else {
 		source, err = s.repository.GetAccount(ctx, input.InstitutionID, input.SourceAccountID)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if !validInternalCreditSourceAccount(*source, input.InstitutionID, input.CurrencyID) {
+	if !validInternalSettlementAccount(*source, input.InstitutionID, input.CurrencyID) {
 		return nil, ErrInvalidRequest
 	}
 
@@ -213,6 +213,71 @@ func (s *Service) InternalCredit(ctx context.Context, input InternalCreditInput)
 		ProviderReference: input.Reference,
 		ProviderStatus:    TransferStatusSucceeded,
 		Narration:         input.Narration,
+	})
+}
+
+func (s *Service) InternalDebit(ctx context.Context, input InternalDebitInput) (*Transfer, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input.InstitutionID = institutionID
+	input.AccountID = strings.TrimSpace(input.AccountID)
+	input.DestinationAccountID = strings.TrimSpace(input.DestinationAccountID)
+	input.CurrencyID = strings.ToUpper(strings.TrimSpace(input.CurrencyID))
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.Reference = strings.TrimSpace(input.Reference)
+	input.Narration = strings.TrimSpace(input.Narration)
+	if input.Narration == "" {
+		input.Narration = "Internal debit"
+	}
+	if input.AmountMinor <= 0 || input.IdempotencyKey == "" || input.CurrencyID != "NGN" {
+		return nil, ErrInvalidRequest
+	}
+	if _, err := uuid.Parse(input.AccountID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	if input.DestinationAccountID != "" {
+		if _, err := uuid.Parse(input.DestinationAccountID); err != nil {
+			return nil, ErrInvalidRequest
+		}
+	}
+
+	account, err := s.repository.GetAccount(ctx, input.InstitutionID, input.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	if account.Kind != AccountKindCustomer || account.Status != "active" || account.CurrencyID != input.CurrencyID {
+		return nil, ErrInvalidRequest
+	}
+
+	destination := (*Account)(nil)
+	if input.DestinationAccountID == "" {
+		destination, err = s.repository.GetDefaultInternalSettlementAccount(ctx, input.InstitutionID, input.CurrencyID)
+	} else {
+		destination, err = s.repository.GetAccount(ctx, input.InstitutionID, input.DestinationAccountID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !validInternalSettlementAccount(*destination, input.InstitutionID, input.CurrencyID) {
+		return nil, ErrInvalidRequest
+	}
+
+	return s.repository.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:      input.InstitutionID,
+		AccountID:          account.ID,
+		ClearingAccountID:  destination.ID,
+		Direction:          TransferDirectionOutbound,
+		Status:             TransferStatusSucceeded,
+		AmountMinor:        input.AmountMinor,
+		CurrencyID:         input.CurrencyID,
+		IdempotencyKey:     input.IdempotencyKey,
+		Provider:           ProviderLedgerInternal,
+		ProviderReference:  input.Reference,
+		ProviderStatus:     TransferStatusSucceeded,
+		Narration:          input.Narration,
+		RejectInsufficient: true,
 	})
 }
 
@@ -552,7 +617,7 @@ func validCustomerAccountProduct(productType string) bool {
 	}
 }
 
-func validInternalCreditSourceAccount(account Account, institutionID, currencyID string) bool {
+func validInternalSettlementAccount(account Account, institutionID, currencyID string) bool {
 	return account.InstitutionID == institutionID &&
 		account.Kind == AccountKindInternal &&
 		account.ProductType == AccountProductInternal &&

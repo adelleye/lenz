@@ -676,6 +676,193 @@ func TestSQLRepositoryInternalCreditConcurrentIdempotency(t *testing.T) {
 	assertSQLReplayIntegrity(t, ctx, db)
 }
 
+func TestSQLRepositoryInternalDebitIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
+
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	account := createSQLCustomerAccount(t, svc, ctx, "Internal", "Debit", "internal.debit@example.com", "1234567897", "Internal Debit Wallet")
+
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    40000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-internal-debit-fund",
+		Narration:      "SQL internal debit funding",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	debit, err := svc.InternalDebit(ctx, InternalDebitInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    15000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-internal-debit-001",
+		Reference:      "sql-internal-debit-ref-001",
+		Narration:      "SQL internal debit proof",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStatus(t, debit, TransferStatusSucceeded)
+	if debit.Direction != TransferDirectionOutbound || debit.Provider != ProviderLedgerInternal || debit.ProviderReference != "sql-internal-debit-ref-001" || debit.JournalEntryID == nil {
+		t.Fatalf("internal debit transfer mismatch: %+v", debit)
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 25000, 25000)
+	assertSQLAccountBalancePair(t, svc, ctx, DemoClearingAccountID, 25000, 25000)
+	assertSQLJournalBalanced(t, svc, ctx, debit, 15000)
+	assertSQLInternalDebitRows(t, ctx, db, debit, account.ID, DemoClearingAccountID, 15000)
+
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, account.ID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenDebit := false
+	for _, txn := range history {
+		if txn.TransferID == debit.ID && txn.SignedMinor == -15000 && txn.JournalEntryID != nil {
+			seenDebit = true
+		}
+	}
+	if !seenDebit {
+		t.Fatalf("internal debit history mismatch: %+v", history)
+	}
+
+	duplicate, err := svc.InternalDebit(ctx, InternalDebitInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    15000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-internal-debit-001",
+		Reference:      "sql-internal-debit-ref-001",
+		Narration:      "SQL internal debit duplicate",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.ID != debit.ID {
+		t.Fatalf("duplicate idempotency key posted a new internal debit: first=%s duplicate=%s", debit.ID, duplicate.ID)
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 25000, 25000)
+	assertSQLTransferCountByIdempotency(t, ctx, db, "sql-internal-debit-001", 1)
+
+	_, err = svc.InternalDebit(ctx, InternalDebitInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    99999,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-internal-debit-insufficient",
+		Narration:      "SQL internal debit insufficient",
+	})
+	if !errors.Is(err, ErrInsufficient) {
+		t.Fatalf("expected insufficient funds, got %v", err)
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 25000, 25000)
+	assertSQLTransferCountByIdempotency(t, ctx, db, "sql-internal-debit-insufficient", 0)
+	assertSQLReplayIntegrity(t, ctx, db)
+}
+
+func TestSQLRepositoryInternalDebitConcurrentIdempotency(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
+
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	account := createSQLCustomerAccount(t, svc, ctx, "Concurrent", "Debit", "concurrent.debit@example.com", "1234567898", "Concurrent Debit Wallet")
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    30000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-internal-debit-concurrent-fund",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const amount = int64(10000)
+	const idempotencyKey = "sql-internal-debit-concurrent"
+	results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+		return svc.InternalDebit(ctx, InternalDebitInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      account.ID,
+			AmountMinor:    amount,
+			CurrencyID:     "NGN",
+			IdempotencyKey: idempotencyKey,
+			Reference:      "sql-internal-debit-concurrent-ref",
+			Narration:      fmt.Sprintf("SQL concurrent internal debit %02d", i),
+		})
+	})
+
+	transfer := assertConcurrentReplay(t, results)
+	assertStatus(t, transfer, TransferStatusSucceeded)
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 20000, 20000)
+	assertSQLAccountBalancePair(t, svc, ctx, DemoClearingAccountID, 20000, 20000)
+	assertSQLJournalBalanced(t, svc, ctx, transfer, amount)
+	assertSQLInternalDebitRows(t, ctx, db, transfer, account.ID, DemoClearingAccountID, amount)
+	assertSQLTransferCountByIdempotency(t, ctx, db, idempotencyKey, 1)
+	assertSQLReplayIntegrity(t, ctx, db)
+}
+
+func TestSQLRepositoryInternalDebitConcurrentDistinctNoOverspend(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
+
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	account := createSQLCustomerAccount(t, svc, ctx, "Distinct", "Debit", "distinct.debit@example.com", "1234567899", "Distinct Debit Wallet")
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    30000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-internal-debit-distinct-fund",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const amount = int64(7000)
+	results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+		return svc.InternalDebit(ctx, InternalDebitInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      account.ID,
+			AmountMinor:    amount,
+			CurrencyID:     "NGN",
+			IdempotencyKey: fmt.Sprintf("sql-internal-debit-distinct-attempt-%02d", i),
+			Narration:      fmt.Sprintf("SQL distinct internal debit %02d", i),
+		})
+	})
+
+	successes := 0
+	insufficient := 0
+	for i, result := range results {
+		switch {
+		case result.err == nil:
+			successes++
+			assertStatus(t, result.transfer, TransferStatusSucceeded)
+			assertSQLJournalBalanced(t, svc, ctx, result.transfer, amount)
+		case errors.Is(result.err, ErrInsufficient):
+			insufficient++
+		default:
+			t.Fatalf("unexpected distinct debit result %d: transfer=%+v err=%v", i, result.transfer, result.err)
+		}
+	}
+	if successes != 4 || insufficient != 6 {
+		t.Fatalf("expected 4 successful debits and 6 insufficient rejections, got successes=%d insufficient=%d", successes, insufficient)
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 2000, 2000)
+	assertSQLAccountBalancePair(t, svc, ctx, DemoClearingAccountID, 2000, 2000)
+	assertSQLTransferCountByIdempotencyPrefix(t, ctx, db, "sql-internal-debit-distinct-attempt-", 4)
+	assertSQLReplayIntegrity(t, ctx, db)
+}
+
 func TestSQLRepositoryAccountCreateConcurrentDuplicateNumber(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
@@ -994,6 +1181,34 @@ func seededSQLService(t *testing.T, db *sqlx.DB, ctx context.Context) *Service {
 	return svc
 }
 
+func createSQLCustomerAccount(t *testing.T, svc *Service, ctx context.Context, firstName, lastName, email, accountNumber, accountName string) *Account {
+	t.Helper()
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
+		FirstName:     firstName,
+		LastName:      lastName,
+		Email:         email,
+		Phone:         "+2348012345684",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    customer.ID,
+		AccountNumber: accountNumber,
+		Name:          accountName,
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return account
+}
+
 func runConcurrentTransfers(t *testing.T, count int, fn func(int) (*Transfer, error)) []concurrentTransferResult {
 	t.Helper()
 	start := make(chan struct{})
@@ -1119,6 +1334,20 @@ WHERE institution_id = $1 AND idempotency_key = $2`, DemoInstitutionID, idempote
 	}
 	if count != want {
 		t.Fatalf("transfer count for idempotency_key %q = %d, want %d", idempotencyKey, count, want)
+	}
+}
+
+func assertSQLTransferCountByIdempotencyPrefix(t *testing.T, ctx context.Context, db *sqlx.DB, prefix string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM transfers
+WHERE institution_id = $1 AND idempotency_key LIKE $2`, DemoInstitutionID, prefix+"%"); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("transfer count for idempotency_key prefix %q = %d, want %d", prefix, count, want)
 	}
 }
 
@@ -1266,6 +1495,54 @@ ORDER BY account_id`, DemoInstitutionID, *transfer.JournalEntryID); err != nil {
 	customer := postings[accountID]
 	if source.direction != PostingDebit || source.amount != amountMinor || customer.direction != PostingCredit || customer.amount != amountMinor {
 		t.Fatalf("internal credit postings should debit source and credit customer: %+v", rows)
+	}
+}
+
+func assertSQLInternalDebitRows(t *testing.T, ctx context.Context, db *sqlx.DB, transfer *Transfer, accountID, destinationAccountID string, amountMinor int64) {
+	t.Helper()
+	if transfer.JournalEntryID == nil {
+		t.Fatalf("expected internal debit to have journal entry: %+v", transfer)
+	}
+	var journalRows int
+	if err := db.GetContext(ctx, &journalRows, `
+SELECT COUNT(*)
+FROM journal_entries
+WHERE institution_id = $1 AND transfer_id = $2 AND id = $3`, DemoInstitutionID, transfer.ID, *transfer.JournalEntryID); err != nil {
+		t.Fatal(err)
+	}
+	if journalRows != 1 {
+		t.Fatalf("expected one journal for internal debit transfer %s, got %d", transfer.ID, journalRows)
+	}
+
+	rows := []struct {
+		AccountID string `db:"account_id"`
+		Direction string `db:"direction"`
+		Amount    int64  `db:"amount_minor"`
+	}{}
+	if err := db.SelectContext(ctx, &rows, `
+SELECT account_id, direction, amount_minor
+FROM postings
+WHERE institution_id = $1 AND journal_entry_id = $2
+ORDER BY account_id`, DemoInstitutionID, *transfer.JournalEntryID); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected two postings for internal debit, got %+v", rows)
+	}
+	postings := map[string]struct {
+		direction string
+		amount    int64
+	}{}
+	for _, row := range rows {
+		postings[row.AccountID] = struct {
+			direction string
+			amount    int64
+		}{direction: row.Direction, amount: row.Amount}
+	}
+	customer := postings[accountID]
+	destination := postings[destinationAccountID]
+	if customer.direction != PostingDebit || customer.amount != amountMinor || destination.direction != PostingCredit || destination.amount != amountMinor {
+		t.Fatalf("internal debit postings should debit customer and credit destination: %+v", rows)
 	}
 }
 
