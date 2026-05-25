@@ -107,6 +107,127 @@ func TestCreateCustomerRequiresBranchInInstitution(t *testing.T) {
 	}
 }
 
+func TestCreateStandardAccountCreatesZeroBalance(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	account, err := svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    DemoCustomerID,
+		AccountNumber: "1234567890",
+		Name:          "Ada Main Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ID == "" || account.InstitutionID != DemoInstitutionID || account.CustomerID == nil || *account.CustomerID != DemoCustomerID {
+		t.Fatalf("created account has wrong scope: %+v", account)
+	}
+	if account.Kind != AccountKindCustomer || account.ProductType != AccountProductStandardWallet || account.AllowNegative || account.CurrencyID != "NGN" || account.NormalBalance != NormalBalanceCredit || account.Status != "active" {
+		t.Fatalf("created account has wrong defaults: %+v", account)
+	}
+	balance, err := svc.GetBalance(ctx, DemoInstitutionID, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance.AvailableMinor != 0 || balance.LedgerMinor != 0 || balance.CurrencyID != "NGN" || balance.LastJournalEntryID != nil {
+		t.Fatalf("initial balance mismatch: %+v", balance)
+	}
+}
+
+func TestCreateStandardSavingsAndCurrentAccounts(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	tests := []struct {
+		productType   string
+		accountNumber string
+	}{
+		{productType: AccountProductStandardSavings, accountNumber: "1234567891"},
+		{productType: AccountProductStandardCurrent, accountNumber: "1234567892"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.productType, func(t *testing.T) {
+			account, err := svc.CreateAccount(ctx, CreateAccountInput{
+				InstitutionID: DemoInstitutionID,
+				CustomerID:    DemoCustomerID,
+				AccountNumber: tt.accountNumber,
+				Name:          "Ada " + tt.productType,
+				ProductType:   tt.productType,
+				CurrencyID:    "NGN",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if account.ProductType != tt.productType || account.AllowNegative {
+				t.Fatalf("created account mismatch: %+v", account)
+			}
+		})
+	}
+}
+
+func TestCreateAccountRejectsInvalidInput(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	tests := []struct {
+		name  string
+		input CreateAccountInput
+	}{
+		{
+			name:  "missing customer",
+			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: "99999999-9999-9999-9999-999999999999", AccountNumber: "1234567890", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "NGN"},
+		},
+		{
+			name:  "cross institution customer",
+			input: CreateAccountInput{InstitutionID: "99999999-9999-9999-9999-999999999999", CustomerID: DemoCustomerID, AccountNumber: "1234567890", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "NGN"},
+		},
+		{
+			name:  "negative balance",
+			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "1234567890", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "NGN", AllowNegativeBalance: true},
+		},
+		{
+			name:  "unsupported product",
+			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "1234567890", Name: "Ada Wallet", ProductType: AccountProductInternal, CurrencyID: "NGN"},
+		},
+		{
+			name:  "invalid account number",
+			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "12345", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "NGN"},
+		},
+		{
+			name:  "unsupported currency",
+			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "1234567890", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "USD"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := svc.CreateAccount(ctx, tt.input)
+			if !errors.Is(err, ErrInvalidRequest) && !errors.Is(err, ErrNotFound) {
+				t.Fatalf("expected validation/not-found error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateAccountRejectsDuplicateAccountNumber(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	input := CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    DemoCustomerID,
+		AccountNumber: "1234567890",
+		Name:          "Ada Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	}
+	if _, err := svc.CreateAccount(ctx, input); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.CreateAccount(ctx, input)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected duplicate account number to return conflict, got %v", err)
+	}
+}
+
 func TestSuccessfulTransferInPostsBalancedLedger(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 	transfer := mockInbound(t, svc, ctx, TransferRequest{
@@ -946,6 +1067,46 @@ func (m *memoryStore) GetCustomer(ctx context.Context, institutionID, customerID
 		return nil, ErrNotFound
 	}
 	return copyOf(customer), nil
+}
+
+func (m *memoryStore) CreateAccount(ctx context.Context, input CreateAccountInput) (*Account, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	customer, ok := m.customers[input.CustomerID]
+	if !ok || customer.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	for _, account := range m.accounts {
+		if account.InstitutionID == input.InstitutionID && account.AccountNumber == input.AccountNumber {
+			return nil, ErrConflict
+		}
+	}
+	now := time.Now().UTC()
+	account := Account{
+		ID:            uuid.Must(uuid.NewRandom()).String(),
+		InstitutionID: input.InstitutionID,
+		CustomerID:    &input.CustomerID,
+		AccountNumber: input.AccountNumber,
+		Name:          input.Name,
+		Kind:          AccountKindCustomer,
+		ProductType:   input.ProductType,
+		AllowNegative: false,
+		CurrencyID:    input.CurrencyID,
+		NormalBalance: NormalBalanceCredit,
+		Status:        "active",
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	m.accounts[account.ID] = account
+	m.balances[account.ID] = AccountBalance{
+		AccountID:      account.ID,
+		InstitutionID:  account.InstitutionID,
+		AvailableMinor: 0,
+		LedgerMinor:    0,
+		CurrencyID:     account.CurrencyID,
+		UpdatedAt:      now,
+	}
+	return copyOf(account), nil
 }
 
 func (m *memoryStore) ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error) {

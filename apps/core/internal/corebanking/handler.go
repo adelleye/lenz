@@ -100,6 +100,34 @@ func (h *HTTPServer) GetCustomer(ctx context.Context, request GetCustomerRequest
 	return okResponse(customer), nil
 }
 
+func (h *HTTPServer) CreateAccount(ctx context.Context, request CreateAccountRequestObject) (CreateAccountResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input, err := bindCreateAccountRequest(institutionID, request.Body)
+	if err != nil {
+		return nil, err
+	}
+	account, err := h.service.CreateAccount(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return createdResponse(account), nil
+}
+
+func (h *HTTPServer) GetAccount(ctx context.Context, request GetAccountRequestObject) (GetAccountResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	account, err := h.service.GetAccount(ctx, institutionID, request.AccountId.String())
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(account), nil
+}
+
 func (h *HTTPServer) ListCustomerAccounts(ctx context.Context, request ListCustomerAccountsRequestObject) (ListCustomerAccountsResponseObject, error) {
 	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
@@ -228,6 +256,20 @@ func validateCreateCustomerRequest(req *CreateCustomerRequest) error {
 	return nil
 }
 
+func (req *CreateAccountRequest) Bind(r *http.Request) error {
+	return validateCreateAccountRequest(req)
+}
+
+func validateCreateAccountRequest(req *CreateAccountRequest) error {
+	if req == nil {
+		return ErrInvalidRequest
+	}
+	if req.CustomerId.String() == "00000000-0000-0000-0000-000000000000" || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.AccountNumber) == "" {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
 func (req *MockTransferRequest) Bind(r *http.Request) error {
 	return validateMockTransferRequest(req)
 }
@@ -313,6 +355,21 @@ func bindCreateCustomerRequest(institutionID string, body *CreateCustomerRequest
 	}, nil
 }
 
+func bindCreateAccountRequest(institutionID string, body *CreateAccountRequest) (CreateAccountInput, error) {
+	if err := validateCreateAccountRequest(body); err != nil {
+		return CreateAccountInput{}, ErrInvalidRequest
+	}
+	return CreateAccountInput{
+		InstitutionID:        institutionID,
+		CustomerID:           body.CustomerId.String(),
+		AccountNumber:        body.AccountNumber,
+		Name:                 body.Name,
+		ProductType:          optionalEnumString(body.ProductType),
+		CurrencyID:           optionalString(body.CurrencyId),
+		AllowNegativeBalance: optionalBool(body.AllowNegativeBalance),
+	}, nil
+}
+
 func applyRequestScope(ctx context.Context, headerInstitutionID *InstitutionID, headerIdempotencyKey string, req *TransferRequest) error {
 	institutionID, err := institutionScope(ctx, headerInstitutionID)
 	if err != nil {
@@ -364,6 +421,13 @@ func optionalEnumString[T ~string](value *T) string {
 		return ""
 	}
 	return string(*value)
+}
+
+func optionalBool(value *bool) bool {
+	if value == nil {
+		return false
+	}
+	return *value
 }
 
 func optionalUUIDString(value *openapi_types.UUID) string {
@@ -421,6 +485,14 @@ func (response strictJSONResponse) VisitCreateCustomerResponse(w http.ResponseWr
 }
 
 func (response strictJSONResponse) VisitGetCustomerResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitCreateAccountResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitGetAccountResponse(w http.ResponseWriter) error {
 	return response.write(w)
 }
 

@@ -284,6 +284,127 @@ WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, customer.ID); err != 
 	}
 }
 
+func TestSQLRepositoryAccountCreateGetListIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
+
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
+		FirstName:     "Account",
+		LastName:      "Owner",
+		Email:         "account.owner@example.com",
+		Phone:         "+2348012345679",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyAccounts, err := svc.ListCustomerAccounts(ctx, DemoInstitutionID, customer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyAccounts == nil || len(emptyAccounts) != 0 {
+		t.Fatalf("expected new customer to have empty account list, got %+v", emptyAccounts)
+	}
+
+	account, err := svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    customer.ID,
+		AccountNumber: "1234567890",
+		Name:          "Account Owner Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ID == "" || account.InstitutionID != DemoInstitutionID || account.CustomerID == nil || *account.CustomerID != customer.ID || account.AccountNumber != "1234567890" {
+		t.Fatalf("created account has wrong scope/data: %+v", account)
+	}
+	if account.Kind != AccountKindCustomer || account.ProductType != AccountProductStandardWallet || account.AllowNegative || account.CurrencyID != "NGN" || account.NormalBalance != NormalBalanceCredit || account.Status != "active" {
+		t.Fatalf("created account has wrong defaults: %+v", account)
+	}
+
+	var row Account
+	if err := db.GetContext(ctx, &row, accountSelectSQL+` WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if row.ID != account.ID || row.CustomerID == nil || *row.CustomerID != customer.ID || row.AccountNumber != "1234567890" || row.AllowNegative {
+		t.Fatalf("account row mismatch: %+v", row)
+	}
+
+	var balance AccountBalance
+	if err := db.GetContext(ctx, &balance, `SELECT account_id, institution_id, available_minor, ledger_minor, currency_id, last_journal_entry_id, updated_at FROM account_balances WHERE institution_id = $1 AND account_id = $2`, DemoInstitutionID, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if balance.AvailableMinor != 0 || balance.LedgerMinor != 0 || balance.CurrencyID != "NGN" || balance.LastJournalEntryID != nil {
+		t.Fatalf("initial account balance mismatch: %+v", balance)
+	}
+
+	got, err := svc.GetAccount(ctx, DemoInstitutionID, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != account.ID || got.AccountNumber != account.AccountNumber {
+		t.Fatalf("get account mismatch: got %+v want %+v", got, account)
+	}
+
+	accounts, err := svc.ListCustomerAccounts(ctx, DemoInstitutionID, customer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 || accounts[0].ID != account.ID {
+		t.Fatalf("expected customer account list to include created account, got %+v", accounts)
+	}
+
+	if _, err := svc.GetAccount(ctx, "99999999-9999-9999-9999-999999999999", account.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-institution account read to fail as not found, got %v", err)
+	}
+	crossAccounts, err := svc.ListCustomerAccounts(ctx, "99999999-9999-9999-9999-999999999999", customer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if crossAccounts == nil || len(crossAccounts) != 0 {
+		t.Fatalf("expected cross-institution account list to be empty, got %+v", crossAccounts)
+	}
+
+	_, err = svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    customer.ID,
+		AccountNumber: "1234567890",
+		Name:          "Duplicate Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected duplicate account number to return conflict, got %v", err)
+	}
+
+	_, err = svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    "99999999-9999-9999-9999-999999999999",
+		AccountNumber: "1234567891",
+		Name:          "Missing Customer Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected missing customer account create to fail as not found, got %v", err)
+	}
+	var orphanAccounts int
+	if err := db.GetContext(ctx, &orphanAccounts, `SELECT COUNT(*) FROM accounts WHERE institution_id = $1 AND account_number = $2`, DemoInstitutionID, "1234567891"); err != nil {
+		t.Fatal(err)
+	}
+	if orphanAccounts != 0 {
+		t.Fatalf("failed account create should not leave account rows, found %d", orphanAccounts)
+	}
+}
+
 func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()

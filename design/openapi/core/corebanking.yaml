@@ -124,6 +124,70 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/accounts:
+    post:
+      operationId: createAccount
+      summary: Create a customer deposit account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+      responses:
+        "201":
+          description: Created account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/accounts/{account_id}:
+    get:
+      operationId: getAccount
+      summary: Get an account inside an institution
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Account record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/accounts/{account_id}/balance:
     get:
       operationId: getAccountBalance
@@ -494,6 +558,32 @@ components:
         phone:
           type: string
           minLength: 1
+
+    CreateAccountRequest:
+      type: object
+      required: [customer_id, account_number, name]
+      properties:
+        customer_id:
+          type: string
+          format: uuid
+        account_number:
+          type: string
+          pattern: "^[0-9]{10}$"
+        name:
+          type: string
+          minLength: 1
+        product_type:
+          type: string
+          enum: [standard_wallet, standard_savings, standard_current]
+          default: standard_wallet
+        currency_id:
+          type: string
+          minLength: 3
+          maxLength: 3
+          default: NGN
+        allow_negative_balance:
+          type: boolean
+          default: false
 
     APISeedResult:
       type: object

@@ -20,6 +20,7 @@ type CustomerRepository interface {
 }
 
 type AccountRepository interface {
+	CreateAccount(ctx context.Context, input CreateAccountInput) (*Account, error)
 	ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error)
 	GetAccount(ctx context.Context, institutionID, accountID string) (*Account, error)
 	GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error)

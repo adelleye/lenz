@@ -283,6 +283,155 @@ func TestGetCustomerRouteDeniesCrossInstitutionRead(t *testing.T) {
 	}
 }
 
+func TestCreateAccountRouteCreatesGetsAndListsAccount(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"customer_id":"` + DemoCustomerID + `","account_number":"1234567890","name":"Ada Main Wallet","product_type":"standard_wallet","currency_id":"NGN"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected account create to return 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var created Account
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.InstitutionID != DemoInstitutionID || created.CustomerID == nil || *created.CustomerID != DemoCustomerID || created.AccountNumber != "1234567890" {
+		t.Fatalf("created account response has wrong scope/data: %+v", created)
+	}
+	if created.Kind != AccountKindCustomer || created.ProductType != AccountProductStandardWallet || created.AllowNegative || created.CurrencyID != "NGN" || created.NormalBalance != NormalBalanceCredit || created.Status != "active" {
+		t.Fatalf("created account response has wrong defaults: %+v", created)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+created.ID, nil)
+	getReq = withTestPrincipal(getReq, DemoInstitutionID)
+	getRec := httptest.NewRecorder()
+	router.ServeHTTP(getRec, getReq)
+
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected get account to return 200, got %d body=%s", getRec.Code, getRec.Body.String())
+	}
+	var got Account
+	if err := json.Unmarshal(getRec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != created.ID || got.AccountNumber != created.AccountNumber {
+		t.Fatalf("get account response mismatch: got %+v created %+v", got, created)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/customers/"+DemoCustomerID+"/accounts", nil)
+	listReq = withTestPrincipal(listReq, DemoInstitutionID)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected customer account list to return 200, got %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var accounts []Account
+	if err := json.Unmarshal(listRec.Body.Bytes(), &accounts); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, account := range accounts {
+		if account.ID == created.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("customer account list did not include created account: %+v", accounts)
+	}
+}
+
+func TestCustomerAccountsRouteReturnsEmptyList(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
+		FirstName:     "No",
+		LastName:      "Accounts",
+		Email:         "no.accounts@example.com",
+		Phone:         "+2348012345000",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/customers/"+customer.ID+"/accounts", nil)
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected account list to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("expected empty list to encode as [], got %s", rec.Body.String())
+	}
+}
+
+func TestCreateAccountRouteRequiresAuth(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	body := `{"customer_id":"` + DemoCustomerID + `","account_number":"1234567890","name":"Ada Main Wallet"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAccountRouteRejectsMismatchedInstitutionHeader(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"customer_id":"` + DemoCustomerID + `","account_number":"1234567890","name":"Ada Main Wallet"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched X-Institution-ID to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateAccountRouteRejectsInvalidRequestBody(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"customer_id":"` + DemoCustomerID + `","account_number":"12345","name":"Ada Main Wallet"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid account request to return 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCustomerCreateInternalErrorsAreSanitized(t *testing.T) {
 	store := &failingCreateCustomerStore{memoryStore: newMemoryStore()}
 	svc := NewService(store, NewMockNIPProvider())

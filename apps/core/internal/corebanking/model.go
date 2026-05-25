@@ -138,6 +138,16 @@ type CreateCustomerInput struct {
 	NINStatus     string
 }
 
+type CreateAccountInput struct {
+	InstitutionID        string
+	CustomerID           string
+	AccountNumber        string
+	Name                 string
+	ProductType          string
+	CurrencyID           string
+	AllowNegativeBalance bool
+}
+
 type Account struct {
 	ID            string    `json:"id" db:"id"`
 	InstitutionID string    `json:"institution_id" db:"institution_id"`

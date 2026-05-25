@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/mail"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 type Service struct {
@@ -81,12 +83,61 @@ func (s *Service) GetCustomer(ctx context.Context, institutionID, customerID str
 	return s.repository.GetCustomer(ctx, institutionID, customerID)
 }
 
+func (s *Service) CreateAccount(ctx context.Context, input CreateAccountInput) (*Account, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input.InstitutionID = institutionID
+	input.CustomerID = strings.TrimSpace(input.CustomerID)
+	input.AccountNumber = strings.TrimSpace(input.AccountNumber)
+	input.Name = strings.TrimSpace(input.Name)
+	input.ProductType = strings.ToLower(strings.TrimSpace(input.ProductType))
+	input.CurrencyID = strings.ToUpper(strings.TrimSpace(input.CurrencyID))
+	if input.ProductType == "" {
+		input.ProductType = AccountProductStandardWallet
+	}
+	if input.CurrencyID == "" {
+		input.CurrencyID = "NGN"
+	}
+	if _, err := uuid.Parse(input.CustomerID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	if input.Name == "" || !isTenDigitAccountNumber(input.AccountNumber) {
+		return nil, ErrInvalidRequest
+	}
+	if !validCustomerAccountProduct(input.ProductType) || input.CurrencyID != "NGN" || input.AllowNegativeBalance {
+		return nil, ErrInvalidRequest
+	}
+	return s.repository.CreateAccount(ctx, input)
+}
+
+func (s *Service) GetAccount(ctx context.Context, institutionID, accountID string) (*Account, error) {
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil, ErrInvalidRequest
+	}
+	return s.repository.GetAccount(ctx, institutionID, accountID)
+}
+
 func (s *Service) ListCustomerAccounts(ctx context.Context, institutionID, customerID string) ([]Account, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
 		return nil, err
 	}
-	return s.repository.ListAccountsByCustomer(ctx, institutionID, customerID)
+	customerID = strings.TrimSpace(customerID)
+	if customerID == "" {
+		return nil, ErrInvalidRequest
+	}
+	accounts, err := s.repository.ListAccountsByCustomer(ctx, institutionID, customerID)
+	if accounts == nil {
+		accounts = []Account{}
+	}
+	return accounts, err
 }
 
 func (s *Service) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
@@ -422,6 +473,27 @@ func institutionIDOrDemo(institutionID string) string {
 		return DemoInstitutionID
 	}
 	return institutionID
+}
+
+func validCustomerAccountProduct(productType string) bool {
+	switch productType {
+	case AccountProductStandardWallet, AccountProductStandardSavings, AccountProductStandardCurrent:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTenDigitAccountNumber(accountNumber string) bool {
+	if len(accountNumber) != 10 {
+		return false
+	}
+	for _, char := range accountNumber {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeListTransactionsOptions(options ListTransactionsOptions) ListTransactionsOptions {

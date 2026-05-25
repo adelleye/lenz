@@ -2,9 +2,12 @@ package corebanking
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 type sqlAccountRepository struct {
@@ -12,6 +15,65 @@ type sqlAccountRepository struct {
 }
 
 const accountSelectSQL = `SELECT id, institution_id, customer_id, account_number, name, kind, product_type, allow_negative_balance, currency_id, normal_balance, status, created_at, updated_at FROM accounts`
+
+func (r *sqlAccountRepository) CreateAccount(ctx context.Context, input CreateAccountInput) (*Account, error) {
+	var account Account
+	err := WithTx(ctx, r.db, func(tx TxRunner) error {
+		var customerExists bool
+		if err := tx.GetContext(ctx, &customerExists, `SELECT EXISTS (SELECT 1 FROM customers WHERE institution_id = $1 AND id = $2)`, input.InstitutionID, input.CustomerID); err != nil {
+			return normalizeAccountSQLError(err)
+		}
+		if !customerExists {
+			return ErrNotFound
+		}
+
+		now := time.Now().UTC()
+		err := tx.GetContext(ctx, &account, `
+INSERT INTO accounts (
+	id,
+	institution_id,
+	customer_id,
+	account_number,
+	name,
+	kind,
+	product_type,
+	allow_negative_balance,
+	currency_id,
+	normal_balance,
+	status,
+	created_at,
+	updated_at
+)
+VALUES ($1, $2, $3, $4, $5, 'customer', $6, false, $7, 'credit', 'active', $8, $8)
+RETURNING id, institution_id, customer_id, account_number, name, kind, product_type, allow_negative_balance, currency_id, normal_balance, status, created_at, updated_at`,
+			uuid.Must(uuid.NewRandom()).String(),
+			input.InstitutionID,
+			input.CustomerID,
+			input.AccountNumber,
+			input.Name,
+			input.ProductType,
+			input.CurrencyID,
+			now,
+		)
+		if err != nil {
+			return normalizeAccountSQLError(err)
+		}
+
+		_, err = tx.ExecContext(ctx, `
+INSERT INTO account_balances (account_id, institution_id, available_minor, ledger_minor, currency_id, updated_at)
+VALUES ($1, $2, 0, 0, $3, $4)`,
+			account.ID,
+			account.InstitutionID,
+			account.CurrencyID,
+			now,
+		)
+		return normalizeAccountSQLError(err)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &account, nil
+}
 
 func (r *sqlAccountRepository) ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error) {
 	var accounts []Account
@@ -80,4 +142,15 @@ func lockAccountBalance(ctx context.Context, tx TxRunner, institutionID, account
 		return nil, normalizeSQLError(err)
 	}
 	return &out, nil
+}
+
+func normalizeAccountSQLError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+		return ErrConflict
+	}
+	return normalizeSQLError(err)
 }
