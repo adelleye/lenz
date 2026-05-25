@@ -45,7 +45,7 @@ LIMIT 200`, institutionID); err != nil {
 }
 
 func insertAuditEvent(ctx context.Context, tx TxRunner, input auditEventInput) (*AuditEvent, error) {
-	event, metadata, err := newAuditEvent(input)
+	event, metadata, err := newAuditEvent(ctx, input)
 	if err != nil {
 		return nil, err
 	}

@@ -101,8 +101,19 @@ func TestAccountControlStateTransitionsAreStrict(t *testing.T) {
 	if _, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "pnd-unfreeze", Reason: "not frozen"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected PND account unfreeze to fail, got %v", err)
 	}
+	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "freeze-pnd", Reason: "security escalation"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected PND account freeze to fail, got %v", err)
+	}
 
-	frozen, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "freeze-pnd", Reason: "security escalation"})
+	activeFromPND, err := svc.DeactivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "deactivate-pnd-before-freeze", Reason: "ops clear"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activeFromPND.Status != AccountStatusActive {
+		t.Fatalf("expected active status after PND deactivation, got %+v", activeFromPND)
+	}
+
+	frozen, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "freeze-active", Reason: "security escalation"})
 	if err != nil {
 		t.Fatal(err)
 	}

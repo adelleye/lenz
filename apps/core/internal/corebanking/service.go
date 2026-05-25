@@ -434,8 +434,12 @@ func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Trans
 	if err := normalizeTransferRequest(&req); err != nil {
 		return nil, err
 	}
+	requestFingerprint := mockTransferRequestFingerprint(TransferDirectionOutbound, req)
 	existing, err := s.repository.GetTransferByIdempotency(ctx, req.InstitutionID, req.IdempotencyKey)
 	if err == nil {
+		if !transferRequestFingerprintMatches(existing, requestFingerprint) {
+			return nil, ErrConflict
+		}
 		return existing, nil
 	}
 	if !errors.Is(err, ErrNotFound) {
@@ -465,7 +469,7 @@ func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Trans
 		}
 		result = providerUnknownTransferResult(provider, providerRequest)
 	}
-	return s.recordProviderTransfer(ctx, TransferDirectionOutbound, req, *result)
+	return s.recordProviderTransfer(ctx, TransferDirectionOutbound, req, *result, requestFingerprint)
 }
 
 func (s *Service) MockProviderWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) (*Transfer, error) {
@@ -571,23 +575,24 @@ func (s *Service) recordProviderWebhookEvent(ctx context.Context, event Provider
 		return nil, err
 	}
 	return s.repository.RecordTransfer(ctx, RecordTransferInput{
-		InstitutionID:     event.InstitutionID,
-		AccountID:         event.AccountID,
-		ClearingAccountID: clearing.ID,
-		Direction:         event.Direction,
-		Status:            event.Status,
-		AmountMinor:       event.AmountMinor,
-		CurrencyID:        event.CurrencyID,
-		IdempotencyKey:    event.IdempotencyKey,
-		Provider:          event.Provider,
-		ProviderReference: event.ProviderReference,
-		ProviderEventID:   event.ProviderEventID,
-		FailureReason:     event.FailureReason,
-		Narration:         event.Narration,
+		InstitutionID:      event.InstitutionID,
+		AccountID:          event.AccountID,
+		ClearingAccountID:  clearing.ID,
+		Direction:          event.Direction,
+		Status:             event.Status,
+		AmountMinor:        event.AmountMinor,
+		CurrencyID:         event.CurrencyID,
+		IdempotencyKey:     event.IdempotencyKey,
+		Provider:           event.Provider,
+		ProviderReference:  event.ProviderReference,
+		ProviderEventID:    event.ProviderEventID,
+		RequestFingerprint: event.RequestFingerprint,
+		FailureReason:      event.FailureReason,
+		Narration:          event.Narration,
 	})
 }
 
-func (s *Service) recordProviderTransfer(ctx context.Context, direction string, req TransferRequest, result ProviderTransferResult) (*Transfer, error) {
+func (s *Service) recordProviderTransfer(ctx context.Context, direction string, req TransferRequest, result ProviderTransferResult, requestFingerprint string) (*Transfer, error) {
 	providerName := strings.TrimSpace(result.Provider)
 	if providerName == "" {
 		providerName = ProviderMockNIP
@@ -631,20 +636,21 @@ func (s *Service) recordProviderTransfer(ctx context.Context, direction string, 
 		return nil, err
 	}
 	return s.repository.RecordTransfer(ctx, RecordTransferInput{
-		InstitutionID:     req.InstitutionID,
-		AccountID:         req.AccountID,
-		ClearingAccountID: clearing.ID,
-		Direction:         direction,
-		Status:            status,
-		AmountMinor:       req.AmountMinor,
-		CurrencyID:        req.CurrencyID,
-		IdempotencyKey:    req.IdempotencyKey,
-		Provider:          providerName,
-		ProviderReference: providerReference,
-		ProviderEventID:   providerEventID,
-		ProviderStatus:    providerStatus,
-		FailureReason:     failureReason,
-		Narration:         narration,
+		InstitutionID:      req.InstitutionID,
+		AccountID:          req.AccountID,
+		ClearingAccountID:  clearing.ID,
+		Direction:          direction,
+		Status:             status,
+		AmountMinor:        req.AmountMinor,
+		CurrencyID:         req.CurrencyID,
+		IdempotencyKey:     req.IdempotencyKey,
+		Provider:           providerName,
+		ProviderReference:  providerReference,
+		ProviderEventID:    providerEventID,
+		ProviderStatus:     providerStatus,
+		RequestFingerprint: requestFingerprint,
+		FailureReason:      failureReason,
+		Narration:          narration,
 	})
 }
 

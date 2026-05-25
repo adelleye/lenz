@@ -12,8 +12,12 @@ type principalContextKey struct{}
 // should depend on this shape instead of caller-supplied tenant headers.
 type Principal struct {
 	InstitutionID string
+	ActorType     string
+	ActorID       string
 	Roles         []string
 	Scopes        []string
+	SourceIP      string
+	UserAgent     string
 }
 
 func ContextWithPrincipal(ctx context.Context, principal Principal) context.Context {

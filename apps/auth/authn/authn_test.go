@@ -36,6 +36,8 @@ func TestRequiredAuthAcceptsConfiguredDevelopmentToken(t *testing.T) {
 func TestRequiredAuthAttachesDevelopmentPrincipal(t *testing.T) {
 	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
 	t.Setenv("LENZ_DEV_INSTITUTION_ID", "99999999-9999-9999-9999-999999999999")
+	t.Setenv("LENZ_DEV_ACTOR_TYPE", "staff")
+	t.Setenv("LENZ_DEV_ACTOR_ID", "staff-001")
 	t.Setenv("LENZ_DEV_AUTH_ROLES", "operator, auditor")
 	t.Setenv("LENZ_DEV_AUTH_SCOPES", "accounts:read, transfers:write")
 
@@ -49,6 +51,8 @@ func TestRequiredAuthAttachesDevelopmentPrincipal(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/demo/balance", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("User-Agent", "audit-test-agent")
+	req.RemoteAddr = "203.0.113.10:4321"
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -61,6 +65,9 @@ func TestRequiredAuthAttachesDevelopmentPrincipal(t *testing.T) {
 	}
 	if principal.InstitutionID != "99999999-9999-9999-9999-999999999999" {
 		t.Fatalf("wrong institution scope: %+v", principal)
+	}
+	if principal.ActorType != "staff" || principal.ActorID != "staff-001" || principal.SourceIP != "203.0.113.10" || principal.UserAgent != "audit-test-agent" {
+		t.Fatalf("wrong actor/request metadata: %+v", principal)
 	}
 	if len(principal.Roles) != 2 || principal.Roles[0] != "operator" || len(principal.Scopes) != 2 || principal.Scopes[1] != "transfers:write" {
 		t.Fatalf("wrong roles/scopes: %+v", principal)

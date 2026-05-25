@@ -81,6 +81,7 @@ type ProviderWebhookEvent struct {
 	FailureReason        string
 	Narration            string
 	Scenario             string
+	RequestFingerprint   string
 	Delayed              bool
 	DelayedUntil         *time.Time
 }

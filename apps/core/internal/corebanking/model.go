@@ -279,6 +279,7 @@ type Transfer struct {
 	ProviderEventID      *string   `json:"provider_event_id,omitempty" db:"provider_event_id"`
 	JournalEntryID       *string   `json:"journal_entry_id,omitempty" db:"journal_entry_id"`
 	ReversalOfTransferID *string   `json:"reversal_of_transfer_id,omitempty" db:"reversal_of_transfer_id"`
+	RequestFingerprint   string    `json:"-" db:"request_fingerprint"`
 	FailureReason        *string   `json:"failure_reason,omitempty" db:"failure_reason"`
 	Narration            string    `json:"narration" db:"narration"`
 	CreatedAt            time.Time `json:"created_at" db:"created_at"`
@@ -384,6 +385,7 @@ type RecordTransferInput struct {
 	ProviderEventID      string
 	ProviderStatus       string
 	ReversalOfTransferID string
+	RequestFingerprint   string
 	FailureReason        string
 	Narration            string
 	RejectInsufficient   bool

@@ -1041,6 +1041,210 @@ func TestSQLRepositoryInternalTransferConcurrentIdempotency(t *testing.T) {
 	assertSQLReplayIntegrity(t, ctx, db)
 }
 
+func TestSQLRepositoryIdempotencyRejectsChangedRequest(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := seededSQLService(t, db, ctx)
+
+	sourceA := createSQLCustomerAccount(t, svc, ctx, "Idem", "SourceA", "sql.idem.source.a@example.com", "2234567810", "SQL Idem Source A")
+	sourceB := createSQLCustomerAccount(t, svc, ctx, "Idem", "SourceB", "sql.idem.source.b@example.com", "2234567811", "SQL Idem Source B")
+	destinationA := createSQLCustomerAccount(t, svc, ctx, "Idem", "DestA", "sql.idem.dest.a@example.com", "2234567812", "SQL Idem Dest A")
+	destinationB := createSQLCustomerAccount(t, svc, ctx, "Idem", "DestB", "sql.idem.dest.b@example.com", "2234567813", "SQL Idem Dest B")
+
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      sourceA.ID,
+		AmountMinor:    100000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-idem-conflict-fund-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      sourceB.ID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-idem-conflict-fund-b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      destinationA.ID,
+		AmountMinor:    1000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-idem-conflict-amount",
+		Reference:      "sql-idem-conflict-credit-ref",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      destinationA.ID,
+		AmountMinor:    2000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-idem-conflict-amount",
+		Reference:      "sql-idem-conflict-credit-ref",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed amount to return conflict, got %v", err)
+	}
+
+	sameRequest := InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      sourceA.ID,
+		DestinationAccountID: destinationA.ID,
+		AmountMinor:          5000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "sql-idem-replay-same",
+		Reference:            "sql-idem-replay-same-ref",
+	}
+	first, err := svc.InternalTransfer(ctx, sameRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := svc.InternalTransfer(ctx, sameRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.ID != first.ID {
+		t.Fatalf("same request replay returned transfer %s, want %s", replay.ID, first.ID)
+	}
+
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      sourceA.ID,
+		DestinationAccountID: destinationA.ID,
+		AmountMinor:          7000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "sql-idem-conflict-destination",
+		Reference:            "sql-idem-conflict-destination-ref",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      sourceA.ID,
+		DestinationAccountID: destinationB.ID,
+		AmountMinor:          7000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "sql-idem-conflict-destination",
+		Reference:            "sql-idem-conflict-destination-ref",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed destination to return conflict, got %v", err)
+	}
+
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      sourceA.ID,
+		DestinationAccountID: destinationA.ID,
+		AmountMinor:          3000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "sql-idem-conflict-source",
+		Reference:            "sql-idem-conflict-source-ref",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      sourceB.ID,
+		DestinationAccountID: destinationA.ID,
+		AmountMinor:          3000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "sql-idem-conflict-source",
+		Reference:            "sql-idem-conflict-source-ref",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed source to return conflict, got %v", err)
+	}
+
+	assertSQLTransferCountByIdempotency(t, ctx, db, "sql-idem-conflict-amount", 1)
+	assertSQLTransferCountByIdempotency(t, ctx, db, "sql-idem-conflict-destination", 1)
+	assertSQLTransferCountByIdempotency(t, ctx, db, "sql-idem-conflict-source", 1)
+}
+
+func TestSQLRepositoryProviderEventRejectsChangedPayload(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := seededSQLService(t, db, ctx)
+
+	otherAccount := createSQLCustomerAccount(t, svc, ctx, "Provider", "Replay", "sql.provider.replay@example.com", "2234567814", "SQL Provider Replay")
+
+	tests := []struct {
+		name        string
+		eventID     string
+		first       TransferRequest
+		second      TransferRequest
+		wantBalance int64
+	}{
+		{
+			name:    "amount",
+			eventID: "sql-provider-payload-amount",
+			first: TransferRequest{
+				AccountID:       DemoCustomerAccountID,
+				AmountMinor:     10000,
+				IdempotencyKey:  "sql-provider-payload-amount-1",
+				ProviderEventID: "sql-provider-payload-amount",
+			},
+			second: TransferRequest{
+				AccountID:       DemoCustomerAccountID,
+				AmountMinor:     20000,
+				IdempotencyKey:  "sql-provider-payload-amount-2",
+				ProviderEventID: "sql-provider-payload-amount",
+			},
+			wantBalance: 10000,
+		},
+		{
+			name:    "account",
+			eventID: "sql-provider-payload-account",
+			first: TransferRequest{
+				AccountID:       DemoCustomerAccountID,
+				AmountMinor:     3000,
+				IdempotencyKey:  "sql-provider-payload-account-1",
+				ProviderEventID: "sql-provider-payload-account",
+			},
+			second: TransferRequest{
+				AccountID:       otherAccount.ID,
+				AmountMinor:     3000,
+				IdempotencyKey:  "sql-provider-payload-account-2",
+				ProviderEventID: "sql-provider-payload-account",
+			},
+			wantBalance: 13000,
+		},
+		{
+			name:    "status",
+			eventID: "sql-provider-payload-status",
+			first: TransferRequest{
+				AccountID:       DemoCustomerAccountID,
+				AmountMinor:     5000,
+				IdempotencyKey:  "sql-provider-payload-status-1",
+				ProviderEventID: "sql-provider-payload-status",
+			},
+			second: TransferRequest{
+				AccountID:       DemoCustomerAccountID,
+				AmountMinor:     5000,
+				IdempotencyKey:  "sql-provider-payload-status-2",
+				ProviderEventID: "sql-provider-payload-status",
+				Status:          TransferStatusFailed,
+			},
+			wantBalance: 18000,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := svc.MockInbound(ctx, tt.first); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.MockInbound(ctx, tt.second); !errors.Is(err, ErrConflict) {
+				t.Fatalf("expected changed provider-event %s to return conflict, got %v", tt.name, err)
+			}
+			assertSQLTransferCountByProviderEvent(t, ctx, db, tt.eventID, 1)
+			assertSQLBalance(t, svc, ctx, tt.wantBalance)
+		})
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, otherAccount.ID, 0, 0)
+}
+
 func TestSQLRepositoryInternalTransferConcurrentDistinctNoOverspend(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
@@ -1285,7 +1489,7 @@ func TestSQLRepositoryTransferSpineIntegrationConcurrentReplay(t *testing.T) {
 				AccountID:       DemoCustomerAccountID,
 				AmountMinor:     amount,
 				IdempotencyKey:  idempotencyKey,
-				ProviderEventID: fmt.Sprintf("sql-concurrent-inbound-idempotency-event-%02d", i),
+				ProviderEventID: "sql-concurrent-inbound-idempotency-event",
 				Narration:       "SQL concurrent inbound idempotency replay",
 			})
 		})

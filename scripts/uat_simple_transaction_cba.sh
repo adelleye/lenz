@@ -320,6 +320,15 @@ assert_balance "$account_a_id" 449000 449000
 assert_balance "$account_b_id" 202000 302000
 pass "PND blocked outflows and allowed inflows"
 
+assert_blocked_money_request "PND freeze should fail" -X POST "${BASE_URL}/api/v1/accounts/${account_b_id}/freeze" \
+  -H "Content-Type: application/json" \
+  -d '{"reference":"uat-pnd-freeze-blocked","reason":"UAT freeze over PND should be explicit"}'
+pnd_off="$(request -X DELETE "${BASE_URL}/api/v1/accounts/${account_b_id}/post-no-debit" \
+  -H "Content-Type: application/json" \
+  -d '{"reference":"uat-pnd-off-001","reason":"UAT clear PND before freeze"}')"
+assert_json "$pnd_off" '.status == "active"' "PND deactivation mismatch"
+pass "PND account could not be frozen without first clearing PND"
+
 frozen="$(request -X POST "${BASE_URL}/api/v1/accounts/${account_b_id}/freeze" \
   -H "Content-Type: application/json" \
   -d '{"reference":"uat-freeze-001","reason":"UAT security review"}')"
@@ -350,7 +359,10 @@ assert_audit_action_count "internal_debit.posted" 1
 assert_audit_action_count "internal_transfer.posted" 2
 assert_audit_action_count "account.lien_placed" 1
 assert_audit_action_count "account.pnd_activated" 1
+assert_audit_action_count "account.pnd_deactivated" 1
 assert_audit_action_count "account.frozen" 1
+actor_context_count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND actor_type = 'dev_user' AND actor_id = 'dev-user' AND request_id <> 'service' AND metadata->>'actor_roles' = 'developer'")"
+[[ "$actor_context_count" -ge "1" ]] || fail "audit events did not capture authenticated actor context"
 pass "audit query contains expected UAT actions"
 
 assert_journal_reconciliation

@@ -2,6 +2,7 @@ package authn
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -17,6 +18,8 @@ const (
 const (
 	EnvDevAuthToken     = "LENZ_DEV_AUTH_TOKEN"
 	EnvDevInstitutionID = "LENZ_DEV_INSTITUTION_ID"
+	EnvDevActorType     = "LENZ_DEV_ACTOR_TYPE"
+	EnvDevActorID       = "LENZ_DEV_ACTOR_ID"
 	EnvDevAuthRoles     = "LENZ_DEV_AUTH_ROLES"
 	EnvDevAuthScopes    = "LENZ_DEV_AUTH_SCOPES"
 
@@ -41,6 +44,8 @@ func Authentication(scopes ...AuthScope) func(http.Handler) http.Handler {
 				writeUnauthorized(w)
 				return
 			}
+			principal.SourceIP = requestSourceIP(r)
+			principal.UserAgent = strings.TrimSpace(r.UserAgent())
 
 			r = RequestWithPrincipal(r, principal)
 			h.ServeHTTP(w, r)
@@ -91,11 +96,29 @@ func developmentPrincipal(token string) (Principal, bool) {
 	if institutionID == "" {
 		institutionID = defaultDevInstitutionID
 	}
+	actorType := strings.TrimSpace(os.Getenv(EnvDevActorType))
+	if actorType == "" {
+		actorType = "dev_user"
+	}
+	actorID := strings.TrimSpace(os.Getenv(EnvDevActorID))
+	if actorID == "" {
+		actorID = "dev-user"
+	}
 	return Principal{
 		InstitutionID: institutionID,
+		ActorType:     actorType,
+		ActorID:       actorID,
 		Roles:         envCSV(EnvDevAuthRoles, []string{"developer"}),
 		Scopes:        envCSV(EnvDevAuthScopes, []string{"corebanking:read", "corebanking:write"}),
 	}, true
+}
+
+func requestSourceIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func envCSV(name string, fallback []string) []string {

@@ -1,8 +1,12 @@
 package corebanking
 
 import (
+	"context"
+	"lenz-core/apps/auth/authn"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 func TestAuditEventsGoal09MemoryStore(t *testing.T) {
@@ -83,6 +87,40 @@ func TestAuditEventsGoal09MemoryStore(t *testing.T) {
 	}
 	if len(otherTenantEvents) != 0 {
 		t.Fatalf("audit events leaked across tenants: %+v", otherTenantEvents)
+	}
+}
+
+func TestAuditEventUsesRequestPrincipalContext(t *testing.T) {
+	ctx := context.WithValue(context.Background(), middleware.RequestIDKey, "req-audit-context")
+	ctx = authn.ContextWithPrincipal(ctx, authn.Principal{
+		InstitutionID: DemoInstitutionID,
+		ActorType:     "staff",
+		ActorID:       "staff-001",
+		Roles:         []string{"operations", "approver"},
+		Scopes:        []string{"corebanking:write"},
+		SourceIP:      "203.0.113.10",
+		UserAgent:     "AuditTest/1.0",
+	})
+
+	event, _, err := newAuditEvent(ctx, auditEventInput{
+		InstitutionID: DemoInstitutionID,
+		Action:        AuditActionInternalCreditPosted,
+		EntityType:    "transfer",
+		EntityID:      "transfer-001",
+		Metadata:      map[string]string{"reason": "ops correction"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.ActorType != "staff" || event.ActorID != "staff-001" || event.RequestID != "req-audit-context" {
+		t.Fatalf("audit event did not capture actor/request context: %+v", event)
+	}
+	if event.Metadata["actor_roles"] != "operations,approver" ||
+		event.Metadata["actor_scopes"] != "corebanking:write" ||
+		event.Metadata["source_ip"] != "203.0.113.10" ||
+		event.Metadata["user_agent"] != "AuditTest/1.0" ||
+		event.Metadata["reason"] != "ops correction" {
+		t.Fatalf("audit metadata did not capture request context: %+v", event.Metadata)
 	}
 }
 

@@ -1,11 +1,14 @@
 package corebanking
 
 import (
+	"context"
 	"encoding/json"
+	"lenz-core/apps/auth/authn"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 )
 
@@ -40,21 +43,22 @@ type auditEventInput struct {
 	CreatedAt      time.Time
 }
 
-func newAuditEvent(input auditEventInput) (AuditEvent, string, error) {
+func newAuditEvent(ctx context.Context, input auditEventInput) (AuditEvent, string, error) {
 	now := input.CreatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	actorType, actorID, requestID, contextMetadata := auditContext(ctx)
 	event := AuditEvent{
 		ID:            uuid.Must(uuid.NewRandom()).String(),
 		InstitutionID: strings.TrimSpace(input.InstitutionID),
-		ActorType:     "system",
-		ActorID:       "system",
-		RequestID:     "service",
+		ActorType:     actorType,
+		ActorID:       actorID,
+		RequestID:     requestID,
 		Action:        strings.TrimSpace(input.Action),
 		EntityType:    strings.TrimSpace(input.EntityType),
 		EntityID:      strings.TrimSpace(input.EntityID),
-		Metadata:      sanitizedAuditMetadata(input.Metadata),
+		Metadata:      mergeAuditMetadata(sanitizedAuditMetadata(input.Metadata), contextMetadata),
 		CreatedAt:     now,
 	}
 	event.CustomerID = optionalAuditString(input.CustomerID)
@@ -70,6 +74,47 @@ func newAuditEvent(input auditEventInput) (AuditEvent, string, error) {
 	}
 	body, err := json.Marshal(event.Metadata)
 	return event, string(body), err
+}
+
+func auditContext(ctx context.Context) (string, string, string, map[string]string) {
+	actorType, actorID, requestID := "system", "system", "service"
+	metadata := map[string]string{}
+	if reqID := strings.TrimSpace(middleware.GetReqID(ctx)); reqID != "" {
+		requestID = reqID
+	}
+	if principal, ok := authn.PrincipalFromContext(ctx); ok {
+		actorType = strings.TrimSpace(principal.ActorType)
+		if actorType == "" {
+			actorType = "principal"
+		}
+		actorID = strings.TrimSpace(principal.ActorID)
+		if actorID == "" {
+			actorID = "unknown"
+		}
+		if len(principal.Roles) > 0 {
+			metadata["actor_roles"] = strings.Join(principal.Roles, ",")
+		}
+		if len(principal.Scopes) > 0 {
+			metadata["actor_scopes"] = strings.Join(principal.Scopes, ",")
+		}
+		if sourceIP := strings.TrimSpace(principal.SourceIP); sourceIP != "" {
+			metadata["source_ip"] = sourceIP
+		}
+		if userAgent := strings.TrimSpace(principal.UserAgent); userAgent != "" {
+			metadata["user_agent"] = userAgent
+		}
+	}
+	return actorType, actorID, requestID, metadata
+}
+
+func mergeAuditMetadata(base, extra map[string]string) map[string]string {
+	if base == nil {
+		base = map[string]string{}
+	}
+	for key, value := range sanitizedAuditMetadata(extra) {
+		base[key] = value
+	}
+	return base
 }
 
 func optionalAuditString(value string) *string {

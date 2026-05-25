@@ -4,12 +4,24 @@ package corebanking
 
 import (
 	"context"
+	"lenz-core/apps/auth/authn"
 	"testing"
+
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 func TestSQLAuditEventsGoal09(t *testing.T) {
 	db := integrationDB(t)
-	ctx := context.Background()
+	ctx := context.WithValue(context.Background(), middleware.RequestIDKey, "req-sql-audit")
+	ctx = authn.ContextWithPrincipal(ctx, authn.Principal{
+		InstitutionID: DemoInstitutionID,
+		ActorType:     "staff",
+		ActorID:       "sql-staff-001",
+		Roles:         []string{"operations"},
+		Scopes:        []string{"corebanking:write"},
+		SourceIP:      "203.0.113.20",
+		UserAgent:     "SQLAuditTest/1.0",
+	})
 	svc := seededSQLService(t, db, ctx)
 
 	account := createSQLCustomerAccount(t, svc, ctx, "SQLAudit", "Source", "sql.audit.source@example.com", "8734567890", "SQL Audit Source")
@@ -46,7 +58,14 @@ func TestSQLAuditEventsGoal09(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertAuditEventPresent(t, events, AuditActionCustomerCreated, func(event AuditEvent) bool {
-		return auditString(event.CustomerID) != ""
+		return auditString(event.CustomerID) != "" &&
+			event.ActorType == "staff" &&
+			event.ActorID == "sql-staff-001" &&
+			event.RequestID == "req-sql-audit" &&
+			event.Metadata["actor_roles"] == "operations" &&
+			event.Metadata["actor_scopes"] == "corebanking:write" &&
+			event.Metadata["source_ip"] == "203.0.113.20" &&
+			event.Metadata["user_agent"] == "SQLAuditTest/1.0"
 	})
 	assertAuditEventPresent(t, events, AuditActionAccountCreated, func(event AuditEvent) bool {
 		return auditString(event.AccountID) == account.ID

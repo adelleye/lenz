@@ -731,6 +731,99 @@ func TestInternalTransferIdempotencyDoesNotDoublePost(t *testing.T) {
 	assertBalance(t, svc, ctx, DemoInstitutionID, destination.ID, 10000)
 }
 
+func TestIdempotencyRejectsChangedMoneyRequest(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	destinationA := createMemoryCustomerAccount(t, svc, ctx, "Idem", "DestA", "transfer.idem.a@example.com", uniqueAccountNumber("72"))
+	destinationB := createMemoryCustomerAccount(t, svc, ctx, "Idem", "DestB", "transfer.idem.b@example.com", uniqueAccountNumber("73"))
+	sourceB := createMemoryCustomerAccount(t, svc, ctx, "Idem", "SourceB", "transfer.idem.source@example.com", uniqueAccountNumber("74"))
+
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "idempotency-conflict-fund-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      sourceB.ID,
+		AmountMinor:    30000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "idempotency-conflict-fund-b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      destinationA.ID,
+		AmountMinor:    1000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "idempotency-conflict-amount",
+		Reference:      "idempotency-conflict-credit-ref",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      destinationA.ID,
+		AmountMinor:    2000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "idempotency-conflict-amount",
+		Reference:      "idempotency-conflict-credit-ref",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed amount to return conflict, got %v", err)
+	}
+
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      DemoCustomerAccountID,
+		DestinationAccountID: destinationA.ID,
+		AmountMinor:          5000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "idempotency-conflict-destination",
+		Reference:            "idempotency-conflict-transfer-ref",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      DemoCustomerAccountID,
+		DestinationAccountID: destinationB.ID,
+		AmountMinor:          5000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "idempotency-conflict-destination",
+		Reference:            "idempotency-conflict-transfer-ref",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed destination to return conflict, got %v", err)
+	}
+
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      DemoCustomerAccountID,
+		DestinationAccountID: destinationA.ID,
+		AmountMinor:          3000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "idempotency-conflict-source",
+		Reference:            "idempotency-conflict-source-ref",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.InternalTransfer(ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      sourceB.ID,
+		DestinationAccountID: destinationA.ID,
+		AmountMinor:          3000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "idempotency-conflict-source",
+		Reference:            "idempotency-conflict-source-ref",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed source to return conflict, got %v", err)
+	}
+}
+
 func TestInternalTransferRejectsInsufficientFundsWithoutTransfer(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	destination := createMemoryCustomerAccount(t, svc, ctx, "NoFunds", "Receiver", "transfer.nofunds@example.com", "9990000004")
@@ -1105,6 +1198,56 @@ func TestDuplicateProviderEventDoesNotDoubleCredit(t *testing.T) {
 		t.Fatalf("expected duplicate provider event to return original transfer")
 	}
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 10000)
+}
+
+func TestDuplicateProviderEventRejectsChangedPayload(t *testing.T) {
+	tests := []struct {
+		name   string
+		second func(accountID string) TransferRequest
+	}{
+		{
+			name: "amount",
+			second: func(accountID string) TransferRequest {
+				return TransferRequest{AccountID: accountID, AmountMinor: 20000, IdempotencyKey: "idem-provider-payload-amount-2", ProviderEventID: "evt-provider-payload-amount"}
+			},
+		},
+		{
+			name: "account",
+			second: func(accountID string) TransferRequest {
+				return TransferRequest{AccountID: accountID, AmountMinor: 10000, IdempotencyKey: "idem-provider-payload-account-2", ProviderEventID: "evt-provider-payload-account"}
+			},
+		},
+		{
+			name: "status",
+			second: func(accountID string) TransferRequest {
+				return TransferRequest{AccountID: accountID, AmountMinor: 10000, IdempotencyKey: "idem-provider-payload-status-2", ProviderEventID: "evt-provider-payload-status", Status: TransferStatusFailed}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, svc, _ := newTestService(t)
+			otherAccount := createMemoryCustomerAccount(t, svc, ctx, "Provider", "Replay", "provider.replay."+tt.name+"@example.com", uniqueAccountNumber("75"))
+			eventID := "evt-provider-payload-" + tt.name
+			if _, err := svc.MockInbound(ctx, TransferRequest{
+				AccountID:       DemoCustomerAccountID,
+				AmountMinor:     10000,
+				IdempotencyKey:  "idem-provider-payload-" + tt.name + "-1",
+				ProviderEventID: eventID,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			second := tt.second(DemoCustomerAccountID)
+			if tt.name == "account" {
+				second = tt.second(otherAccount.ID)
+			}
+			if _, err := svc.MockInbound(ctx, second); !errors.Is(err, ErrConflict) {
+				t.Fatalf("expected changed provider-event %s to return conflict, got %v", tt.name, err)
+			}
+			assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 10000)
+			assertBalance(t, svc, ctx, DemoInstitutionID, otherAccount.ID, 0)
+		})
+	}
 }
 
 func TestUnsupportedProviderWebhookRejectedBeforeMoneyMovement(t *testing.T) {
@@ -1510,6 +1653,56 @@ func TestMockOutboundIdempotencyPreventsDuplicateProviderInitiation(t *testing.T
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000)
 }
 
+func TestMockOutboundIdempotencyRejectsChangedRequest(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{
+		initiateResult: ProviderTransferResult{
+			Provider:          ProviderMockNIP,
+			ProviderReference: "idem-provider-conflict-ref",
+			Status:            TransferStatusSucceeded,
+			Narration:         "provider outbound",
+		},
+	}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       50000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "idem-provider-conflict-fund",
+		Provider:          "test_setup",
+		ProviderReference: "idem-provider-conflict-fund-ref",
+		ProviderEventID:   "idem-provider-conflict-fund-event",
+		Narration:         "fund test account",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       10000,
+		IdempotencyKey:    "provider-adapter-idem-conflict",
+		ProviderReference: "idem-provider-conflict-ref",
+	}
+	if _, err := svc.MockOutbound(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	req.AmountMinor = 15000
+	if _, err := svc.MockOutbound(ctx, req); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed mock outbound request to return conflict, got %v", err)
+	}
+	if provider.initiateCalls != 1 {
+		t.Fatalf("expected conflict before second provider call, got %d calls", provider.initiateCalls)
+	}
+}
+
 func TestMockOutboundRecordsProviderUnknownOnTimeout(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
@@ -1773,35 +1966,37 @@ func setMemoryAccountCurrency(store *memoryStore, accountID, currencyID string) 
 }
 
 type memoryStore struct {
-	mu             sync.Mutex
-	institutions   map[string]Institution
-	branches       map[string]Branch
-	customers      map[string]Customer
-	accounts       map[string]Account
-	balances       map[string]AccountBalance
-	transfers      map[string]Transfer
-	journals       map[string]JournalEntry
-	postings       map[string][]Posting
-	holds          map[string]AccountHold
-	audits         []AuditEvent
-	idempotency    map[string]string
-	providerEvents map[string]string
+	mu                        sync.Mutex
+	institutions              map[string]Institution
+	branches                  map[string]Branch
+	customers                 map[string]Customer
+	accounts                  map[string]Account
+	balances                  map[string]AccountBalance
+	transfers                 map[string]Transfer
+	journals                  map[string]JournalEntry
+	postings                  map[string][]Posting
+	holds                     map[string]AccountHold
+	audits                    []AuditEvent
+	idempotency               map[string]string
+	providerEvents            map[string]string
+	providerEventFingerprints map[string]string
 }
 
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
-		institutions:   map[string]Institution{},
-		branches:       map[string]Branch{},
-		customers:      map[string]Customer{},
-		accounts:       map[string]Account{},
-		balances:       map[string]AccountBalance{},
-		transfers:      map[string]Transfer{},
-		journals:       map[string]JournalEntry{},
-		postings:       map[string][]Posting{},
-		holds:          map[string]AccountHold{},
-		audits:         []AuditEvent{},
-		idempotency:    map[string]string{},
-		providerEvents: map[string]string{},
+		institutions:              map[string]Institution{},
+		branches:                  map[string]Branch{},
+		customers:                 map[string]Customer{},
+		accounts:                  map[string]Account{},
+		balances:                  map[string]AccountBalance{},
+		transfers:                 map[string]Transfer{},
+		journals:                  map[string]JournalEntry{},
+		postings:                  map[string][]Posting{},
+		holds:                     map[string]AccountHold{},
+		audits:                    []AuditEvent{},
+		idempotency:               map[string]string{},
+		providerEvents:            map[string]string{},
+		providerEventFingerprints: map[string]string{},
 	}
 }
 
@@ -2113,7 +2308,7 @@ func (m *memoryStore) ReleaseAccountLien(ctx context.Context, input ReleaseLienI
 }
 
 func (m *memoryStore) createAuditLocked(input auditEventInput) error {
-	event, _, err := newAuditEvent(input)
+	event, _, err := newAuditEvent(context.Background(), input)
 	if err != nil {
 		return err
 	}
@@ -2333,11 +2528,20 @@ func (m *memoryStore) originalCounterpartyAccountIDLocked(original Transfer) (st
 }
 
 func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer, error) {
+	requestFingerprint := transferRequestFingerprint(input)
 	if id := m.idempotency[input.InstitutionID+"|"+input.IdempotencyKey]; id != "" {
+		transfer := m.transfers[id]
+		if !m.sameTransferReplayLocked(transfer, input, requestFingerprint) {
+			return nil, ErrConflict
+		}
 		return copyOf(m.transfers[id]), nil
 	}
 	if input.ProviderEventID != "" {
-		if id := m.providerEvents[input.InstitutionID+"|"+input.Provider+"|"+input.ProviderEventID]; id != "" {
+		key := input.InstitutionID + "|" + input.Provider + "|" + input.ProviderEventID
+		if id := m.providerEvents[key]; id != "" {
+			if !m.providerEventPayloadMatchesLocked(key, requestFingerprint) {
+				return nil, ErrConflict
+			}
 			return copyOf(m.transfers[id]), nil
 		}
 	}
@@ -2389,7 +2593,7 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 		reconciliationStatus = ReconciliationStatusManualReview
 	}
 	now := time.Now().UTC()
-	transfer := Transfer{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: input.InstitutionID, AccountID: input.AccountID, Direction: input.Direction, Status: status, ProviderStatus: providerStatus, LedgerStatus: ledgerStatus, ReconciliationStatus: reconciliationStatus, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: input.Provider, ProviderReference: input.ProviderReference, Narration: input.Narration, CreatedAt: now, UpdatedAt: now}
+	transfer := Transfer{ID: uuid.Must(uuid.NewRandom()).String(), InstitutionID: input.InstitutionID, AccountID: input.AccountID, Direction: input.Direction, Status: status, ProviderStatus: providerStatus, LedgerStatus: ledgerStatus, ReconciliationStatus: reconciliationStatus, AmountMinor: input.AmountMinor, CurrencyID: input.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: input.Provider, ProviderReference: input.ProviderReference, RequestFingerprint: requestFingerprint, Narration: input.Narration, CreatedAt: now, UpdatedAt: now}
 	if input.ProviderEventID != "" {
 		transfer.ProviderEventID = &input.ProviderEventID
 	}
@@ -2409,12 +2613,30 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	}
 	m.idempotency[input.InstitutionID+"|"+input.IdempotencyKey] = transfer.ID
 	if input.ProviderEventID != "" {
-		m.providerEvents[input.InstitutionID+"|"+input.Provider+"|"+input.ProviderEventID] = transfer.ID
+		key := input.InstitutionID + "|" + input.Provider + "|" + input.ProviderEventID
+		m.providerEvents[key] = transfer.ID
+		m.providerEventFingerprints[key] = requestFingerprint
 	}
 	if err := m.auditPostedInternalTransferLocked(input, transfer, account, clearing); err != nil {
 		return nil, err
 	}
 	return copyOf(transfer), nil
+}
+
+func (m *memoryStore) providerEventPayloadMatchesLocked(key, requestFingerprint string) bool {
+	existingFingerprint := strings.TrimSpace(m.providerEventFingerprints[key])
+	return existingFingerprint == "" || existingFingerprint == strings.TrimSpace(requestFingerprint)
+}
+
+func (m *memoryStore) sameTransferReplayLocked(transfer Transfer, input RecordTransferInput, requestFingerprint string) bool {
+	if transferRequestFingerprintMatches(&transfer, requestFingerprint) {
+		return true
+	}
+	if strings.TrimSpace(transfer.RequestFingerprint) != "" || !sameTransferReplayFields(&transfer, input) || transfer.JournalEntryID == nil {
+		return false
+	}
+	counterpartyAccountID, err := m.originalCounterpartyAccountIDLocked(transfer)
+	return err == nil && counterpartyAccountID == input.ClearingAccountID
 }
 
 func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input RecordTransferInput) (*Transfer, error) {
@@ -2478,7 +2700,13 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 	pending.UpdatedAt = now
 	if input.ProviderEventID != "" {
 		pending.ProviderEventID = &input.ProviderEventID
-		m.providerEvents[input.InstitutionID+"|"+input.Provider+"|"+input.ProviderEventID] = pending.ID
+		key := input.InstitutionID + "|" + input.Provider + "|" + input.ProviderEventID
+		requestFingerprint := transferRequestFingerprint(input)
+		if !m.providerEventPayloadMatchesLocked(key, requestFingerprint) {
+			return nil, ErrConflict
+		}
+		m.providerEvents[key] = pending.ID
+		m.providerEventFingerprints[key] = requestFingerprint
 	}
 	if failureReason != "" {
 		pending.FailureReason = &failureReason

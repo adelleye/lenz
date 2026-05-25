@@ -188,6 +188,7 @@ func (p *MockNIPProvider) ParseWebhook(ctx context.Context, payload []byte, head
 	if event.Narration == "" {
 		event.Narration = "Mock NIP webhook"
 	}
+	event.RequestFingerprint = providerWebhookRequestFingerprint(event, strings.TrimSpace(request.ProviderReference), request.DelaySeconds)
 	if delayed {
 		delayedUntil := p.clock().Add(delayDuration(request.DelaySeconds))
 		event.DelayedUntil = &delayedUntil

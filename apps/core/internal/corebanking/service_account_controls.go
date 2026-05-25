@@ -19,7 +19,7 @@ func (s *Service) FreezeAccount(ctx context.Context, input AccountControlInput) 
 	if !controllableAccount(*account) {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input, AccountStatusFrozen, AccountStatusActive, AccountStatusPostNoDebit)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusFrozen, AccountStatusActive)
 }
 
 func (s *Service) UnfreezeAccount(ctx context.Context, input AccountControlInput) (*Account, error) {

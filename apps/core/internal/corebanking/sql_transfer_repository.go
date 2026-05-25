@@ -17,7 +17,7 @@ type sqlTransferRepository struct {
 	providerEvents *sqlProviderEventRepository
 }
 
-const transferSelectSQL = `SELECT id, institution_id, account_id, direction, status, provider_status, ledger_status, reconciliation_status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, failure_reason, narration, created_at, updated_at FROM transfers`
+const transferSelectSQL = `SELECT id, institution_id, account_id, direction, status, provider_status, ledger_status, reconciliation_status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, request_fingerprint, failure_reason, narration, created_at, updated_at FROM transfers`
 
 func (r *sqlTransferRepository) GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error) {
 	var transfer Transfer
@@ -142,6 +142,7 @@ ORDER BY account_id`, original.InstitutionID, *original.JournalEntryID, original
 }
 
 func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner, input RecordTransferInput) (*Transfer, error) {
+	requestFingerprint := transferRequestFingerprint(input)
 	if input.IdempotencyKey != "" {
 		if err := lockReplayKey(ctx, tx, "idempotency", input.InstitutionID, input.IdempotencyKey); err != nil {
 			return nil, err
@@ -159,12 +160,26 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 	}
 
 	if existing, err := r.getTransferByIdempotency(ctx, tx, input.InstitutionID, input.IdempotencyKey); err == nil {
+		ok, err := r.sameTransferReplay(ctx, tx, existing, input, requestFingerprint)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, ErrConflict
+		}
 		return existing, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
 	if input.ProviderEventID != "" {
 		if existing, err := r.providerEvents.getTransfer(ctx, tx, input.InstitutionID, input.Provider, input.ProviderEventID); err == nil {
+			ok, err := r.providerEvents.payloadMatches(ctx, tx, input, requestFingerprint)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, ErrConflict
+			}
 			return existing, nil
 		} else if !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -178,7 +193,11 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 			return nil, err
 		}
 		if settled, err := r.getSettledTransferByProviderReference(ctx, tx, input.InstitutionID, input.Provider, input.ProviderReference, input.Direction); err == nil {
-			if !sameTransferReplay(settled, input) {
+			ok, err := r.sameTransferReplayByFields(ctx, tx, settled, input)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
 				return nil, ErrConflict
 			}
 			return settled, nil
@@ -245,7 +264,7 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 			return nil, err
 		}
 		if !inserted {
-			return existingProviderEventTransfer(ctx, tx, r.providerEvents, input)
+			return existingProviderEventTransfer(ctx, tx, r.providerEvents, input, requestFingerprint)
 		}
 	}
 
@@ -275,6 +294,7 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 		ProviderEventID:      providerEventID,
 		JournalEntryID:       journalEntryID,
 		ReversalOfTransferID: reversalOf,
+		RequestFingerprint:   requestFingerprint,
 		FailureReason:        failure,
 		Narration:            input.Narration,
 		CreatedAt:            now,
@@ -282,8 +302,8 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 	}
 
 	if _, err = tx.NamedExecContext(ctx, `
-INSERT INTO transfers (id, institution_id, account_id, direction, status, provider_status, ledger_status, reconciliation_status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, failure_reason, narration, created_at, updated_at)
-VALUES (:id, :institution_id, :account_id, :direction, :status, :provider_status, :ledger_status, :reconciliation_status, :amount_minor, :currency_id, :idempotency_key, :provider, :provider_reference, :provider_event_id, :journal_entry_id, :reversal_of_transfer_id, :failure_reason, :narration, :created_at, :updated_at)`, transfer); err != nil {
+INSERT INTO transfers (id, institution_id, account_id, direction, status, provider_status, ledger_status, reconciliation_status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, request_fingerprint, failure_reason, narration, created_at, updated_at)
+VALUES (:id, :institution_id, :account_id, :direction, :status, :provider_status, :ledger_status, :reconciliation_status, :amount_minor, :currency_id, :idempotency_key, :provider, :provider_reference, :provider_event_id, :journal_entry_id, :reversal_of_transfer_id, :request_fingerprint, :failure_reason, :narration, :created_at, :updated_at)`, transfer); err != nil {
 		return nil, err
 	}
 	if status == TransferStatusPending && input.Direction == TransferDirectionOutbound && input.ReversalOfTransferID == "" {
@@ -318,7 +338,7 @@ func (r *sqlTransferRepository) settlePendingTransfer(ctx context.Context, tx Tx
 			return nil, err
 		}
 		if !inserted {
-			return existingProviderEventTransfer(ctx, tx, r.providerEvents, input)
+			return existingProviderEventTransfer(ctx, tx, r.providerEvents, input, transferRequestFingerprint(input))
 		}
 	}
 
@@ -507,7 +527,14 @@ func lockReplayKey(ctx context.Context, tx TxRunner, scope string, parts ...stri
 	return err
 }
 
-func existingProviderEventTransfer(ctx context.Context, tx TxRunner, providerEvents *sqlProviderEventRepository, input RecordTransferInput) (*Transfer, error) {
+func existingProviderEventTransfer(ctx context.Context, tx TxRunner, providerEvents *sqlProviderEventRepository, input RecordTransferInput, requestFingerprint string) (*Transfer, error) {
+	ok, err := providerEvents.payloadMatches(ctx, tx, input, requestFingerprint)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrConflict
+	}
 	existing, err := providerEvents.getTransfer(ctx, tx, input.InstitutionID, input.Provider, input.ProviderEventID)
 	if errors.Is(err, ErrNotFound) {
 		return nil, ErrConflict
@@ -515,9 +542,37 @@ func existingProviderEventTransfer(ctx context.Context, tx TxRunner, providerEve
 	return existing, err
 }
 
-func sameTransferReplay(transfer *Transfer, input RecordTransferInput) bool {
+func (r *sqlTransferRepository) sameTransferReplay(ctx context.Context, tx TxRunner, transfer *Transfer, input RecordTransferInput, requestFingerprint string) (bool, error) {
+	if transferRequestFingerprintMatches(transfer, requestFingerprint) {
+		return true, nil
+	}
+	if strings.TrimSpace(transfer.RequestFingerprint) != "" {
+		return false, nil
+	}
+	return r.sameTransferReplayByFields(ctx, tx, transfer, input)
+}
+
+func (r *sqlTransferRepository) sameTransferReplayByFields(ctx context.Context, tx TxRunner, transfer *Transfer, input RecordTransferInput) (bool, error) {
+	if !sameTransferReplayFields(transfer, input) {
+		return false, nil
+	}
+	if transfer.JournalEntryID == nil || input.ClearingAccountID == "" {
+		return false, nil
+	}
+	counterpartyAccountID, err := r.originalCounterpartyAccountID(ctx, tx, *transfer)
+	if err != nil {
+		return false, err
+	}
+	return counterpartyAccountID == input.ClearingAccountID, nil
+}
+
+func sameTransferReplayFields(transfer *Transfer, input RecordTransferInput) bool {
 	if transfer == nil {
 		return false
+	}
+	reversalOfTransferID := ""
+	if transfer.ReversalOfTransferID != nil {
+		reversalOfTransferID = *transfer.ReversalOfTransferID
 	}
 	return transfer.InstitutionID == input.InstitutionID &&
 		transfer.Provider == input.Provider &&
@@ -525,5 +580,6 @@ func sameTransferReplay(transfer *Transfer, input RecordTransferInput) bool {
 		transfer.Direction == input.Direction &&
 		transfer.AccountID == input.AccountID &&
 		transfer.AmountMinor == input.AmountMinor &&
-		transfer.CurrencyID == input.CurrencyID
+		transfer.CurrencyID == input.CurrencyID &&
+		reversalOfTransferID == input.ReversalOfTransferID
 }

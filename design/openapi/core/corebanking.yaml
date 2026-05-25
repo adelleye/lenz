@@ -222,7 +222,7 @@ paths:
   /api/v1/accounts/{account_id}/freeze:
     post:
       operationId: freezeAccount
-      summary: Freeze an active or post-no-debit account
+      summary: Freeze an active account
       tags: [Corebanking]
       parameters:
         - $ref: "#/components/parameters/InstitutionID"

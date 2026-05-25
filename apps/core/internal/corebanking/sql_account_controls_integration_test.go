@@ -108,6 +108,13 @@ func TestSQLAccountControlsGoal08(t *testing.T) {
 	if _, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-pnd-unfreeze", Reason: "not frozen"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected SQL PND account unfreeze to fail, got %v", err)
 	}
+	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-freeze-pnd", Reason: "security escalation"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected SQL PND account freeze to fail, got %v", err)
+	}
+	if _, err := svc.DeactivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-pnd-off", Reason: "ops clear"}); err != nil {
+		t.Fatal(err)
+	}
+	assertSQLAccountStatus(t, ctx, db, transitionAccount.ID, AccountStatusActive)
 	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-freeze", Reason: "security escalation"}); err != nil {
 		t.Fatal(err)
 	}
