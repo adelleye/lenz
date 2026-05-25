@@ -8,6 +8,7 @@ type Repository interface {
 	AccountRepository
 	LedgerRepository
 	TransferRepository
+	AuditRepository
 }
 
 type DemoRepository interface {
@@ -23,7 +24,7 @@ type AccountRepository interface {
 	CreateAccount(ctx context.Context, input CreateAccountInput) (*Account, error)
 	ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error)
 	GetAccount(ctx context.Context, institutionID, accountID string) (*Account, error)
-	SetAccountStatus(ctx context.Context, institutionID, accountID, status string) (*Account, error)
+	SetAccountStatus(ctx context.Context, input AccountControlInput, status string) (*Account, error)
 	GetDefaultInternalSettlementAccount(ctx context.Context, institutionID, currencyID string) (*Account, error)
 	GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error)
 	ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error)
@@ -41,4 +42,8 @@ type TransferRepository interface {
 	ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error)
 	RecordTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, error)
 	ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error)
+}
+
+type AuditRepository interface {
+	ListAuditEvents(ctx context.Context, institutionID string) ([]AuditEvent, error)
 }

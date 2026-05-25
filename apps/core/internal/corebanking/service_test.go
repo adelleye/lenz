@@ -243,6 +243,32 @@ func TestBalanceEnquiryRejectsMissingCrossTenantAndInvalidAccount(t *testing.T) 
 	}
 }
 
+func TestTransferAndJournalReadsRejectInvalidUUID(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	if _, err := svc.GetTransfer(ctx, DemoInstitutionID, "not-a-uuid"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid transfer id to fail validation, got %v", err)
+	}
+	if _, err := svc.GetJournal(ctx, DemoInstitutionID, "not-a-uuid"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid journal id to fail validation, got %v", err)
+	}
+	if _, err := svc.ReverseTransfer(ctx, DemoInstitutionID, "not-a-uuid", "reverse-invalid-id"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid reversal transfer id to fail validation, got %v", err)
+	}
+	_, err := svc.recordProviderWebhookEvent(ctx, ProviderWebhookEvent{
+		Provider:             ProviderMockNIP,
+		InstitutionID:        DemoInstitutionID,
+		Direction:            TransferDirectionReversal,
+		Status:               TransferStatusSucceeded,
+		IdempotencyKey:       "provider-reversal-invalid-id",
+		ProviderEventID:      "provider-reversal-invalid-event",
+		ReversalOfTransferID: "not-a-uuid",
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid provider reversal id to fail validation, got %v", err)
+	}
+}
+
 func TestInternalCreditPostsBalancedLedgerAndHistory(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 
@@ -1757,6 +1783,7 @@ type memoryStore struct {
 	journals       map[string]JournalEntry
 	postings       map[string][]Posting
 	holds          map[string]AccountHold
+	audits         []AuditEvent
 	idempotency    map[string]string
 	providerEvents map[string]string
 }
@@ -1772,6 +1799,7 @@ func newMemoryStore() *memoryStore {
 		journals:       map[string]JournalEntry{},
 		postings:       map[string][]Posting{},
 		holds:          map[string]AccountHold{},
+		audits:         []AuditEvent{},
 		idempotency:    map[string]string{},
 		providerEvents: map[string]string{},
 	}
@@ -1836,6 +1864,19 @@ func (m *memoryStore) CreateCustomer(ctx context.Context, input CreateCustomerIn
 		customer.BusinessName = &input.BusinessName
 	}
 	m.customers[customer.ID] = customer
+	if err := m.createAuditLocked(auditEventInput{
+		InstitutionID: customer.InstitutionID,
+		Action:        AuditActionCustomerCreated,
+		EntityType:    "customer",
+		EntityID:      customer.ID,
+		CustomerID:    customer.ID,
+		NewStatus:     customer.Status,
+		Metadata:      map[string]string{"customer_type": customer.CustomerType, "branch_id": customer.BranchID},
+		CreatedAt:     now,
+	}); err != nil {
+		delete(m.customers, customer.ID)
+		return nil, err
+	}
 	return copyOf(customer), nil
 }
 
@@ -1886,6 +1927,21 @@ func (m *memoryStore) CreateAccount(ctx context.Context, input CreateAccountInpu
 		CurrencyID:     account.CurrencyID,
 		UpdatedAt:      now,
 	}
+	if err := m.createAuditLocked(auditEventInput{
+		InstitutionID: account.InstitutionID,
+		Action:        AuditActionAccountCreated,
+		EntityType:    "account",
+		EntityID:      account.ID,
+		CustomerID:    input.CustomerID,
+		AccountID:     account.ID,
+		NewStatus:     account.Status,
+		Metadata:      map[string]string{"product_type": account.ProductType, "currency_id": account.CurrencyID},
+		CreatedAt:     now,
+	}); err != nil {
+		delete(m.accounts, account.ID)
+		delete(m.balances, account.ID)
+		return nil, err
+	}
 	return copyOf(account), nil
 }
 
@@ -1931,16 +1987,35 @@ func (m *memoryStore) GetDefaultInternalSettlementAccount(ctx context.Context, i
 	return defaultAccount, nil
 }
 
-func (m *memoryStore) SetAccountStatus(ctx context.Context, institutionID, accountID, status string) (*Account, error) {
+func (m *memoryStore) SetAccountStatus(ctx context.Context, input AccountControlInput, status string) (*Account, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	account, ok := m.accounts[accountID]
-	if !ok || account.InstitutionID != institutionID {
+	account, ok := m.accounts[input.AccountID]
+	if !ok || account.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
+	}
+	oldStatus := account.Status
+	if oldStatus == status {
+		return copyOf(account), nil
 	}
 	account.Status = status
 	account.UpdatedAt = time.Now().UTC()
-	m.accounts[accountID] = account
+	if err := m.createAuditLocked(auditEventInput{
+		InstitutionID: input.InstitutionID,
+		Action:        accountStatusAuditAction(oldStatus, status),
+		EntityType:    "account",
+		EntityID:      account.ID,
+		CustomerID:    optionalAuditValue(account.CustomerID),
+		AccountID:     account.ID,
+		Reference:     input.Reference,
+		OldStatus:     oldStatus,
+		NewStatus:     status,
+		Metadata:      map[string]string{"reason": input.Reason},
+		CreatedAt:     account.UpdatedAt,
+	}); err != nil {
+		return nil, err
+	}
+	m.accounts[input.AccountID] = account
 	return copyOf(account), nil
 }
 
@@ -1982,6 +2057,19 @@ func (m *memoryStore) PlaceAccountLien(ctx context.Context, input AccountLienInp
 	balance.AvailableMinor -= input.AmountMinor
 	balance.UpdatedAt = now
 	m.balances[input.AccountID] = balance
+	if err := m.createAuditLocked(auditEventInput{
+		InstitutionID: input.InstitutionID,
+		Action:        AuditActionLienPlaced,
+		EntityType:    "account_hold",
+		EntityID:      hold.ID,
+		AccountID:     hold.AccountID,
+		Reference:     input.Reference,
+		NewStatus:     HoldStatusActive,
+		Metadata:      map[string]string{"amount_minor": formatAuditInt(input.AmountMinor), "currency_id": input.CurrencyID, "reason": input.Reason},
+		CreatedAt:     now,
+	}); err != nil {
+		return nil, err
+	}
 	return copyOf(hold), nil
 }
 
@@ -2004,7 +2092,42 @@ func (m *memoryStore) ReleaseAccountLien(ctx context.Context, input ReleaseLienI
 	balance.AvailableMinor += hold.AmountMinor
 	balance.UpdatedAt = now
 	m.balances[input.AccountID] = balance
+	if err := m.createAuditLocked(auditEventInput{
+		InstitutionID: input.InstitutionID,
+		Action:        AuditActionLienReleased,
+		EntityType:    "account_hold",
+		EntityID:      hold.ID,
+		AccountID:     hold.AccountID,
+		Reference:     input.Reference,
+		OldStatus:     HoldStatusActive,
+		NewStatus:     HoldStatusReleased,
+		Metadata:      map[string]string{"amount_minor": formatAuditInt(hold.AmountMinor), "currency_id": hold.CurrencyID, "reason": input.Reason},
+		CreatedAt:     now,
+	}); err != nil {
+		return nil, err
+	}
 	return copyOf(hold), nil
+}
+
+func (m *memoryStore) createAuditLocked(input auditEventInput) error {
+	event, _, err := newAuditEvent(input)
+	if err != nil {
+		return err
+	}
+	m.audits = append(m.audits, event)
+	return nil
+}
+
+func (m *memoryStore) ListAuditEvents(ctx context.Context, institutionID string) ([]AuditEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	events := []AuditEvent{}
+	for i := len(m.audits) - 1; i >= 0; i-- {
+		if m.audits[i].InstitutionID == institutionID {
+			events = append(events, m.audits[i])
+		}
+	}
+	return events, nil
 }
 
 func (m *memoryStore) GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error) {
@@ -2285,6 +2408,9 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	if input.ProviderEventID != "" {
 		m.providerEvents[input.InstitutionID+"|"+input.Provider+"|"+input.ProviderEventID] = transfer.ID
 	}
+	if err := m.auditPostedInternalTransferLocked(input, transfer, account, clearing); err != nil {
+		return nil, err
+	}
 	return copyOf(transfer), nil
 }
 
@@ -2294,6 +2420,7 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 	}
 	account := m.accounts[pending.AccountID]
 	balance := m.balances[pending.AccountID]
+	var clearing Account
 	providerStatus := strings.ToLower(strings.TrimSpace(input.ProviderStatus))
 	if providerStatus == "" {
 		providerStatus = input.Status
@@ -2314,7 +2441,8 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 	}
 	switch status {
 	case TransferStatusSucceeded:
-		clearing, ok := m.accounts[input.ClearingAccountID]
+		var ok bool
+		clearing, ok = m.accounts[input.ClearingAccountID]
 		if !ok || clearing.InstitutionID != input.InstitutionID {
 			return nil, ErrNotFound
 		}
@@ -2356,7 +2484,18 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 		pending.Narration = input.Narration
 	}
 	m.transfers[pending.ID] = pending
+	if err := m.auditPostedInternalTransferLocked(input, pending, account, clearing); err != nil {
+		return nil, err
+	}
 	return copyOf(pending), nil
+}
+
+func (m *memoryStore) auditPostedInternalTransferLocked(input RecordTransferInput, transfer Transfer, account, clearing Account) error {
+	auditInput, ok := postedInternalTransferAuditInput(input, transfer, account, clearing)
+	if !ok {
+		return nil
+	}
+	return m.createAuditLocked(auditInput)
 }
 
 func (m *memoryStore) postJournalLocked(input RecordTransferInput, transferID string, now time.Time, heldAccountID string) string {

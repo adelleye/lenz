@@ -376,6 +376,10 @@ func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID str
 	if err != nil {
 		return nil, err
 	}
+	transferID = strings.TrimSpace(transferID)
+	if _, err := uuid.Parse(transferID); err != nil {
+		return nil, ErrInvalidRequest
+	}
 	return s.repository.GetTransfer(ctx, institutionID, transferID)
 }
 
@@ -403,6 +407,10 @@ func (s *Service) GetJournal(ctx context.Context, institutionID, journalEntryID 
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
 		return nil, err
+	}
+	journalEntryID = strings.TrimSpace(journalEntryID)
+	if _, err := uuid.Parse(journalEntryID); err != nil {
+		return nil, ErrInvalidRequest
 	}
 	return s.repository.GetJournal(ctx, institutionID, journalEntryID)
 }
@@ -480,9 +488,13 @@ func (s *Service) ReverseTransfer(ctx context.Context, institutionID, transferID
 	if err != nil {
 		return nil, err
 	}
+	transferID = strings.TrimSpace(transferID)
+	if _, err := uuid.Parse(transferID); err != nil {
+		return nil, ErrInvalidRequest
+	}
 	return s.repository.ReverseTransfer(ctx, ReverseTransferInput{
 		InstitutionID:  institutionID,
-		TransferID:     strings.TrimSpace(transferID),
+		TransferID:     transferID,
 		IdempotencyKey: strings.TrimSpace(idempotencyKey),
 	})
 }
@@ -533,12 +545,13 @@ func (s *Service) recordProviderWebhookEvent(ctx context.Context, event Provider
 		return nil, ErrInvalidRequest
 	}
 	if event.Direction == TransferDirectionReversal {
-		if strings.TrimSpace(event.ReversalOfTransferID) == "" {
+		event.ReversalOfTransferID = strings.TrimSpace(event.ReversalOfTransferID)
+		if _, err := uuid.Parse(event.ReversalOfTransferID); err != nil {
 			return nil, ErrInvalidRequest
 		}
 		return s.repository.ReverseTransfer(ctx, ReverseTransferInput{
 			InstitutionID:     event.InstitutionID,
-			TransferID:        strings.TrimSpace(event.ReversalOfTransferID),
+			TransferID:        event.ReversalOfTransferID,
 			IdempotencyKey:    event.IdempotencyKey,
 			Provider:          event.Provider,
 			ProviderReference: event.ProviderReference,
@@ -553,10 +566,14 @@ func (s *Service) recordProviderWebhookEvent(ctx context.Context, event Provider
 	if event.AccountID == "" || event.AmountMinor <= 0 {
 		return nil, ErrInvalidRequest
 	}
+	clearing, err := s.repository.GetDefaultInternalSettlementAccount(ctx, event.InstitutionID, event.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
 	return s.repository.RecordTransfer(ctx, RecordTransferInput{
 		InstitutionID:     event.InstitutionID,
 		AccountID:         event.AccountID,
-		ClearingAccountID: DemoClearingAccountID,
+		ClearingAccountID: clearing.ID,
 		Direction:         event.Direction,
 		Status:            event.Status,
 		AmountMinor:       event.AmountMinor,
@@ -609,10 +626,14 @@ func (s *Service) recordProviderTransfer(ctx context.Context, direction string, 
 	if providerEventID == "" {
 		providerEventID = req.ProviderEventID
 	}
+	clearing, err := s.repository.GetDefaultInternalSettlementAccount(ctx, req.InstitutionID, req.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
 	return s.repository.RecordTransfer(ctx, RecordTransferInput{
 		InstitutionID:     req.InstitutionID,
 		AccountID:         req.AccountID,
-		ClearingAccountID: DemoClearingAccountID,
+		ClearingAccountID: clearing.ID,
 		Direction:         direction,
 		Status:            status,
 		AmountMinor:       req.AmountMinor,

@@ -296,6 +296,9 @@ VALUES (:id, :institution_id, :account_id, :direction, :status, :provider_status
 			return nil, err
 		}
 	}
+	if err = auditPostedInternalTransfer(ctx, tx, input, transfer, account.Account, clearing.Account); err != nil {
+		return nil, err
+	}
 	return &transfer, nil
 }
 
@@ -402,7 +405,56 @@ WHERE institution_id = $10 AND id = $11`,
 		status, providerStatus, ledgerStatus, reconciliationStatus, providerEventID, journalEntryID, failure, narration, now, pending.InstitutionID, pending.ID); err != nil {
 		return nil, err
 	}
-	return r.getTransferForUpdate(ctx, tx, pending.InstitutionID, pending.ID)
+	updated, err := r.getTransferForUpdate(ctx, tx, pending.InstitutionID, pending.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err = auditPostedInternalTransfer(ctx, tx, input, *updated, account.Account, clearing.Account); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func auditPostedInternalTransfer(ctx context.Context, tx TxRunner, input RecordTransferInput, transfer Transfer, account, clearing Account) error {
+	auditInput, ok := postedInternalTransferAuditInput(input, transfer, account, clearing)
+	if !ok {
+		return nil
+	}
+	_, err := insertAuditEvent(ctx, tx, auditInput)
+	return err
+}
+
+func postedInternalTransferAuditInput(input RecordTransferInput, transfer Transfer, account, clearing Account) (auditEventInput, bool) {
+	if transfer.Status != TransferStatusSucceeded || input.Provider != ProviderLedgerInternal || input.ReversalOfTransferID != "" {
+		return auditEventInput{}, false
+	}
+	action := AuditActionInternalCreditPosted
+	metadata := map[string]string{
+		"amount_minor": formatAuditInt(input.AmountMinor),
+		"currency_id":  input.CurrencyID,
+	}
+	accountID := account.ID
+	if input.Direction == TransferDirectionOutbound {
+		action = AuditActionInternalDebitPosted
+		if clearing.Kind == AccountKindCustomer {
+			action = AuditActionInternalTransferPosted
+			metadata["source_account_id"] = account.ID
+			metadata["destination_account_id"] = clearing.ID
+		}
+	}
+	return auditEventInput{
+		InstitutionID:  transfer.InstitutionID,
+		Action:         action,
+		EntityType:     "transfer",
+		EntityID:       transfer.ID,
+		AccountID:      accountID,
+		TransferID:     transfer.ID,
+		JournalEntryID: optionalAuditValue(transfer.JournalEntryID),
+		IdempotencyKey: input.IdempotencyKey,
+		Reference:      input.ProviderReference,
+		Metadata:       metadata,
+		CreatedAt:      transfer.CreatedAt,
+	}, true
 }
 
 func (r *sqlTransferRepository) getTransferForUpdate(ctx context.Context, tx TxRunner, institutionID, transferID string) (*Transfer, error) {

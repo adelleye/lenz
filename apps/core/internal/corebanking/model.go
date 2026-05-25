@@ -215,6 +215,27 @@ type ReleaseLienInput struct {
 	Reason        string
 }
 
+type AuditEvent struct {
+	ID             string            `json:"id" db:"id"`
+	InstitutionID  string            `json:"institution_id" db:"institution_id"`
+	ActorType      string            `json:"actor_type" db:"actor_type"`
+	ActorID        string            `json:"actor_id" db:"actor_id"`
+	RequestID      string            `json:"request_id" db:"request_id"`
+	Action         string            `json:"action" db:"action"`
+	EntityType     string            `json:"entity_type" db:"entity_type"`
+	EntityID       string            `json:"entity_id" db:"entity_id"`
+	CustomerID     *string           `json:"customer_id,omitempty" db:"customer_id"`
+	AccountID      *string           `json:"account_id,omitempty" db:"account_id"`
+	TransferID     *string           `json:"transfer_id,omitempty" db:"transfer_id"`
+	JournalEntryID *string           `json:"journal_entry_id,omitempty" db:"journal_entry_id"`
+	IdempotencyKey *string           `json:"idempotency_key,omitempty" db:"idempotency_key"`
+	Reference      *string           `json:"reference,omitempty" db:"reference"`
+	OldStatus      *string           `json:"old_status,omitempty" db:"old_status"`
+	NewStatus      *string           `json:"new_status,omitempty" db:"new_status"`
+	Metadata       map[string]string `json:"metadata" db:"-"`
+	CreatedAt      time.Time         `json:"created_at" db:"created_at"`
+}
+
 type Account struct {
 	ID            string    `json:"id" db:"id"`
 	InstitutionID string    `json:"institution_id" db:"institution_id"`

@@ -25,7 +25,9 @@ const (
 	writeTimeout              = 10 * time.Second
 	readTimeout               = 5 * time.Second
 	readHeaderTimeout         = 2 * time.Second
+	idleTimeout               = 60 * time.Second
 	timeoutMiddlewareDuration = 25 * time.Second
+	maxHeaderBytes            = 1 << 20
 )
 
 type ServerOptions func(opts *Server) error
@@ -107,8 +109,6 @@ func (s *Server) setGlobalMiddlewares() {
 	s.router.Use(middleware.RequestID)
 	s.router.Use(httpmiddleware.Recover)
 	s.router.Use(s.cors.Handler)
-	s.router.Use(middleware.RealIP) // TODO: implement realip in httpmiddleware
-	// s.router.Use(httpmiddleware.RealIPWithContext)
 	s.router.Use(httpmiddleware.BodyLimit)
 	s.router.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +145,8 @@ func (s *Server) Run() {
 		ReadTimeout:       readTimeout,
 		ReadHeaderTimeout: readHeaderTimeout,
 		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 
 	go func() {

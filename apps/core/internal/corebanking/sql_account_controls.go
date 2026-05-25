@@ -8,9 +8,10 @@ import (
 	"github.com/google/uuid"
 )
 
-func (r *sqlAccountRepository) SetAccountStatus(ctx context.Context, institutionID, accountID, status string) (*Account, error) {
+func (r *sqlAccountRepository) SetAccountStatus(ctx context.Context, input AccountControlInput, status string) (*Account, error) {
 	var account Account
 	err := WithTx(ctx, r.db, func(tx TxRunner) error {
+		institutionID, accountID := input.InstitutionID, input.AccountID
 		if err := tx.GetContext(ctx, &account, accountSelectSQL+`
 WHERE institution_id = $1 AND id = $2 FOR UPDATE`, institutionID, accountID); err != nil {
 			return normalizeSQLError(err)
@@ -18,14 +19,33 @@ WHERE institution_id = $1 AND id = $2 FOR UPDATE`, institutionID, accountID); er
 		if account.Status == status {
 			return nil
 		}
+		oldStatus := account.Status
 		now := time.Now().UTC()
-		return normalizeSQLError(tx.GetContext(ctx, &account, `
+		if err := normalizeSQLError(tx.GetContext(ctx, &account, `
 UPDATE accounts
 SET status = $1,
     updated_at = $2
 WHERE institution_id = $3 AND id = $4
 RETURNING id, institution_id, customer_id, account_number, name, kind, product_type, allow_negative_balance, currency_id, normal_balance, status, created_at, updated_at`,
-			status, now, institutionID, accountID))
+			status, now, institutionID, accountID)); err != nil {
+			return err
+		}
+		_, err := insertAuditEvent(ctx, tx, auditEventInput{
+			InstitutionID: input.InstitutionID,
+			Action:        accountStatusAuditAction(oldStatus, status),
+			EntityType:    "account",
+			EntityID:      account.ID,
+			CustomerID:    optionalAuditValue(account.CustomerID),
+			AccountID:     account.ID,
+			Reference:     input.Reference,
+			OldStatus:     oldStatus,
+			NewStatus:     status,
+			Metadata: map[string]string{
+				"reason": input.Reason,
+			},
+			CreatedAt: now,
+		})
+		return err
 	})
 	return &account, normalizeSQLError(err)
 }
@@ -69,11 +89,28 @@ INSERT INTO account_holds (id, institution_id, account_id, transfer_id, amount_m
 VALUES (:id, :institution_id, :account_id, :transfer_id, :amount_minor, :currency_id, :status, :reason, :reference, :created_at, :updated_at, :released_at)`, hold); err != nil {
 			return normalizeSQLError(err)
 		}
-		_, err = tx.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 UPDATE account_balances
 SET available_minor = available_minor - $1,
     updated_at = $2
-WHERE institution_id = $3 AND account_id = $4`, input.AmountMinor, now, input.InstitutionID, input.AccountID)
+WHERE institution_id = $3 AND account_id = $4`, input.AmountMinor, now, input.InstitutionID, input.AccountID); err != nil {
+			return err
+		}
+		_, err = insertAuditEvent(ctx, tx, auditEventInput{
+			InstitutionID: input.InstitutionID,
+			Action:        AuditActionLienPlaced,
+			EntityType:    "account_hold",
+			EntityID:      hold.ID,
+			AccountID:     hold.AccountID,
+			Reference:     input.Reference,
+			NewStatus:     HoldStatusActive,
+			Metadata: map[string]string{
+				"amount_minor": formatAuditInt(input.AmountMinor),
+				"currency_id":  input.CurrencyID,
+				"reason":       input.Reason,
+			},
+			CreatedAt: now,
+		})
 		return err
 	})
 	return hold, err
@@ -106,10 +143,42 @@ SET available_minor = available_minor + $1,
 WHERE institution_id = $3 AND account_id = $4`, current.AmountMinor, now, input.InstitutionID, input.AccountID); err != nil {
 			return err
 		}
-		hold, err = getLienForUpdate(ctx, tx, input.InstitutionID, input.AccountID, input.LienID)
+		if hold, err = getLienForUpdate(ctx, tx, input.InstitutionID, input.AccountID, input.LienID); err != nil {
+			return err
+		}
+		_, err = insertAuditEvent(ctx, tx, auditEventInput{
+			InstitutionID: input.InstitutionID,
+			Action:        AuditActionLienReleased,
+			EntityType:    "account_hold",
+			EntityID:      hold.ID,
+			AccountID:     hold.AccountID,
+			Reference:     input.Reference,
+			OldStatus:     HoldStatusActive,
+			NewStatus:     HoldStatusReleased,
+			Metadata: map[string]string{
+				"amount_minor": formatAuditInt(hold.AmountMinor),
+				"currency_id":  hold.CurrencyID,
+				"reason":       input.Reason,
+			},
+			CreatedAt: now,
+		})
 		return err
 	})
 	return hold, err
+}
+
+func accountStatusAuditAction(oldStatus, status string) string {
+	switch status {
+	case AccountStatusFrozen:
+		return AuditActionAccountFrozen
+	case AccountStatusPostNoDebit:
+		return AuditActionPNDActivated
+	default:
+		if oldStatus == AccountStatusPostNoDebit {
+			return AuditActionPNDDeactivated
+		}
+		return AuditActionAccountUnfrozen
+	}
 }
 
 func getActiveLienByReference(ctx context.Context, tx TxRunner, institutionID, accountID, reference string) (*AccountHold, error) {

@@ -138,6 +138,17 @@ assert_journal_balanced() {
   assert_json "$body" "([.postings[] | select(.direction == \"credit\") | .amount_minor] | add) == ${amount}" "journal ${journal_id} credit amount mismatch"
 }
 
+sql_scalar() {
+  docker exec lenzcore-postgres psql -U lenzcore -d lenzcore -tAc "$1"
+}
+
+assert_audit_action() {
+  local action="$1"
+  local count
+  count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND action = '${action}'")"
+  [[ "$count" != "0" ]] || fail "missing audit event action: ${action}"
+}
+
 require_cmd docker
 require_cmd curl
 require_cmd jq
@@ -334,11 +345,23 @@ control_account="$(request -X POST "${BASE_URL}/api/v1/accounts" \
   -H "X-Institution-ID: ${INSTITUTION_ID}" \
   -d "{\"customer_id\":\"${control_customer_id}\",\"account_number\":\"9990000101\",\"name\":\"Control Demo Wallet\",\"product_type\":\"standard_wallet\",\"currency_id\":\"NGN\"}")"
 control_account_id="$(json_get '.id' "$control_account")"
+transfer_customer="$(request -X POST "${BASE_URL}/api/v1/customers" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"branch_id\":\"${DEMO_BRANCH_ID:-22222222-2222-2222-2222-222222222222}\",\"customer_type\":\"individual\",\"first_name\":\"Transfer\",\"last_name\":\"Demo\",\"email\":\"transfer.demo@example.com\",\"phone\":\"+2348000000002\"}")"
+transfer_customer_id="$(json_get '.id' "$transfer_customer")"
+transfer_account="$(request -X POST "${BASE_URL}/api/v1/accounts" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"customer_id\":\"${transfer_customer_id}\",\"account_number\":\"9990000102\",\"name\":\"Transfer Demo Wallet\",\"product_type\":\"standard_wallet\",\"currency_id\":\"NGN\"}")"
+transfer_account_id="$(json_get '.id' "$transfer_account")"
 control_credit="$(request -X POST "${BASE_URL}/api/v1/internal/credits" \
   -H 'Content-Type: application/json' \
   -H "X-Institution-ID: ${INSTITUTION_ID}" \
   -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":50000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-credit-001\",\"reference\":\"demo-controls-credit-ref\"}")"
 assert_json "$control_credit" '.status == "succeeded" and .journal_entry_id != null' "control account funding failed"
+control_credit_id="$(json_get '.id' "$control_credit")"
+control_credit_journal_id="$(json_get '.journal_entry_id' "$control_credit")"
 assert_account_balance_pair "$control_account_id" 50000 50000
 pass "control test account was created and funded"
 
@@ -374,13 +397,25 @@ control_debit="$(request -X POST "${BASE_URL}/api/v1/internal/debits" \
   -H "X-Institution-ID: ${INSTITUTION_ID}" \
   -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":40000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-post-lien-debit\",\"reference\":\"demo-controls-post-lien-debit-ref\"}")"
 assert_json "$control_debit" '.status == "succeeded" and .journal_entry_id != null' "post-lien debit did not succeed"
+control_debit_id="$(json_get '.id' "$control_debit")"
 assert_account_balance_pair "$control_account_id" 10000 10000
 pass "debit succeeded after lien release"
+
+control_transfer="$(request -X POST "${BASE_URL}/api/v1/internal/transfers" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"source_account_id\":\"${control_account_id}\",\"destination_account_id\":\"${transfer_account_id}\",\"amount_minor\":5000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-transfer-001\",\"reference\":\"demo-controls-transfer-ref\"}")"
+assert_json "$control_transfer" '.status == "succeeded" and .journal_entry_id != null' "internal transfer did not succeed"
+control_transfer_id="$(json_get '.id' "$control_transfer")"
+control_transfer_journal_id="$(json_get '.journal_entry_id' "$control_transfer")"
+assert_account_balance_pair "$control_account_id" 5000 5000
+assert_account_balance_pair "$transfer_account_id" 5000 5000
+pass "internal transfer moved money between customer accounts"
 
 frozen_account="$(request -X POST "${BASE_URL}/api/v1/accounts/${control_account_id}/freeze" \
   -H 'Content-Type: application/json' \
   -H "X-Institution-ID: ${INSTITUTION_ID}" \
-  -d '{"reference":"demo-freeze-ref-001","reason":"demo freeze"}')"
+  -d '{"reference":"demo-freeze-ref-001","reason":"Authorization: Bearer demo-secret-token"}')"
 assert_json "$frozen_account" '.status == "frozen"' "freeze did not mark account frozen"
 control_credit_status="$(request_status "$control_fail_path" -X POST "${BASE_URL}/api/v1/internal/credits" \
   -H 'Content-Type: application/json' \
@@ -409,16 +444,44 @@ control_debit_status="$(request_status "$control_fail_path" -X POST "${BASE_URL}
   -H "X-Institution-ID: ${INSTITUTION_ID}" \
   -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-pnd-debit\"}")"
 [[ "$control_debit_status" == "400" ]] || fail "expected PND debit to return 400, got ${control_debit_status}: $(cat "$control_fail_path")"
-control_credit="$(request -X POST "${BASE_URL}/api/v1/internal/credits" \
+pnd_credit="$(request -X POST "${BASE_URL}/api/v1/internal/credits" \
   -H 'Content-Type: application/json' \
   -H "X-Institution-ID: ${INSTITUTION_ID}" \
   -d "{\"account_id\":\"${control_account_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-controls-pnd-credit\",\"reference\":\"demo-controls-pnd-credit-ref\"}")"
-assert_json "$control_credit" '.status == "succeeded" and .journal_entry_id != null' "PND account did not allow credit"
+assert_json "$pnd_credit" '.status == "succeeded" and .journal_entry_id != null' "PND account did not allow credit"
 pass "PND blocked debits while allowing credits"
 
+pnd_off_account="$(request -X DELETE "${BASE_URL}/api/v1/accounts/${control_account_id}/post-no-debit" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d '{"reference":"demo-pnd-off-ref-001","reason":"demo pnd clear"}')"
+assert_json "$pnd_off_account" '.status == "active"' "PND deactivation did not mark account active"
+pass "PND deactivation restored active account status"
+
 transfers="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/admin/transfers")"
-assert_json "$transfers" 'length >= 10' "admin transfer list did not include demo and account-control transfer records"
+assert_json "$transfers" 'length >= 11' "admin transfer list did not include demo and account-control transfer records"
 pass "admin transfer list returned all demo transfers"
+
+assert_audit_action "customer.created"
+assert_audit_action "account.created"
+assert_audit_action "internal_credit.posted"
+assert_audit_action "internal_debit.posted"
+assert_audit_action "internal_transfer.posted"
+assert_audit_action "account.frozen"
+assert_audit_action "account.unfrozen"
+assert_audit_action "account.pnd_activated"
+assert_audit_action "account.pnd_deactivated"
+assert_audit_action "account.lien_placed"
+assert_audit_action "account.lien_released"
+audit_link_count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND action = 'internal_credit.posted' AND account_id = '${control_account_id}' AND transfer_id = '${control_credit_id}' AND journal_entry_id = '${control_credit_journal_id}'")"
+[[ "$audit_link_count" == "1" ]] || fail "internal credit audit link mismatch: ${audit_link_count}"
+transfer_audit_link_count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND action = 'internal_transfer.posted' AND account_id = '${control_account_id}' AND transfer_id = '${control_transfer_id}' AND journal_entry_id = '${control_transfer_journal_id}'")"
+[[ "$transfer_audit_link_count" == "1" ]] || fail "internal transfer audit link mismatch: ${transfer_audit_link_count}"
+debit_audit_link_count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND action = 'internal_debit.posted' AND account_id = '${control_account_id}' AND transfer_id = '${control_debit_id}'")"
+[[ "$debit_audit_link_count" == "1" ]] || fail "internal debit audit link mismatch: ${debit_audit_link_count}"
+unsafe_audit_metadata_count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND (metadata::text ILIKE '%authorization%' OR metadata::text ILIKE '%bearer %' OR metadata::text ILIKE '%token%' OR metadata::text ILIKE '%secret%' OR metadata::text ILIKE '%password%' OR metadata::text ILIKE '%bvn%' OR metadata::text ILIKE '%nin%')")"
+[[ "$unsafe_audit_metadata_count" == "0" ]] || fail "unsafe audit metadata persisted: ${unsafe_audit_metadata_count}"
+pass "audit events were persisted with tenant, account, transfer, journal, and sanitized metadata checks"
 
 echo
 echo "DEMO TRANSFER SPINE: PASS"

@@ -61,7 +61,7 @@ func (r *sqlCustomerRepository) CreateCustomer(ctx context.Context, input Create
 		if err != nil {
 			return err
 		}
-		return normalizeSQLError(tx.GetContext(ctx, &customer, `
+		if err := normalizeSQLError(tx.GetContext(ctx, &customer, `
 INSERT INTO customers (id, institution_id, branch_id, first_name, last_name, email, phone, status, meta, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8::jsonb, $9, $9)
 RETURNING
@@ -89,7 +89,23 @@ RETURNING
 			input.Phone,
 			string(meta),
 			now,
-		))
+		)); err != nil {
+			return err
+		}
+		_, err = insertAuditEvent(ctx, tx, auditEventInput{
+			InstitutionID: customer.InstitutionID,
+			Action:        AuditActionCustomerCreated,
+			EntityType:    "customer",
+			EntityID:      customer.ID,
+			CustomerID:    customer.ID,
+			NewStatus:     customer.Status,
+			Metadata: map[string]string{
+				"customer_type": customer.CustomerType,
+				"branch_id":     customer.BranchID,
+			},
+			CreatedAt: now,
+		})
+		return err
 	})
 	if err != nil {
 		return nil, err

@@ -59,15 +59,31 @@ RETURNING id, institution_id, customer_id, account_number, name, kind, product_t
 			return normalizeAccountSQLError(err)
 		}
 
-		_, err = tx.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 INSERT INTO account_balances (account_id, institution_id, available_minor, ledger_minor, currency_id, updated_at)
 VALUES ($1, $2, 0, 0, $3, $4)`,
 			account.ID,
 			account.InstitutionID,
 			account.CurrencyID,
 			now,
-		)
-		return normalizeAccountSQLError(err)
+		); err != nil {
+			return normalizeAccountSQLError(err)
+		}
+		_, err = insertAuditEvent(ctx, tx, auditEventInput{
+			InstitutionID: account.InstitutionID,
+			Action:        AuditActionAccountCreated,
+			EntityType:    "account",
+			EntityID:      account.ID,
+			CustomerID:    optionalAuditValue(account.CustomerID),
+			AccountID:     account.ID,
+			NewStatus:     account.Status,
+			Metadata: map[string]string{
+				"product_type": account.ProductType,
+				"currency_id":  account.CurrencyID,
+			},
+			CreatedAt: now,
+		})
+		return err
 	})
 	if err != nil {
 		return nil, err

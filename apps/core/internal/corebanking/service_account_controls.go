@@ -19,7 +19,7 @@ func (s *Service) FreezeAccount(ctx context.Context, input AccountControlInput) 
 	if !controllableAccount(*account) {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input.InstitutionID, input.AccountID, AccountStatusFrozen)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusFrozen)
 }
 
 func (s *Service) UnfreezeAccount(ctx context.Context, input AccountControlInput) (*Account, error) {
@@ -34,7 +34,7 @@ func (s *Service) UnfreezeAccount(ctx context.Context, input AccountControlInput
 	if !controllableAccount(*account) {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input.InstitutionID, input.AccountID, AccountStatusActive)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusActive)
 }
 
 func (s *Service) ActivatePostNoDebit(ctx context.Context, input AccountControlInput) (*Account, error) {
@@ -49,7 +49,7 @@ func (s *Service) ActivatePostNoDebit(ctx context.Context, input AccountControlI
 	if !controllableAccount(*account) || account.Status == AccountStatusFrozen {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input.InstitutionID, input.AccountID, AccountStatusPostNoDebit)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusPostNoDebit)
 }
 
 func (s *Service) DeactivatePostNoDebit(ctx context.Context, input AccountControlInput) (*Account, error) {
@@ -64,7 +64,7 @@ func (s *Service) DeactivatePostNoDebit(ctx context.Context, input AccountContro
 	if !controllableAccount(*account) || account.Status == AccountStatusFrozen {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input.InstitutionID, input.AccountID, AccountStatusActive)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusActive)
 }
 
 func (s *Service) PlaceAccountLien(ctx context.Context, input AccountLienInput) (*AccountHold, error) {
