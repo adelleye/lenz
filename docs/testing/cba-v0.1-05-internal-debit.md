@@ -71,7 +71,7 @@ debit={"id":"1bee5a22-67ef-4526-b2f5-7259eebb99bc","direction":"outbound","statu
 duplicate_same_id=true
 balance_after_debit={"available_minor":38000,"ledger_minor":38000}
 insufficient_status=422 insufficient_body={"message":"insufficient_funds"} insufficient_transfer_count=0
-transactions=[{"transfer_id":"1bee5a22-67ef-4526-b2f5-7259eebb99bc","direction":"outbound","status":"succeeded","signed_minor":-12000,"journal_entry_id":"692bed0f-99cc-43a7-aa94-fd2c41868b70"},{"transfer_id":"d43d5c2c-852e-42db-bdd5-14ccc97a478f","direction":"inbound","status":"succeeded","signed_minor":50000,"journal_entry_id":"86e75e70-265e-446c-a84f-25eb03ff3b0f"}]
+transactions=[{"transfer_id":"1bee5a22-67ef-4526-b2f5-7259eebb99bc","direction":"debit","status":"succeeded","signed_amount_minor":-12000,"journal_entry_id":"692bed0f-99cc-43a7-aa94-fd2c41868b70"},{"transfer_id":"d43d5c2c-852e-42db-bdd5-14ccc97a478f","direction":"credit","status":"succeeded","signed_amount_minor":50000,"journal_entry_id":"86e75e70-265e-446c-a84f-25eb03ff3b0f"}]
 db_transfer_row=outbound|succeeded|ledger_internal|12000|t
 db_posting_rows=55555555-5555-5555-5555-555555555555|credit|12000
 d7a8f534-7f36-4fc9-b6e3-c54fc76f16f6|debit|12000

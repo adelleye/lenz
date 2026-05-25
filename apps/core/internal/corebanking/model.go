@@ -33,6 +33,9 @@ const (
 	TransferDirectionOutbound = "outbound"
 	TransferDirectionReversal = "reversal"
 
+	TransactionDirectionCredit = "credit"
+	TransactionDirectionDebit  = "debit"
+
 	TransferStatusPending   = "pending"
 	TransferStatusSucceeded = "succeeded"
 	TransferStatusFailed    = "failed"
@@ -276,22 +279,30 @@ type JournalWithPostings struct {
 }
 
 type Transaction struct {
-	ID             string    `json:"id" db:"id"`
-	TransferID     string    `json:"transfer_id" db:"transfer_id"`
-	JournalEntryID *string   `json:"journal_entry_id,omitempty" db:"journal_entry_id"`
-	AccountID      string    `json:"account_id" db:"account_id"`
-	Direction      string    `json:"direction" db:"direction"`
-	Status         string    `json:"status" db:"status"`
-	AmountMinor    int64     `json:"amount_minor" db:"amount_minor"`
-	SignedMinor    int64     `json:"signed_minor" db:"signed_minor"`
-	CurrencyID     string    `json:"currency_id" db:"currency_id"`
-	Narration      string    `json:"narration" db:"narration"`
-	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+	ID                    string    `json:"id" db:"id"`
+	TransferID            string    `json:"transfer_id" db:"transfer_id"`
+	JournalEntryID        *string   `json:"journal_entry_id,omitempty" db:"journal_entry_id"`
+	AccountID             string    `json:"account_id" db:"account_id"`
+	InstitutionID         string    `json:"institution_id" db:"institution_id"`
+	Direction             string    `json:"direction" db:"direction"`
+	Status                string    `json:"status" db:"status"`
+	LedgerStatus          string    `json:"ledger_status" db:"ledger_status"`
+	ProviderStatus        string    `json:"provider_status" db:"provider_status"`
+	ReconciliationStatus  string    `json:"reconciliation_status" db:"reconciliation_status"`
+	AmountMinor           int64     `json:"amount_minor" db:"amount_minor"`
+	SignedAmountMinor     int64     `json:"signed_amount_minor" db:"signed_amount_minor"`
+	CurrencyID            string    `json:"currency_id" db:"currency_id"`
+	Narration             string    `json:"narration" db:"narration"`
+	CounterpartyAccountID *string   `json:"counterparty_account_id,omitempty" db:"counterparty_account_id"`
+	Provider              string    `json:"provider" db:"provider"`
+	ProviderReference     string    `json:"provider_reference" db:"provider_reference"`
+	CreatedAt             time.Time `json:"created_at" db:"created_at"`
 }
 
 type ListTransactionsOptions struct {
-	Limit           int
-	BeforeCreatedAt *time.Time
+	Limit            int
+	BeforeCreatedAt  *time.Time
+	BeforeTransferID string
 }
 
 type TransferRequest struct {

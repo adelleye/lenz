@@ -135,10 +135,14 @@ func (r *sqlAccountRepository) GetBalance(ctx context.Context, institutionID, ac
 
 func (r *sqlAccountRepository) ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
 	options = normalizeListTransactionsOptions(options)
-	var txns []Transaction
+	txns := []Transaction{}
 	var beforeCreatedAt *time.Time
 	if options.BeforeCreatedAt != nil && !options.BeforeCreatedAt.IsZero() {
 		beforeCreatedAt = options.BeforeCreatedAt
+	}
+	var beforeTransferID *string
+	if options.BeforeTransferID != "" {
+		beforeTransferID = &options.BeforeTransferID
 	}
 	err := r.db.SelectContext(ctx, &txns, `
 SELECT
@@ -146,34 +150,47 @@ SELECT
 	t.id AS transfer_id,
 	t.journal_entry_id,
 	$2 AS account_id,
+	t.institution_id,
 	CASE
-		WHEN t.direction = 'reversal' THEN t.direction
 		WHEN t.status = 'succeeded' AND p.id IS NOT NULL AND (
 			(a.normal_balance = 'credit' AND p.direction = 'credit') OR
 			(a.normal_balance = 'debit' AND p.direction = 'debit')
-		) THEN 'inbound'
-		WHEN t.status = 'succeeded' AND p.id IS NOT NULL THEN 'outbound'
-		ELSE t.direction
+		) THEN 'credit'
+		WHEN t.status = 'succeeded' AND p.id IS NOT NULL THEN 'debit'
+		WHEN t.direction = 'inbound' THEN 'credit'
+		ELSE 'debit'
 	END AS direction,
 	t.status,
+	t.ledger_status,
+	t.provider_status,
+	t.reconciliation_status,
 	t.amount_minor,
 	CASE
 		WHEN t.status != 'succeeded' THEN 0
 		WHEN a.normal_balance = 'credit' AND p.direction = 'credit' THEN p.amount_minor
 		WHEN a.normal_balance = 'debit' AND p.direction = 'debit' THEN p.amount_minor
 		ELSE -p.amount_minor
-	END AS signed_minor,
+	END AS signed_amount_minor,
 	t.currency_id,
 	t.narration,
+	CASE WHEN cp_a.kind = 'customer' THEN cp.account_id END AS counterparty_account_id,
+	t.provider,
+	t.provider_reference,
 	t.created_at
 FROM transfers t
 JOIN accounts a ON a.institution_id = t.institution_id AND a.id = $2
 LEFT JOIN postings p ON p.institution_id = t.institution_id AND p.journal_entry_id = t.journal_entry_id AND p.account_id = $2
+LEFT JOIN postings cp ON cp.institution_id = t.institution_id AND cp.journal_entry_id = t.journal_entry_id AND cp.account_id != $2
+LEFT JOIN accounts cp_a ON cp_a.institution_id = cp.institution_id AND cp_a.id = cp.account_id
 WHERE t.institution_id = $1
   AND (t.account_id = $2 OR p.account_id = $2)
-  AND ($3::timestamptz IS NULL OR t.created_at < $3)
+  AND (
+	$3::timestamptz IS NULL OR
+	t.created_at < $3 OR
+	($4::uuid IS NOT NULL AND t.created_at = $3 AND t.id < $4::uuid)
+  )
 ORDER BY t.created_at DESC, t.id DESC
-LIMIT $4`, institutionID, accountID, beforeCreatedAt, options.Limit)
+LIMIT $5`, institutionID, accountID, beforeCreatedAt, beforeTransferID, options.Limit)
 	return txns, err
 }
 

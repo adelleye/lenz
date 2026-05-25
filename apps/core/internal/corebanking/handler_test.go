@@ -501,7 +501,7 @@ func TestCreateInternalCreditRouteCreditsBalanceAndHistory(t *testing.T) {
 	if err := json.Unmarshal(historyRec.Body.Bytes(), &history); err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].SignedMinor != 10000 || history[0].JournalEntryID == nil {
+	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].SignedAmountMinor != 10000 || history[0].JournalEntryID == nil {
 		t.Fatalf("internal credit history mismatch: %+v", history)
 	}
 }
@@ -669,7 +669,7 @@ func TestCreateInternalDebitRouteDebitsBalanceAndHistory(t *testing.T) {
 	}
 	foundDebit := false
 	for _, txn := range history {
-		if txn.TransferID == transfer.ID && txn.SignedMinor == -12000 && txn.JournalEntryID != nil {
+		if txn.TransferID == transfer.ID && txn.SignedAmountMinor == -12000 && txn.JournalEntryID != nil {
 			foundDebit = true
 		}
 	}
@@ -840,11 +840,11 @@ func TestCreateInternalTransferRouteMovesBalanceAndHistory(t *testing.T) {
 		t.Fatalf("destination balance mismatch after internal transfer replay: %+v", destinationBalance)
 	}
 	sourceHistory := getHTTPTransactions(t, router, DemoCustomerAccountID)
-	if len(sourceHistory) != 2 || sourceHistory[0].TransferID != transfer.ID || sourceHistory[0].SignedMinor != -12000 || sourceHistory[0].Direction != TransferDirectionOutbound {
+	if len(sourceHistory) != 2 || sourceHistory[0].TransferID != transfer.ID || sourceHistory[0].SignedAmountMinor != -12000 || sourceHistory[0].Direction != TransactionDirectionDebit {
 		t.Fatalf("source history mismatch: %+v", sourceHistory)
 	}
 	destinationHistory := getHTTPTransactions(t, router, destination.ID)
-	if len(destinationHistory) != 1 || destinationHistory[0].TransferID != transfer.ID || destinationHistory[0].SignedMinor != 12000 || destinationHistory[0].Direction != TransferDirectionInbound {
+	if len(destinationHistory) != 1 || destinationHistory[0].TransferID != transfer.ID || destinationHistory[0].SignedAmountMinor != 12000 || destinationHistory[0].Direction != TransactionDirectionCredit {
 		t.Fatalf("destination history mismatch: %+v", destinationHistory)
 	}
 }

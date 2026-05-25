@@ -285,7 +285,7 @@ func TestInternalCreditPostsBalancedLedgerAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].SignedMinor != 10000 || history[0].JournalEntryID == nil {
+	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].SignedAmountMinor != 10000 || history[0].JournalEntryID == nil {
 		t.Fatalf("internal credit history mismatch: %+v", history)
 	}
 }
@@ -447,7 +447,7 @@ func TestInternalDebitPostsBalancedLedgerAndHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 2 || history[0].TransferID != transfer.ID || history[0].SignedMinor != -12000 || history[0].JournalEntryID == nil {
+	if len(history) != 2 || history[0].TransferID != transfer.ID || history[0].SignedAmountMinor != -12000 || history[0].JournalEntryID == nil {
 		t.Fatalf("internal debit history mismatch: %+v", history)
 	}
 }
@@ -656,14 +656,14 @@ func TestInternalTransferPostsBalancedLedgerAndBothHistories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sourceHistory) != 2 || sourceHistory[0].TransferID != transfer.ID || sourceHistory[0].SignedMinor != -12000 || sourceHistory[0].Direction != TransferDirectionOutbound {
+	if len(sourceHistory) != 2 || sourceHistory[0].TransferID != transfer.ID || sourceHistory[0].SignedAmountMinor != -12000 || sourceHistory[0].Direction != TransactionDirectionDebit {
 		t.Fatalf("source history mismatch: %+v", sourceHistory)
 	}
 	destinationHistory, err := svc.GetTransactions(ctx, DemoInstitutionID, destination.ID, ListTransactionsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(destinationHistory) != 1 || destinationHistory[0].TransferID != transfer.ID || destinationHistory[0].SignedMinor != 12000 || destinationHistory[0].Direction != TransferDirectionInbound {
+	if len(destinationHistory) != 1 || destinationHistory[0].TransferID != transfer.ID || destinationHistory[0].SignedAmountMinor != 12000 || destinationHistory[0].Direction != TransactionDirectionCredit {
 		t.Fatalf("destination history mismatch: %+v", destinationHistory)
 	}
 }
@@ -1112,7 +1112,7 @@ func TestPendingTransferAppearsInHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].Status != TransferStatusPending || history[0].SignedMinor != 0 {
+	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].Status != TransferStatusPending || history[0].SignedAmountMinor != 0 {
 		t.Fatalf("pending history row mismatch: %+v", history)
 	}
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
@@ -1229,8 +1229,8 @@ func TestTenantScopingPreventsCrossTenantReads(t *testing.T) {
 	if _, err := svc.GetBalance(ctx, "99999999-9999-9999-9999-999999999999", DemoCustomerAccountID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected cross-tenant balance read to fail, got %v", err)
 	}
-	if _, err := svc.GetTransactions(ctx, "99999999-9999-9999-9999-999999999999", DemoCustomerAccountID, ListTransactionsOptions{}); err != nil {
-		t.Fatalf("empty cross-tenant history should not error: %v", err)
+	if _, err := svc.GetTransactions(ctx, "99999999-9999-9999-9999-999999999999", DemoCustomerAccountID, ListTransactionsOptions{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-tenant history read to fail, got %v", err)
 	}
 }
 
@@ -1667,20 +1667,22 @@ func assertHistoryNewestFirst(t *testing.T, history []Transaction) {
 		if history[i].CreatedAt.After(history[i-1].CreatedAt) {
 			t.Fatalf("history is not ordered newest first at %d: %s after %s", i, history[i].CreatedAt, history[i-1].CreatedAt)
 		}
+		if history[i].CreatedAt.Equal(history[i-1].CreatedAt) && history[i].TransferID > history[i-1].TransferID {
+			t.Fatalf("history tie-breaker is not stable at %d: %s after %s", i, history[i].TransferID, history[i-1].TransferID)
+		}
 	}
 }
 
 func transactionDirectionFromSigned(signedMinor int64, fallback string) string {
-	if fallback == TransferDirectionReversal {
-		return fallback
-	}
 	switch {
 	case signedMinor > 0:
-		return TransferDirectionInbound
+		return TransactionDirectionCredit
 	case signedMinor < 0:
-		return TransferDirectionOutbound
+		return TransactionDirectionDebit
+	case fallback == TransferDirectionInbound:
+		return TransactionDirectionCredit
 	default:
-		return fallback
+		return TransactionDirectionDebit
 	}
 }
 
@@ -1954,17 +1956,24 @@ func (m *memoryStore) ListTransactions(ctx context.Context, institutionID, accou
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	options = normalizeListTransactionsOptions(options)
-	var txns []Transaction
+	txns := []Transaction{}
 	for _, transfer := range m.transfers {
 		if transfer.InstitutionID != institutionID {
 			continue
 		}
-		if options.BeforeCreatedAt != nil && !transfer.CreatedAt.Before(*options.BeforeCreatedAt) {
-			continue
+		if options.BeforeCreatedAt != nil {
+			if options.BeforeTransferID != "" {
+				if transfer.CreatedAt.After(*options.BeforeCreatedAt) || (transfer.CreatedAt.Equal(*options.BeforeCreatedAt) && transfer.ID >= options.BeforeTransferID) {
+					continue
+				}
+			} else if !transfer.CreatedAt.Before(*options.BeforeCreatedAt) {
+				continue
+			}
 		}
 		signed := int64(0)
-		direction := transfer.Direction
+		direction := transactionDirectionFromSigned(0, transfer.Direction)
 		postedForAccount := false
+		var counterpartyAccountID *string
 		if transfer.Status == TransferStatusSucceeded && transfer.JournalEntryID != nil {
 			for _, posting := range m.postings[*transfer.JournalEntryID] {
 				if posting.AccountID == accountID {
@@ -1976,15 +1985,44 @@ func (m *memoryStore) ListTransactions(ctx context.Context, institutionID, accou
 					}
 					direction = transactionDirectionFromSigned(signed, transfer.Direction)
 					postedForAccount = true
+				} else {
+					if m.accounts[posting.AccountID].Kind == AccountKindCustomer {
+						counterparty := posting.AccountID
+						counterpartyAccountID = &counterparty
+					}
 				}
 			}
 		}
 		if transfer.AccountID != accountID && !postedForAccount {
 			continue
 		}
-		txns = append(txns, Transaction{ID: transfer.ID, TransferID: transfer.ID, JournalEntryID: transfer.JournalEntryID, AccountID: accountID, Direction: direction, Status: transfer.Status, AmountMinor: transfer.AmountMinor, SignedMinor: signed, CurrencyID: transfer.CurrencyID, Narration: transfer.Narration, CreatedAt: transfer.CreatedAt})
+		txns = append(txns, Transaction{
+			ID:                    transfer.ID,
+			TransferID:            transfer.ID,
+			JournalEntryID:        transfer.JournalEntryID,
+			AccountID:             accountID,
+			InstitutionID:         transfer.InstitutionID,
+			Direction:             direction,
+			Status:                transfer.Status,
+			LedgerStatus:          transfer.LedgerStatus,
+			ProviderStatus:        transfer.ProviderStatus,
+			ReconciliationStatus:  transfer.ReconciliationStatus,
+			AmountMinor:           transfer.AmountMinor,
+			SignedAmountMinor:     signed,
+			CurrencyID:            transfer.CurrencyID,
+			Narration:             transfer.Narration,
+			CounterpartyAccountID: counterpartyAccountID,
+			Provider:              transfer.Provider,
+			ProviderReference:     transfer.ProviderReference,
+			CreatedAt:             transfer.CreatedAt,
+		})
 	}
-	sort.Slice(txns, func(i, j int) bool { return txns[i].CreatedAt.After(txns[j].CreatedAt) })
+	sort.Slice(txns, func(i, j int) bool {
+		if txns[i].CreatedAt.Equal(txns[j].CreatedAt) {
+			return txns[i].TransferID > txns[j].TransferID
+		}
+		return txns[i].CreatedAt.After(txns[j].CreatedAt)
+	})
 	if len(txns) > options.Limit {
 		txns = txns[:options.Limit]
 	}

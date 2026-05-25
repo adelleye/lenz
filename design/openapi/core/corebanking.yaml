@@ -246,6 +246,13 @@ paths:
             type: string
             format: date-time
           description: Return transactions created before this timestamp, ordered newest first.
+        - name: before_transfer_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Optional tie-breaker cursor used with before_created_at for stable newest-first pagination.
       responses:
         "200":
           description: Account transaction history.
@@ -1149,7 +1156,7 @@ components:
 
     APITransaction:
       type: object
-      required: [id, transfer_id, account_id, direction, status, amount_minor, signed_minor, currency_id, narration, created_at]
+      required: [id, transfer_id, account_id, institution_id, direction, status, ledger_status, provider_status, reconciliation_status, amount_minor, signed_amount_minor, currency_id, narration, provider, provider_reference, created_at]
       properties:
         id:
           type: string
@@ -1163,21 +1170,38 @@ components:
         account_id:
           type: string
           format: uuid
+        institution_id:
+          type: string
+          format: uuid
         direction:
           type: string
-          enum: [inbound, outbound, reversal]
+          enum: [credit, debit]
         status:
           type: string
           enum: [pending, succeeded, failed]
+        ledger_status:
+          type: string
+        provider_status:
+          type: string
+        reconciliation_status:
+          type: string
         amount_minor:
           type: integer
           format: int64
-        signed_minor:
+        signed_amount_minor:
           type: integer
           format: int64
         currency_id:
           type: string
         narration:
+          type: string
+        counterparty_account_id:
+          type: string
+          format: uuid
+          nullable: true
+        provider:
+          type: string
+        provider_reference:
           type: string
         created_at:
           type: string

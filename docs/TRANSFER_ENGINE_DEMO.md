@@ -247,7 +247,7 @@ curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-4444444444
 ```
 
 Expected: succeeded rows have `journal_entry_id` and signed amounts from Lenz
-postings. Pending and failed rows appear with `signed_minor: 0`.
+postings. Pending and failed rows appear with `signed_amount_minor: 0`.
 
 ## Journal Inspection
 

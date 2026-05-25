@@ -596,7 +596,7 @@ func TestSQLRepositoryInternalCreditIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 1 || history[0].TransferID != credit.ID || history[0].SignedMinor != 25000 || history[0].JournalEntryID == nil {
+	if len(history) != 1 || history[0].TransferID != credit.ID || history[0].SignedAmountMinor != 25000 || history[0].JournalEntryID == nil {
 		t.Fatalf("internal credit history mismatch: %+v", history)
 	}
 
@@ -724,7 +724,7 @@ func TestSQLRepositoryInternalDebitIntegration(t *testing.T) {
 	}
 	seenDebit := false
 	for _, txn := range history {
-		if txn.TransferID == debit.ID && txn.SignedMinor == -15000 && txn.JournalEntryID != nil {
+		if txn.TransferID == debit.ID && txn.SignedAmountMinor == -15000 && txn.JournalEntryID != nil {
 			seenDebit = true
 		}
 	}
@@ -910,14 +910,14 @@ func TestSQLRepositoryInternalTransferIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sourceHistory) != 2 || sourceHistory[0].TransferID != transfer.ID || sourceHistory[0].SignedMinor != -15000 || sourceHistory[0].Direction != TransferDirectionOutbound {
+	if len(sourceHistory) != 2 || sourceHistory[0].TransferID != transfer.ID || sourceHistory[0].SignedAmountMinor != -15000 || sourceHistory[0].Direction != TransactionDirectionDebit {
 		t.Fatalf("source history mismatch: %+v", sourceHistory)
 	}
 	destinationHistory, err := svc.GetTransactions(ctx, DemoInstitutionID, destination.ID, ListTransactionsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(destinationHistory) != 1 || destinationHistory[0].TransferID != transfer.ID || destinationHistory[0].SignedMinor != 15000 || destinationHistory[0].Direction != TransferDirectionInbound {
+	if len(destinationHistory) != 1 || destinationHistory[0].TransferID != transfer.ID || destinationHistory[0].SignedAmountMinor != 15000 || destinationHistory[0].Direction != TransactionDirectionCredit {
 		t.Fatalf("destination history mismatch: %+v", destinationHistory)
 	}
 
@@ -1818,7 +1818,7 @@ func assertSQLHistory(t *testing.T, history []Transaction, inboundID, outboundID
 		if !ok {
 			t.Fatalf("missing history row for transfer %s: %+v", transferID, history)
 		}
-		if got.Status != want.status || got.SignedMinor != want.signedMinor {
+		if got.Status != want.status || got.SignedAmountMinor != want.signedMinor {
 			t.Fatalf("history mismatch for %s: got %+v want status=%s signed=%d", transferID, got, want.status, want.signedMinor)
 		}
 		if want.hasJournal && got.JournalEntryID == nil {

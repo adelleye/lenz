@@ -71,8 +71,8 @@ duplicate_same_id=true
 source_balance={"available_minor":38000,"ledger_minor":38000}
 destination_balance={"available_minor":12000,"ledger_minor":12000}
 insufficient_status=422 insufficient_body={"message":"insufficient_funds"} insufficient_transfer_count=0
-source_transactions=[{"transfer_id":"93a6bb90-b246-4ccf-ac82-e458a65bff8d","direction":"outbound","status":"succeeded","signed_minor":-12000,"journal_entry_id":"103f7b7d-8b5c-4773-98c7-12c31fd6cda6"},{"transfer_id":"3ff92520-68c7-4542-ae5c-3eb4d6c11fbc","direction":"inbound","status":"succeeded","signed_minor":50000,"journal_entry_id":"981f437e-8c8d-46e5-b97a-2a0aaea11007"}]
-destination_transactions=[{"transfer_id":"93a6bb90-b246-4ccf-ac82-e458a65bff8d","direction":"inbound","status":"succeeded","signed_minor":12000,"journal_entry_id":"103f7b7d-8b5c-4773-98c7-12c31fd6cda6"}]
+source_transactions=[{"transfer_id":"93a6bb90-b246-4ccf-ac82-e458a65bff8d","direction":"debit","status":"succeeded","signed_amount_minor":-12000,"journal_entry_id":"103f7b7d-8b5c-4773-98c7-12c31fd6cda6"},{"transfer_id":"3ff92520-68c7-4542-ae5c-3eb4d6c11fbc","direction":"credit","status":"succeeded","signed_amount_minor":50000,"journal_entry_id":"981f437e-8c8d-46e5-b97a-2a0aaea11007"}]
+destination_transactions=[{"transfer_id":"93a6bb90-b246-4ccf-ac82-e458a65bff8d","direction":"credit","status":"succeeded","signed_amount_minor":12000,"journal_entry_id":"103f7b7d-8b5c-4773-98c7-12c31fd6cda6"}]
 db_balances=0d8ee5de-ac15-4c8b-be25-4ff0e3ee5adc|12000|12000
 c4132d47-2dbf-4c6f-84be-3d88b22fd001|38000|38000
 db_transfer=93a6bb90-b246-4ccf-ac82-e458a65bff8d|12000|manual-proof-transfer-143619|103f7b7d-8b5c-4773-98c7-12c31fd6cda6

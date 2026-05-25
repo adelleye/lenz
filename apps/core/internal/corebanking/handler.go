@@ -386,8 +386,8 @@ func validateMockTransferRequest(req *MockTransferRequest) error {
 }
 
 func validMockTransferStatus(status MockTransferRequestStatus) bool {
-	switch status {
-	case MockTransferRequestStatusPending, MockTransferRequestStatusSucceeded, MockTransferRequestStatusFailed:
+	switch string(status) {
+	case TransferStatusPending, TransferStatusSucceeded, TransferStatusFailed:
 		return true
 	default:
 		return false
@@ -602,6 +602,9 @@ func listTransactionsOptions(params ListAccountTransactionsParams) ListTransacti
 	if params.BeforeCreatedAt != nil {
 		before := *params.BeforeCreatedAt
 		options.BeforeCreatedAt = &before
+	}
+	if params.BeforeTransferId != nil {
+		options.BeforeTransferID = params.BeforeTransferId.String()
 	}
 	return options
 }

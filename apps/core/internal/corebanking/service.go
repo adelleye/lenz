@@ -345,7 +345,30 @@ func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID 
 	if err != nil {
 		return nil, err
 	}
-	return s.repository.ListTransactions(ctx, institutionID, accountID, normalizeListTransactionsOptions(options))
+	accountID = strings.TrimSpace(accountID)
+	if _, err := uuid.Parse(accountID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	if strings.TrimSpace(options.BeforeTransferID) != "" {
+		options.BeforeTransferID = strings.TrimSpace(options.BeforeTransferID)
+		if options.BeforeCreatedAt == nil {
+			return nil, ErrInvalidRequest
+		}
+		if _, err := uuid.Parse(options.BeforeTransferID); err != nil {
+			return nil, ErrInvalidRequest
+		}
+	}
+	if _, err := s.repository.GetAccount(ctx, institutionID, accountID); err != nil {
+		return nil, err
+	}
+	txns, err := s.repository.ListTransactions(ctx, institutionID, accountID, normalizeListTransactionsOptions(options))
+	if err != nil {
+		return nil, err
+	}
+	if txns == nil {
+		return []Transaction{}, nil
+	}
+	return txns, nil
 }
 
 func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error) {

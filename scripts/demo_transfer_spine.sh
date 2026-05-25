@@ -167,7 +167,7 @@ echo "Running unit tests..."
 pass "unit test suite passed"
 
 echo "Running Postgres-backed integration tests..."
-LENZ_INTEGRATION_DATABASE_URL="$DATABASE_URL" "$GO_BIN" test -count=1 -tags=integration ./apps/core/internal/corebanking -run TestSQLRepositoryTransferSpineIntegration
+LENZ_INTEGRATION_DATABASE_URL="$DATABASE_URL" "$GO_BIN" test -count=1 -tags=integration ./apps/core/internal/corebanking -run 'TestSQL'
 pass "SQL integration test suite passed"
 
 TMP_PARENT="${TMPDIR:-/tmp}"
@@ -304,13 +304,13 @@ pass "reversal created a new transfer, balanced journal entry, and manual-review
 
 transactions="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/accounts/${ACCOUNT_ID}/transactions")"
 assert_json "$transactions" 'length == 7' "transaction history did not contain seven Lenz transfer rows"
-assert_json "$transactions" "[.[] | select(.transfer_id == \"${inbound_id}\" and .status == \"succeeded\" and .signed_minor == 500000 and .journal_entry_id != null)] | length == 1" "history missing posted inbound row"
-assert_json "$transactions" "[.[] | select(.direction == \"outbound\" and .status == \"succeeded\" and .signed_minor == -125000 and .journal_entry_id != null)] | length == 1" "history missing posted outbound row"
-assert_json "$transactions" "[.[] | select(.transfer_id == \"${pending_out_failed_id}\" and .status == \"failed\" and .signed_minor == 0 and .journal_entry_id == null)] | length == 1" "history missing failed held outbound row"
-assert_json "$transactions" "[.[] | select(.transfer_id == \"${pending_out_success_id}\" and .status == \"succeeded\" and .signed_minor == -25000 and .journal_entry_id != null)] | length == 1" "history missing settled held outbound row"
-assert_json "$transactions" "[.[] | select(.transfer_id == \"${pending_id}\" and .status == \"pending\" and .signed_minor == 0 and .journal_entry_id == null)] | length == 1" "history missing pending row"
-assert_json "$transactions" "[.[] | select(.transfer_id == \"${failed_id}\" and .status == \"failed\" and .signed_minor == 0 and .journal_entry_id == null)] | length == 1" "history missing failed row"
-assert_json "$transactions" "[.[] | select(.transfer_id == \"${reversal_id}\" and .direction == \"reversal\" and .signed_minor == -500000 and .journal_entry_id != null)] | length == 1" "history missing reversal row"
+assert_json "$transactions" "[.[] | select(.transfer_id == \"${inbound_id}\" and .direction == \"credit\" and .status == \"succeeded\" and .signed_amount_minor == 500000 and .journal_entry_id != null)] | length == 1" "history missing posted inbound credit row"
+assert_json "$transactions" "[.[] | select(.direction == \"debit\" and .status == \"succeeded\" and .signed_amount_minor == -125000 and .journal_entry_id != null)] | length == 1" "history missing posted outbound debit row"
+assert_json "$transactions" "[.[] | select(.transfer_id == \"${pending_out_failed_id}\" and .status == \"failed\" and .signed_amount_minor == 0 and .journal_entry_id == null)] | length == 1" "history missing failed held outbound row"
+assert_json "$transactions" "[.[] | select(.transfer_id == \"${pending_out_success_id}\" and .status == \"succeeded\" and .signed_amount_minor == -25000 and .journal_entry_id != null)] | length == 1" "history missing settled held outbound row"
+assert_json "$transactions" "[.[] | select(.transfer_id == \"${pending_id}\" and .status == \"pending\" and .signed_amount_minor == 0 and .journal_entry_id == null)] | length == 1" "history missing pending row"
+assert_json "$transactions" "[.[] | select(.transfer_id == \"${failed_id}\" and .status == \"failed\" and .signed_amount_minor == 0 and .journal_entry_id == null)] | length == 1" "history missing failed row"
+assert_json "$transactions" "[.[] | select(.transfer_id == \"${reversal_id}\" and .direction == \"debit\" and .signed_amount_minor == -500000 and .journal_entry_id != null)] | length == 1" "history missing reversal debit row"
 pass "transaction history came from Lenz transfer/journal/posting records"
 
 transfers="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/admin/transfers")"
