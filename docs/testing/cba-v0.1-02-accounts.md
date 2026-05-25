@@ -41,8 +41,11 @@ Decision: this build validates a supplied 10-digit `account_number`. Full NUBAN 
 - `apps/core/internal/corebanking/service_test.go`
 - `apps/core/internal/corebanking/handler_test.go`
 - `apps/core/internal/corebanking/sql_repository_integration_test.go`
+- `packages/shared/httpmiddleware/oapi_validate.go`
 
 No migration was needed. Existing `accounts` and `account_balances` tables already support this build.
+
+The dead `oapi_validate.go` request-validator stub was removed after `staticcheck -checks=U1000` proved it had no callers. The account package itself had no unused-code findings.
 
 ## Verification Commands
 
@@ -56,6 +59,7 @@ go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
 go build ./apps/core/... ./apps/auth/... ./packages/shared/...
 TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/demo_transfer_spine.sh
 LENZ_INTEGRATION_DATABASE_URL=postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable go test -count=1 -tags=integration ./apps/core/internal/corebanking -run 'TestSQLRepository(AccountCreateGetListIntegration|TransferSpineIntegrationConcurrentReplay)'
+go run honnef.co/go/tools/cmd/staticcheck@latest -checks=U1000 ./apps/core/... ./apps/auth/... ./packages/shared/...
 ```
 
 All commands passed.
@@ -82,13 +86,20 @@ Manual API flow:
 Evidence:
 
 ```text
-manual_customer_id=69ae68bc-59cb-4770-9526-89f6340a587e
-manual_account_response={"id":"8a7e2939-06f3-4663-ac0f-b3dbd29a25e4","institution_id":"11111111-1111-1111-1111-111111111111","customer_id":"69ae68bc-59cb-4770-9526-89f6340a587e","account_number":"1234567891","product_type":"standard_wallet","allow_negative_balance":false,"currency_id":"NGN","normal_balance":"credit","status":"active"}
+manual_customer_id=ae17f231-b18c-4f2b-84b0-f341ae24d485
+manual_account_response={"id":"24d5a207-bad7-42ac-85e0-e78d7cff2a7c","institution_id":"11111111-1111-1111-1111-111111111111","customer_id":"ae17f231-b18c-4f2b-84b0-f341ae24d485","account_number":"1234567893","product_type":"standard_wallet","allow_negative_balance":false,"currency_id":"NGN","normal_balance":"credit","status":"active"}
 manual_get_account_status=200
-manual_customer_accounts=[{"id":"8a7e2939-06f3-4663-ac0f-b3dbd29a25e4","account_number":"1234567891"}]
+manual_customer_accounts=[{"id":"24d5a207-bad7-42ac-85e0-e78d7cff2a7c","account_number":"1234567893"}]
+manual_duplicate_status=409
 manual_cross_institution_status=403
-manual_db_account_row=1234567891|standard_wallet|false|credit|active
+manual_db_account_row=1234567893|standard_wallet|false|credit|active
 manual_db_balance_row=0|0|NGN|null
+```
+
+Extra race/edge check added:
+
+```text
+TestSQLRepositoryAccountCreateConcurrentDuplicateNumber proves 10 concurrent creates with the same account number produce exactly one account row, one balance row, and nine conflict responses.
 ```
 
 ## Deferred

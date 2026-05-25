@@ -405,6 +405,88 @@ func TestSQLRepositoryAccountCreateGetListIntegration(t *testing.T) {
 	}
 }
 
+func TestSQLRepositoryAccountCreateConcurrentDuplicateNumber(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
+
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
+		FirstName:     "Concurrent",
+		LastName:      "Account",
+		Email:         "concurrent.account@example.com",
+		Phone:         "+2348012345680",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const accountNumber = "1234567892"
+	const requestCount = 10
+	start := make(chan struct{})
+	results := make(chan error, requestCount)
+	var wg sync.WaitGroup
+	for i := 0; i < requestCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := svc.CreateAccount(ctx, CreateAccountInput{
+				InstitutionID: DemoInstitutionID,
+				CustomerID:    customer.ID,
+				AccountNumber: accountNumber,
+				Name:          "Concurrent Wallet",
+				ProductType:   AccountProductStandardWallet,
+				CurrencyID:    "NGN",
+			})
+			results <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var successes, conflicts int
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected concurrent account create error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != requestCount-1 {
+		t.Fatalf("expected one success and %d conflicts, got successes=%d conflicts=%d", requestCount-1, successes, conflicts)
+	}
+
+	var accountRows int
+	if err := db.GetContext(ctx, &accountRows, `SELECT COUNT(*) FROM accounts WHERE institution_id = $1 AND account_number = $2`, DemoInstitutionID, accountNumber); err != nil {
+		t.Fatal(err)
+	}
+	if accountRows != 1 {
+		t.Fatalf("expected one account row for duplicate account number, got %d", accountRows)
+	}
+
+	var balanceRows int
+	if err := db.GetContext(ctx, &balanceRows, `
+SELECT COUNT(*)
+FROM account_balances b
+JOIN accounts a ON a.institution_id = b.institution_id AND a.id = b.account_id
+WHERE a.institution_id = $1 AND a.account_number = $2`, DemoInstitutionID, accountNumber); err != nil {
+		t.Fatal(err)
+	}
+	if balanceRows != 1 {
+		t.Fatalf("expected one balance row for duplicate account number, got %d", balanceRows)
+	}
+}
+
 func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
