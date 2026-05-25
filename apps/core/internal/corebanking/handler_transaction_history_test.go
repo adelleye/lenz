@@ -1,9 +1,12 @@
 package corebanking
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"lenz-core/apps/auth/authn"
@@ -125,4 +128,42 @@ func TestHTTPTransactionHistoryCrossTenantAccountNotFound(t *testing.T) {
 	if body["message"] != "not_found" {
 		t.Fatalf("expected controlled not_found response, got %+v", body)
 	}
+}
+
+func TestHTTPTransactionHistoryInternalErrorsAreSanitized(t *testing.T) {
+	store := &failingTransactionHistoryStore{memoryStore: newMemoryStore()}
+	svc := NewService(store, NewMockNIPProvider())
+	if _, err := svc.SeedDemo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/transactions", nil)
+	req.Header.Set("X-Request-ID", "req-history-500")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "password=secret") {
+		t.Fatalf("history response leaked internal error: %s", rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["message"] != "internal_server_error" || body["request_id"] != "req-history-500" {
+		t.Fatalf("expected sanitized internal error with request id, got %+v", body)
+	}
+}
+
+type failingTransactionHistoryStore struct {
+	*memoryStore
+}
+
+func (s *failingTransactionHistoryStore) ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
+	return nil, errors.New("database password=secret connection failed")
 }
