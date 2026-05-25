@@ -281,6 +281,65 @@ func (s *Service) InternalDebit(ctx context.Context, input InternalDebitInput) (
 	})
 }
 
+func (s *Service) InternalTransfer(ctx context.Context, input InternalTransferInput) (*Transfer, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input.InstitutionID = institutionID
+	input.SourceAccountID = strings.TrimSpace(input.SourceAccountID)
+	input.DestinationAccountID = strings.TrimSpace(input.DestinationAccountID)
+	input.CurrencyID = strings.ToUpper(strings.TrimSpace(input.CurrencyID))
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.Reference = strings.TrimSpace(input.Reference)
+	input.Narration = strings.TrimSpace(input.Narration)
+	if input.Narration == "" {
+		input.Narration = "Internal transfer"
+	}
+	if input.AmountMinor <= 0 || input.IdempotencyKey == "" || input.CurrencyID != "NGN" {
+		return nil, ErrInvalidRequest
+	}
+	if _, err := uuid.Parse(input.SourceAccountID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	if _, err := uuid.Parse(input.DestinationAccountID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	if input.SourceAccountID == input.DestinationAccountID {
+		return nil, ErrInvalidRequest
+	}
+
+	source, err := s.repository.GetAccount(ctx, input.InstitutionID, input.SourceAccountID)
+	if err != nil {
+		return nil, err
+	}
+	destination, err := s.repository.GetAccount(ctx, input.InstitutionID, input.DestinationAccountID)
+	if err != nil {
+		return nil, err
+	}
+	if !validInternalTransferCustomerAccount(*source, input.InstitutionID, input.CurrencyID) ||
+		!validInternalTransferCustomerAccount(*destination, input.InstitutionID, input.CurrencyID) {
+		return nil, ErrInvalidRequest
+	}
+
+	return s.repository.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:      input.InstitutionID,
+		AccountID:          source.ID,
+		ClearingAccountID:  destination.ID,
+		Direction:          TransferDirectionOutbound,
+		Status:             TransferStatusSucceeded,
+		AmountMinor:        input.AmountMinor,
+		CurrencyID:         input.CurrencyID,
+		IdempotencyKey:     input.IdempotencyKey,
+		Provider:           ProviderLedgerInternal,
+		ProviderReference:  input.Reference,
+		ProviderStatus:     TransferStatusSucceeded,
+		Narration:          input.Narration,
+		RejectInsufficient: true,
+		RequireAvailable:   true,
+	})
+}
+
 func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
@@ -624,6 +683,14 @@ func validInternalSettlementAccount(account Account, institutionID, currencyID s
 		account.AllowNegative &&
 		account.CurrencyID == currencyID &&
 		account.NormalBalance == NormalBalanceDebit &&
+		account.Status == "active"
+}
+
+func validInternalTransferCustomerAccount(account Account, institutionID, currencyID string) bool {
+	return account.InstitutionID == institutionID &&
+		account.Kind == AccountKindCustomer &&
+		account.CurrencyID == currencyID &&
+		account.NormalBalance == NormalBalanceCredit &&
 		account.Status == "active"
 }
 

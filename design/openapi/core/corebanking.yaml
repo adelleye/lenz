@@ -332,6 +332,41 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/internal/transfers:
+    post:
+      operationId: createInternalTransfer
+      summary: Transfer money between two customer accounts in the same institution
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InternalTransferRequest"
+      responses:
+        "200":
+          description: Internal transfer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/transfers/mock/inbound:
     post:
       operationId: mockInboundTransfer
@@ -700,6 +735,31 @@ components:
         destination_account_id:
           type: string
           format: uuid
+        reference:
+          type: string
+
+    InternalTransferRequest:
+      type: object
+      required: [source_account_id, destination_account_id, amount_minor, currency_id, idempotency_key]
+      properties:
+        source_account_id:
+          type: string
+          format: uuid
+        destination_account_id:
+          type: string
+          format: uuid
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+        idempotency_key:
+          type: string
+          minLength: 1
+        narration:
+          type: string
         reference:
           type: string
 

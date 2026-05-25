@@ -145,8 +145,16 @@ SELECT
 	t.id::text || ':' || COALESCE(p.id::text, 'pending') AS id,
 	t.id AS transfer_id,
 	t.journal_entry_id,
-	t.account_id,
-	t.direction,
+	$2 AS account_id,
+	CASE
+		WHEN t.direction = 'reversal' THEN t.direction
+		WHEN t.status = 'succeeded' AND p.id IS NOT NULL AND (
+			(a.normal_balance = 'credit' AND p.direction = 'credit') OR
+			(a.normal_balance = 'debit' AND p.direction = 'debit')
+		) THEN 'inbound'
+		WHEN t.status = 'succeeded' AND p.id IS NOT NULL THEN 'outbound'
+		ELSE t.direction
+	END AS direction,
 	t.status,
 	t.amount_minor,
 	CASE
@@ -159,9 +167,10 @@ SELECT
 	t.narration,
 	t.created_at
 FROM transfers t
-JOIN accounts a ON a.institution_id = t.institution_id AND a.id = t.account_id
-LEFT JOIN postings p ON p.institution_id = t.institution_id AND p.journal_entry_id = t.journal_entry_id AND p.account_id = t.account_id
-WHERE t.institution_id = $1 AND t.account_id = $2
+JOIN accounts a ON a.institution_id = t.institution_id AND a.id = $2
+LEFT JOIN postings p ON p.institution_id = t.institution_id AND p.journal_entry_id = t.journal_entry_id AND p.account_id = $2
+WHERE t.institution_id = $1
+  AND (t.account_id = $2 OR p.account_id = $2)
   AND ($3::timestamptz IS NULL OR t.created_at < $3)
 ORDER BY t.created_at DESC, t.id DESC
 LIMIT $4`, institutionID, accountID, beforeCreatedAt, options.Limit)
@@ -182,6 +191,29 @@ func lockAccountBalance(ctx context.Context, tx TxRunner, institutionID, account
 		return nil, normalizeSQLError(err)
 	}
 	return &out, nil
+}
+
+func lockTransferAccountBalances(ctx context.Context, tx TxRunner, institutionID, accountID, clearingAccountID string) (*lockedAccountBalance, *lockedAccountBalance, error) {
+	if accountID == clearingAccountID {
+		return nil, nil, ErrInvalidRequest
+	}
+	firstID, secondID := accountID, clearingAccountID
+	if secondID < firstID {
+		firstID, secondID = secondID, firstID
+	}
+
+	first, err := lockAccountBalance(ctx, tx, institutionID, firstID)
+	if err != nil {
+		return nil, nil, err
+	}
+	second, err := lockAccountBalance(ctx, tx, institutionID, secondID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if first.Account.ID == accountID {
+		return first, second, nil
+	}
+	return second, first, nil
 }
 
 func normalizeAccountSQLError(err error) error {

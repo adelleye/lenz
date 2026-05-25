@@ -172,6 +172,17 @@ type InternalDebitInput struct {
 	Reference            string
 }
 
+type InternalTransferInput struct {
+	InstitutionID        string
+	SourceAccountID      string
+	DestinationAccountID string
+	AmountMinor          int64
+	CurrencyID           string
+	IdempotencyKey       string
+	Narration            string
+	Reference            string
+}
+
 type Account struct {
 	ID            string    `json:"id" db:"id"`
 	InstitutionID string    `json:"institution_id" db:"institution_id"`
@@ -314,6 +325,7 @@ type RecordTransferInput struct {
 	FailureReason        string
 	Narration            string
 	RejectInsufficient   bool
+	RequireAvailable     bool
 }
 
 type ReverseTransferInput struct {

@@ -184,6 +184,22 @@ func (h *HTTPServer) CreateInternalDebit(ctx context.Context, request CreateInte
 	return okResponse(transfer), nil
 }
 
+func (h *HTTPServer) CreateInternalTransfer(ctx context.Context, request CreateInternalTransferRequestObject) (CreateInternalTransferResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input, err := bindInternalTransferRequest(institutionID, request.Body)
+	if err != nil {
+		return nil, err
+	}
+	transfer, err := h.service.InternalTransfer(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(transfer), nil
+}
+
 func (h *HTTPServer) ListAccountTransactions(ctx context.Context, request ListAccountTransactionsRequestObject) (ListAccountTransactionsResponseObject, error) {
 	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
@@ -330,6 +346,25 @@ func validateInternalDebitRequest(req *InternalDebitRequest) error {
 	return nil
 }
 
+func (req *InternalTransferRequest) Bind(r *http.Request) error {
+	return validateInternalTransferRequest(req)
+}
+
+func validateInternalTransferRequest(req *InternalTransferRequest) error {
+	if req == nil {
+		return ErrInvalidRequest
+	}
+	if req.SourceAccountId.String() == "00000000-0000-0000-0000-000000000000" ||
+		req.DestinationAccountId.String() == "00000000-0000-0000-0000-000000000000" ||
+		req.SourceAccountId == req.DestinationAccountId ||
+		req.AmountMinor <= 0 ||
+		string(req.CurrencyId) != "NGN" ||
+		strings.TrimSpace(req.IdempotencyKey) == "" {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
 func (req *MockTransferRequest) Bind(r *http.Request) error {
 	return validateMockTransferRequest(req)
 }
@@ -454,6 +489,22 @@ func bindInternalDebitRequest(institutionID string, body *InternalDebitRequest) 
 		InstitutionID:        institutionID,
 		AccountID:            body.AccountId.String(),
 		DestinationAccountID: optionalUUIDString(body.DestinationAccountId),
+		AmountMinor:          body.AmountMinor,
+		CurrencyID:           string(body.CurrencyId),
+		IdempotencyKey:       body.IdempotencyKey,
+		Narration:            optionalString(body.Narration),
+		Reference:            optionalString(body.Reference),
+	}, nil
+}
+
+func bindInternalTransferRequest(institutionID string, body *InternalTransferRequest) (InternalTransferInput, error) {
+	if err := validateInternalTransferRequest(body); err != nil {
+		return InternalTransferInput{}, ErrInvalidRequest
+	}
+	return InternalTransferInput{
+		InstitutionID:        institutionID,
+		SourceAccountID:      body.SourceAccountId.String(),
+		DestinationAccountID: body.DestinationAccountId.String(),
 		AmountMinor:          body.AmountMinor,
 		CurrencyID:           string(body.CurrencyId),
 		IdempotencyKey:       body.IdempotencyKey,
@@ -597,6 +648,10 @@ func (response strictJSONResponse) VisitCreateInternalCreditResponse(w http.Resp
 }
 
 func (response strictJSONResponse) VisitCreateInternalDebitResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitCreateInternalTransferResponse(w http.ResponseWriter) error {
 	return response.write(w)
 }
 
