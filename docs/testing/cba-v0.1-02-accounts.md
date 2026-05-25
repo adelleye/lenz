@@ -28,7 +28,7 @@ No money movement, providers, overdrafts, fees, statements, controls, or fronten
 - CBN NUBAN standard: 10-digit account number with a check digit derived from bank code plus 9-digit serial number.
 - BankOne account API docs: account APIs include creation/enquiry plus later controls such as freeze, lien, PND, statements, and transactions.
 
-Decision: this build validates a supplied 10-digit `account_number`. Full NUBAN generation/check-digit validation is deferred until institution bank-code setup is available.
+Decision: this build validates a supplied unique 10-digit test/account number. True NUBAN generation/check-digit validation is deferred until institution bank-code setup and account-number issuance inputs are explicitly scoped.
 
 ## Files Changed
 
@@ -104,7 +104,7 @@ TestSQLRepositoryAccountCreateConcurrentDuplicateNumber proves 10 concurrent cre
 
 ## Deferred
 
-- Full NUBAN generation/check-digit validation.
+- True NUBAN generation/check-digit validation.
 - Account controls such as freeze, lien, and post-no-debit.
 - Internal GL account creation.
 - Loans, overdrafts, fees, statements, and providers.

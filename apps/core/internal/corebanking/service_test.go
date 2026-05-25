@@ -191,8 +191,16 @@ func TestCreateAccountRejectsInvalidInput(t *testing.T) {
 			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "1234567890", Name: "Ada Wallet", ProductType: AccountProductInternal, CurrencyID: "NGN"},
 		},
 		{
-			name:  "invalid account number",
+			name:  "short account number",
 			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "12345", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "NGN"},
+		},
+		{
+			name:  "long account number",
+			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "12345678901", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "NGN"},
+		},
+		{
+			name:  "non-digit account number",
+			input: CreateAccountInput{InstitutionID: DemoInstitutionID, CustomerID: DemoCustomerID, AccountNumber: "12345abc90", Name: "Ada Wallet", ProductType: AccountProductStandardWallet, CurrencyID: "NGN"},
 		},
 		{
 			name:  "unsupported currency",

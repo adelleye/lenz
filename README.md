@@ -9,7 +9,8 @@ It is production-shaped, but it is not a production-ready bank yet.
 The current API can run the basic customer and money lifecycle over real
 Postgres tables with demo mode disabled:
 
-- create customers and customer accounts;
+- create customers and customer accounts with supplied unique 10-digit
+  test/account numbers, not full NUBAN issuance;
 - read account balances split into `ledger_minor` and `available_minor`;
 - post internal credits, internal debits, and account-to-account transfers;
 - write balanced double-entry journal entries and postings for posted money;
@@ -29,8 +30,10 @@ but they are separate from the v0.1 UAT path.
 
 This is not ready to host real customers in production. The remaining production
 work includes real auth/RBAC, maker-checker, limits, KYC/BVN/NIN verification,
-real provider/NIBSS/sponsor-bank adapters, signed webhooks, operational
-reconciliation jobs, compliance reporting, monitoring, and deployment hardening.
+true NUBAN generation/check-digit validation, which is deferred, real
+provider/NIBSS/sponsor-bank adapters, signed webhooks, operational
+reconciliation jobs, compliance reporting, monitoring, and deployment
+hardening.
 
 ## Prove It Works
 

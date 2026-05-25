@@ -83,7 +83,8 @@ Key tables are scoped by `institution_id` where they touch tenant data:
 - `institutions` - Tenant banks
 - `branches` - Bank branches
 - `customers` - Bank customers
-- `accounts` - Bank accounts (NUBAN)
+- `accounts` - Bank accounts with supplied unique 10-digit test/account
+  numbers; true NUBAN generation/check-digit validation is deferred
 - `journal_entries` - Double-entry ledger entries
 - `postings` - Ledger posting lines
 - `account_balances` - Account balances

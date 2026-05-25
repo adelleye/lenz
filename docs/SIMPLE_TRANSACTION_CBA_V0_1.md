@@ -58,7 +58,7 @@ Important constraints to carry into v0.1:
 - CBN public MFB returns guidance says monthly returns are a regulatory requirement for MFBs. v0.1 should not implement regulatory returns yet, but customer, account, transaction, audit, and reconciliation data must be durable and reportable later.
 - NIBSS NIP public material describes name enquiry, funds transfer direct credit, funds transfer direct debit, transaction status query, and balance enquiry. v0.1 should model provider-shaped lifecycle behavior before real NIBSS integration.
 - NIBSS describes NIP settlement as deferred net settlement where beneficiary value can be available online real-time before settlement. v0.1 must keep `provider_status`, `ledger_status`, and `reconciliation_status` separate.
-- CBN NUBAN standards define customer account numbers as 10 digits unique within each deposit-taking institution, with check digit validation. v0.1 should document this as a production account-number requirement; do not implement it unless a later build explicitly scopes it.
+- CBN NUBAN standards define customer account numbers as 10 digits unique within each deposit-taking institution, with check digit validation. v0.1 only accepts supplied unique 10-digit test/account numbers; true NUBAN generation/check-digit validation is deferred until institution bank-code and account-number issuance inputs are explicitly scoped.
 - BankOne account docs include account creation, account enquiry, freeze/unfreeze, lien, post-no-debit, BVN details, balance enquiry, statements, transaction search, and transactions.
 - BankOne transfer docs include name enquiry and intra-bank fund transfer flows.
 

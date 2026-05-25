@@ -753,6 +753,8 @@ func validCreditCustomerAccount(account Account, institutionID, currencyID strin
 }
 
 func isTenDigitAccountNumber(accountNumber string) bool {
+	// v0.1 only accepts supplied 10-digit test/account numbers. This is not
+	// full NUBAN generation or check-digit validation.
 	if len(accountNumber) != 10 {
 		return false
 	}

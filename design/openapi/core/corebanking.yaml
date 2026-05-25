@@ -907,6 +907,11 @@ components:
         account_number:
           type: string
           pattern: "^[0-9]{10}$"
+          description: >
+            v0.1 accepts a caller-supplied, institution-unique 10-digit
+            test/account number. This is not full NUBAN issuance; true NUBAN
+            generation/check-digit validation is deferred until institution
+            bank-code and account-number issuance inputs are explicitly scoped.
         name:
           type: string
           minLength: 1
@@ -1173,6 +1178,9 @@ components:
           nullable: true
         account_number:
           type: string
+          description: >
+            Supplied unique 10-digit account number accepted by v0.1. True
+            NUBAN generation/check-digit validation is deferred.
         name:
           type: string
         kind:
