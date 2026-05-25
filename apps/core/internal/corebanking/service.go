@@ -145,6 +145,10 @@ func (s *Service) GetBalance(ctx context.Context, institutionID, accountID strin
 	if err != nil {
 		return nil, err
 	}
+	accountID = strings.TrimSpace(accountID)
+	if _, err := uuid.Parse(accountID); err != nil {
+		return nil, ErrInvalidRequest
+	}
 	return s.repository.GetBalance(ctx, institutionID, accountID)
 }
 

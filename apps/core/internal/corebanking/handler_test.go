@@ -1,15 +1,19 @@
 package corebanking
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"lenz-core/apps/auth/authn"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/getkin/kin-openapi/openapi3filter"
+	"github.com/getkin/kin-openapi/routers/gorillamux"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -378,6 +382,76 @@ func TestCustomerAccountsRouteReturnsEmptyList(t *testing.T) {
 	}
 }
 
+func TestGetAccountBalanceRouteReturnsNewAccountZeroBalanceAndMatchesSchema(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	account, err := svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    DemoCustomerID,
+		AccountNumber: "1234567894",
+		Name:          "Ada Balance Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+account.ID+"/balance", nil)
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected balance read to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("expected JSON response content type, got %q", contentType)
+	}
+	assertResponseMatchesOpenAPISchema(t, req, rec)
+
+	var balance AccountBalance
+	if err := json.Unmarshal(rec.Body.Bytes(), &balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance.AccountID != account.ID || balance.InstitutionID != DemoInstitutionID || balance.AvailableMinor != 0 || balance.LedgerMinor != 0 || balance.CurrencyID != "NGN" || balance.LastJournalEntryID != nil {
+		t.Fatalf("new account balance response mismatch: %+v", balance)
+	}
+}
+
+func TestGetAccountBalanceRouteDeniesCrossInstitutionRead(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+	req = withTestPrincipal(req, "99999999-9999-9999-9999-999999999999")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected cross-institution balance read to return 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetAccountBalanceRouteRequiresAuth(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateAccountRouteRequiresAuth(t *testing.T) {
 	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
 	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
@@ -555,6 +629,41 @@ func withTestPrincipal(req *http.Request, institutionID string) *http.Request {
 		Roles:         []string{"test"},
 		Scopes:        []string{"corebanking:read", "corebanking:write"},
 	})
+}
+
+func assertResponseMatchesOpenAPISchema(t *testing.T, req *http.Request, rec *httptest.ResponseRecorder) {
+	t.Helper()
+
+	swagger, err := GetSwagger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	swagger.Servers = nil
+
+	router, err := gorillamux.NewRouter(swagger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, pathParams, err := router.FindRoute(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := rec.Result()
+	defer result.Body.Close()
+
+	input := &openapi3filter.ResponseValidationInput{
+		RequestValidationInput: &openapi3filter.RequestValidationInput{
+			Request:    req,
+			PathParams: pathParams,
+			Route:      route,
+		},
+		Status: rec.Code,
+		Header: result.Header,
+		Body:   io.NopCloser(bytes.NewReader(rec.Body.Bytes())),
+	}
+	if err := openapi3filter.ValidateResponse(context.Background(), input); err != nil {
+		t.Fatalf("response does not match OpenAPI schema: %v", err)
+	}
 }
 
 type failingBalanceStore struct {

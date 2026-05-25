@@ -405,6 +405,140 @@ func TestSQLRepositoryAccountCreateGetListIntegration(t *testing.T) {
 	}
 }
 
+func TestSQLRepositoryBalanceEnquiryIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := NewService(NewRepository(db), NewMockNIPProvider())
+
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
+		FirstName:     "Balance",
+		LastName:      "Owner",
+		Email:         "balance.owner@example.com",
+		Phone:         "+2348012345681",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := svc.CreateAccount(ctx, CreateAccountInput{
+		InstitutionID: DemoInstitutionID,
+		CustomerID:    customer.ID,
+		AccountNumber: "1234567894",
+		Name:          "Balance Owner Wallet",
+		ProductType:   AccountProductStandardWallet,
+		CurrencyID:    "NGN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 0, 0)
+	if _, err := svc.GetBalance(ctx, DemoInstitutionID, "99999999-9999-9999-9999-999999999999"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected missing account balance read to fail as not found, got %v", err)
+	}
+	if _, err := svc.GetBalance(ctx, "99999999-9999-9999-9999-999999999999", account.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-institution balance read to fail as not found, got %v", err)
+	}
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	mockInbound(t, svc, ctx, TransferRequest{
+		AccountID:         account.ID,
+		AmountMinor:       50000,
+		IdempotencyKey:    "sql-balance-in-001",
+		ProviderEventID:   "sql-balance-provider-event-001",
+		ProviderReference: "sql-balance-provider-ref-001",
+		Narration:         "SQL balance funding",
+	})
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 50000, 50000)
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingToFail := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         account.ID,
+		AmountMinor:       20000,
+		IdempotencyKey:    "sql-balance-out-pending-fail",
+		ProviderReference: "sql-balance-out-pending-fail-ref",
+		Status:            TransferStatusPending,
+		Narration:         "SQL balance pending fail",
+	})
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 30000, 50000)
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         account.ID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusFailed,
+		AmountMinor:       20000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "sql-balance-out-pending-fail-settle",
+		ProviderReference: "sql-balance-out-pending-fail-ref",
+		ProviderEventID:   "sql-balance-provider-event-fail-settle",
+		FailureReason:     "provider_failed",
+		Narration:         "SQL balance failed settlement",
+	})
+	if failed.ID != pendingToFail.ID {
+		t.Fatalf("failed settlement should update pending transfer: pending=%s failed=%s", pendingToFail.ID, failed.ID)
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 50000, 50000)
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingToSucceed := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         account.ID,
+		AmountMinor:       15000,
+		IdempotencyKey:    "sql-balance-out-pending-success",
+		ProviderReference: "sql-balance-out-pending-success-ref",
+		Status:            TransferStatusPending,
+		Narration:         "SQL balance pending success",
+	})
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 35000, 50000)
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	succeeded := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         account.ID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       15000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "sql-balance-out-pending-success-settle",
+		ProviderReference: "sql-balance-out-pending-success-ref",
+		ProviderEventID:   "sql-balance-provider-event-success-settle",
+		Narration:         "SQL balance successful settlement",
+	})
+	if succeeded.ID != pendingToSucceed.ID {
+		t.Fatalf("successful settlement should update pending transfer: pending=%s succeeded=%s", pendingToSucceed.ID, succeeded.ID)
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, account.ID, 35000, 35000)
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM account_balances WHERE institution_id = $1 AND account_id = $2`, DemoInstitutionID, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetBalance(ctx, DemoInstitutionID, account.ID); !errors.Is(err, ErrDataIntegrity) {
+		t.Fatalf("expected missing balance row to return data integrity error, got %v", err)
+	}
+	if err := assertSQLBalancesMatchPostings(ctx, db); err == nil {
+		t.Fatal("expected reconciliation helper to catch missing account balance row")
+	}
+}
+
 func TestSQLRepositoryAccountCreateConcurrentDuplicateNumber(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
@@ -910,12 +1044,17 @@ func assertSQLBalance(t *testing.T, svc *Service, ctx context.Context, want int6
 
 func assertSQLBalancePair(t *testing.T, svc *Service, ctx context.Context, wantAvailable, wantLedger int64) {
 	t.Helper()
-	balance, err := svc.GetBalance(ctx, DemoInstitutionID, DemoCustomerAccountID)
+	assertSQLAccountBalancePair(t, svc, ctx, DemoCustomerAccountID, wantAvailable, wantLedger)
+}
+
+func assertSQLAccountBalancePair(t *testing.T, svc *Service, ctx context.Context, accountID string, wantAvailable, wantLedger int64) {
+	t.Helper()
+	balance, err := svc.GetBalance(ctx, DemoInstitutionID, accountID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if balance.AvailableMinor != wantAvailable || balance.LedgerMinor != wantLedger {
-		t.Fatalf("balance mismatch: got available=%d ledger=%d want available=%d ledger=%d", balance.AvailableMinor, balance.LedgerMinor, wantAvailable, wantLedger)
+		t.Fatalf("balance mismatch for account %s: got available=%d ledger=%d want available=%d ledger=%d", accountID, balance.AvailableMinor, balance.LedgerMinor, wantAvailable, wantLedger)
 	}
 }
 
@@ -1020,9 +1159,11 @@ func assertSQLBalancesMatchPostings(ctx context.Context, db *sqlx.DB) error {
 	err := db.GetContext(ctx, &mismatches, `
 WITH posting_balances AS (
 	SELECT
+		a.institution_id,
 		a.id AS account_id,
 		COALESCE(SUM(
 			CASE
+				WHEN p.id IS NULL THEN 0
 				WHEN (a.normal_balance = 'credit' AND p.direction = 'credit')
 					OR (a.normal_balance = 'debit' AND p.direction = 'debit')
 				THEN p.amount_minor
@@ -1034,22 +1175,28 @@ WITH posting_balances AS (
 		ON p.institution_id = a.institution_id
 		AND p.account_id = a.id
 	WHERE a.institution_id = $1
-	GROUP BY a.id
+	GROUP BY a.institution_id, a.id
 ),
 active_holds AS (
 	SELECT
+		institution_id,
 		account_id,
 		COALESCE(SUM(amount_minor), 0) AS held_minor
 	FROM account_holds
 	WHERE institution_id = $1 AND status = 'active'
-	GROUP BY account_id
+	GROUP BY institution_id, account_id
 )
 SELECT COUNT(*)
-FROM account_balances b
-JOIN posting_balances pb ON pb.account_id = b.account_id
-LEFT JOIN active_holds h ON h.account_id = b.account_id
-WHERE b.institution_id = $1
-	AND (b.ledger_minor <> pb.computed_minor OR b.available_minor <> pb.computed_minor - COALESCE(h.held_minor, 0))`, DemoInstitutionID)
+FROM posting_balances pb
+LEFT JOIN account_balances b
+	ON b.institution_id = pb.institution_id
+	AND b.account_id = pb.account_id
+LEFT JOIN active_holds h
+	ON h.institution_id = pb.institution_id
+	AND h.account_id = pb.account_id
+WHERE b.account_id IS NULL
+	OR b.ledger_minor <> pb.computed_minor
+	OR b.available_minor <> pb.computed_minor - COALESCE(h.held_minor, 0)`, DemoInstitutionID)
 	if err != nil {
 		return err
 	}

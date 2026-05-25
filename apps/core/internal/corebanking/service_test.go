@@ -228,6 +228,20 @@ func TestCreateAccountRejectsDuplicateAccountNumber(t *testing.T) {
 	}
 }
 
+func TestBalanceEnquiryRejectsMissingCrossTenantAndInvalidAccount(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	if _, err := svc.GetBalance(ctx, DemoInstitutionID, "99999999-9999-9999-9999-999999999999"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected missing account balance read to fail as not found, got %v", err)
+	}
+	if _, err := svc.GetBalance(ctx, "99999999-9999-9999-9999-999999999999", DemoCustomerAccountID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-tenant balance read to fail as not found, got %v", err)
+	}
+	if _, err := svc.GetBalance(ctx, DemoInstitutionID, "not-a-uuid"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid account id to fail validation, got %v", err)
+	}
+}
+
 func TestSuccessfulTransferInPostsBalancedLedger(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 	transfer := mockInbound(t, svc, ctx, TransferRequest{
@@ -362,6 +376,61 @@ func TestSuccessfulPendingOutboundPostsAndConsumesHold(t *testing.T) {
 	if hold := store.holds[pending.ID]; hold.Status != HoldStatusConsumed {
 		t.Fatalf("successful outbound should consume hold: %+v", hold)
 	}
+}
+
+func TestBalanceEnquiryTracksActiveReleasedAndConsumedHolds(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "balance-hold-fund", ProviderEventID: "evt-balance-hold-fund"})
+
+	pendingToFail := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       20000,
+		IdempotencyKey:    "balance-hold-fail-out",
+		ProviderReference: "balance-hold-fail-ref",
+		Status:            TransferStatusPending,
+	})
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 30000, 50000)
+
+	failed := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusFailed,
+		AmountMinor:       20000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "balance-hold-fail-settle",
+		ProviderReference: "balance-hold-fail-ref",
+		ProviderEventID:   "evt-balance-hold-fail-settle",
+	})
+	if failed.ID != pendingToFail.ID {
+		t.Fatalf("failed settlement should update pending transfer: pending=%s failed=%s", pendingToFail.ID, failed.ID)
+	}
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 50000, 50000)
+
+	pendingToSucceed := mockOutbound(t, svc, ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       15000,
+		IdempotencyKey:    "balance-hold-success-out",
+		ProviderReference: "balance-hold-success-ref",
+		Status:            TransferStatusPending,
+	})
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 35000, 50000)
+
+	succeeded := mockProviderEvent(t, svc, ctx, ProviderWebhookEvent{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		Direction:         TransferDirectionOutbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       15000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "balance-hold-success-settle",
+		ProviderReference: "balance-hold-success-ref",
+		ProviderEventID:   "evt-balance-hold-success-settle",
+	})
+	if succeeded.ID != pendingToSucceed.ID {
+		t.Fatalf("successful settlement should update pending transfer: pending=%s succeeded=%s", pendingToSucceed.ID, succeeded.ID)
+	}
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 35000, 35000)
 }
 
 func TestInsufficientFundsDoesNotDebit(t *testing.T) {

@@ -70,6 +70,7 @@ var (
 	ErrUnauthorized   = errors.New("unauthorized")
 	ErrForbidden      = errors.New("forbidden")
 	ErrConflict       = errors.New("conflict")
+	ErrDataIntegrity  = errors.New("data integrity error")
 )
 
 const (

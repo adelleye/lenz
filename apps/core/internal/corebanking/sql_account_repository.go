@@ -88,9 +88,24 @@ func (r *sqlAccountRepository) GetAccount(ctx context.Context, institutionID, ac
 }
 
 func (r *sqlAccountRepository) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
+	var accountExists bool
+	if err := r.db.GetContext(ctx, &accountExists, `SELECT EXISTS (SELECT 1 FROM accounts WHERE institution_id = $1 AND id = $2)`, institutionID, accountID); err != nil {
+		return nil, normalizeSQLError(err)
+	}
+	if !accountExists {
+		return nil, ErrNotFound
+	}
+
 	var balance AccountBalance
 	err := r.db.GetContext(ctx, &balance, `SELECT account_id, institution_id, available_minor, ledger_minor, currency_id, last_journal_entry_id, updated_at FROM account_balances WHERE institution_id = $1 AND account_id = $2`, institutionID, accountID)
-	return &balance, normalizeSQLError(err)
+	err = normalizeSQLError(err)
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrDataIntegrity
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &balance, nil
 }
 
 func (r *sqlAccountRepository) ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
