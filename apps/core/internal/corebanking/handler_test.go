@@ -435,6 +435,163 @@ func TestGetAccountBalanceRouteDeniesCrossInstitutionRead(t *testing.T) {
 	}
 }
 
+func TestCreateInternalCreditRouteCreditsBalanceAndHistory(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"currency_id":"NGN","idempotency_key":"http-internal-credit","reference":"http-internal-credit-ref","narration":"cash deposit"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected internal credit to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	assertResponseMatchesOpenAPISchema(t, req, rec)
+	var transfer Transfer
+	if err := json.Unmarshal(rec.Body.Bytes(), &transfer); err != nil {
+		t.Fatal(err)
+	}
+	if transfer.Provider != ProviderLedgerInternal || transfer.Direction != TransferDirectionInbound || transfer.Status != TransferStatusSucceeded || transfer.AmountMinor != 10000 || transfer.JournalEntryID == nil {
+		t.Fatalf("internal credit transfer response mismatch: %+v", transfer)
+	}
+
+	duplicateReq := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
+	duplicateReq.Header.Set("Content-Type", "application/json")
+	duplicateReq = withTestPrincipal(duplicateReq, DemoInstitutionID)
+	duplicateRec := httptest.NewRecorder()
+	router.ServeHTTP(duplicateRec, duplicateReq)
+	if duplicateRec.Code != http.StatusOK {
+		t.Fatalf("expected duplicate internal credit to return 200, got %d body=%s", duplicateRec.Code, duplicateRec.Body.String())
+	}
+	var duplicate Transfer
+	if err := json.Unmarshal(duplicateRec.Body.Bytes(), &duplicate); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.ID != transfer.ID {
+		t.Fatalf("duplicate internal credit posted a new transfer: first=%s duplicate=%s", transfer.ID, duplicate.ID)
+	}
+
+	balanceReq := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+	balanceReq = withTestPrincipal(balanceReq, DemoInstitutionID)
+	balanceRec := httptest.NewRecorder()
+	router.ServeHTTP(balanceRec, balanceReq)
+	if balanceRec.Code != http.StatusOK {
+		t.Fatalf("expected balance read to return 200, got %d body=%s", balanceRec.Code, balanceRec.Body.String())
+	}
+	var balance AccountBalance
+	if err := json.Unmarshal(balanceRec.Body.Bytes(), &balance); err != nil {
+		t.Fatal(err)
+	}
+	if balance.AvailableMinor != 10000 || balance.LedgerMinor != 10000 {
+		t.Fatalf("duplicate internal credit should not double-credit balance: %+v", balance)
+	}
+
+	historyReq := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/transactions", nil)
+	historyReq = withTestPrincipal(historyReq, DemoInstitutionID)
+	historyRec := httptest.NewRecorder()
+	router.ServeHTTP(historyRec, historyReq)
+	if historyRec.Code != http.StatusOK {
+		t.Fatalf("expected transaction history to return 200, got %d body=%s", historyRec.Code, historyRec.Body.String())
+	}
+	var history []Transaction
+	if err := json.Unmarshal(historyRec.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].SignedMinor != 10000 || history[0].JournalEntryID == nil {
+		t.Fatalf("internal credit history mismatch: %+v", history)
+	}
+}
+
+func TestCreateInternalCreditRouteRequiresAuth(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"currency_id":"NGN","idempotency_key":"unauth-internal-credit"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateInternalCreditRouteRejectsMismatchedInstitutionHeader(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"currency_id":"NGN","idempotency_key":"mismatch-internal-credit"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched X-Institution-ID to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateInternalCreditRouteRejectsInvalidRequestBody(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":0,"currency_id":"NGN","idempotency_key":"invalid-internal-credit"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid internal credit request to return 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInternalCreditInternalErrorsAreSanitized(t *testing.T) {
+	store := &failingInternalCreditStore{memoryStore: newMemoryStore()}
+	svc := NewService(store, NewMockNIPProvider())
+	if _, err := svc.SeedDemo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"currency_id":"NGN","idempotency_key":"internal-credit-500"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", "req-internal-credit-500")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "database password=secret") {
+		t.Fatalf("raw internal error leaked to client: %s", rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["message"] != "internal_server_error" || response["request_id"] != "req-internal-credit-500" {
+		t.Fatalf("unexpected sanitized error body: %+v", response)
+	}
+}
+
 func TestGetAccountBalanceRouteRequiresAuth(t *testing.T) {
 	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
 	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
@@ -679,5 +836,13 @@ type failingCreateCustomerStore struct {
 }
 
 func (s *failingCreateCustomerStore) CreateCustomer(ctx context.Context, input CreateCustomerInput) (*Customer, error) {
+	return nil, errors.New("database password=secret connection failed")
+}
+
+type failingInternalCreditStore struct {
+	*memoryStore
+}
+
+func (s *failingInternalCreditStore) RecordTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, error) {
 	return nil, errors.New("database password=secret connection failed")
 }

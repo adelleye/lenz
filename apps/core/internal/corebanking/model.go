@@ -60,7 +60,8 @@ const (
 
 	CustomerIdentityStatusNotCollected = "not_collected"
 
-	ProviderMockNIP = "mock_nip"
+	ProviderMockNIP        = "mock_nip"
+	ProviderLedgerInternal = "ledger_internal"
 )
 
 var (
@@ -147,6 +148,17 @@ type CreateAccountInput struct {
 	ProductType          string
 	CurrencyID           string
 	AllowNegativeBalance bool
+}
+
+type InternalCreditInput struct {
+	InstitutionID   string
+	AccountID       string
+	SourceAccountID string
+	AmountMinor     int64
+	CurrencyID       string
+	IdempotencyKey  string
+	Narration       string
+	Reference       string
 }
 
 type Account struct {

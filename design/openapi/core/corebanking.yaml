@@ -264,6 +264,39 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/internal/credits:
+    post:
+      operationId: createInternalCredit
+      summary: Credit a customer account from an internal source account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InternalCreditRequest"
+      responses:
+        "200":
+          description: Internal credit transfer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/transfers/mock/inbound:
     post:
       operationId: mockInboundTransfer
@@ -584,6 +617,31 @@ components:
         allow_negative_balance:
           type: boolean
           default: false
+
+    InternalCreditRequest:
+      type: object
+      required: [account_id, amount_minor, currency_id, idempotency_key]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+        idempotency_key:
+          type: string
+          minLength: 1
+        narration:
+          type: string
+        source_account_id:
+          type: string
+          format: uuid
+        reference:
+          type: string
 
     APISeedResult:
       type: object

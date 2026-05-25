@@ -242,6 +242,158 @@ func TestBalanceEnquiryRejectsMissingCrossTenantAndInvalidAccount(t *testing.T) 
 	}
 }
 
+func TestInternalCreditPostsBalancedLedgerAndHistory(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+
+	transfer, err := svc.InternalCredit(ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    10000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "internal-credit-001",
+		Reference:      "internal-credit-ref-001",
+		Narration:      "cash deposit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStatus(t, transfer, TransferStatusSucceeded)
+	if transfer.Direction != TransferDirectionInbound || transfer.Provider != ProviderLedgerInternal || transfer.ProviderReference != "internal-credit-ref-001" || transfer.Narration != "cash deposit" {
+		t.Fatalf("internal credit transfer metadata mismatch: %+v", transfer)
+	}
+	if transfer.ProviderStatus != TransferStatusSucceeded || transfer.LedgerStatus != LedgerStatusPosted || transfer.ReconciliationStatus != ReconciliationStatusMatched {
+		t.Fatalf("internal credit statuses mismatch: %+v", transfer)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 10000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoClearingAccountID, 10000)
+	assertJournalBalanced(t, store, transfer)
+
+	journal, err := store.GetJournal(ctx, DemoInstitutionID, *transfer.JournalEntryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postings := map[string]string{}
+	for _, posting := range journal.Postings {
+		postings[posting.AccountID] = posting.Direction
+	}
+	if postings[DemoClearingAccountID] != PostingDebit || postings[DemoCustomerAccountID] != PostingCredit {
+		t.Fatalf("internal credit postings should debit source and credit customer: %+v", journal.Postings)
+	}
+
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].TransferID != transfer.ID || history[0].SignedMinor != 10000 || history[0].JournalEntryID == nil {
+		t.Fatalf("internal credit history mismatch: %+v", history)
+	}
+}
+
+func TestInternalCreditIdempotencyDoesNotDoubleCredit(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	input := InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    10000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "internal-credit-idem",
+		Narration:      "idempotent cash deposit",
+	}
+
+	first, err := svc.InternalCredit(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.InternalCredit(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("duplicate idempotency key posted a new transfer: first=%s second=%s", first.ID, second.ID)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 10000)
+}
+
+func TestInternalCreditRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   InternalCreditInput
+		mutate  func(*memoryStore)
+		wantErr error
+	}{
+		{
+			name:    "missing institution",
+			input:   InternalCreditInput{AccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "missing-institution"},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "invalid account id",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: "not-a-uuid", AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "invalid-account"},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "missing account",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: "99999999-9999-9999-9999-999999999999", AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "missing-account"},
+			wantErr: ErrNotFound,
+		},
+		{
+			name:    "cross institution account",
+			input:   InternalCreditInput{InstitutionID: "99999999-9999-9999-9999-999999999999", AccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "cross-institution"},
+			wantErr: ErrNotFound,
+		},
+		{
+			name:    "zero amount",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, AmountMinor: 0, CurrencyID: "NGN", IdempotencyKey: "zero-amount"},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "unsupported currency",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "USD", IdempotencyKey: "bad-currency"},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "missing idempotency",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN"},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "closed customer account",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "closed-account"},
+			mutate:  func(store *memoryStore) { setMemoryAccountStatus(store, DemoCustomerAccountID, "closed") },
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "frozen customer account",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "frozen-account"},
+			mutate:  func(store *memoryStore) { setMemoryAccountStatus(store, DemoCustomerAccountID, "frozen") },
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "customer account as source",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, SourceAccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "customer-source"},
+			wantErr: ErrInvalidRequest,
+		},
+		{
+			name:    "no safe default source",
+			input:   InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, AmountMinor: 10000, CurrencyID: "NGN", IdempotencyKey: "no-safe-source"},
+			mutate:  func(store *memoryStore) { setMemoryAccountStatus(store, DemoClearingAccountID, "closed") },
+			wantErr: ErrNotFound,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, svc, store := newTestService(t)
+			if tt.mutate != nil {
+				tt.mutate(store)
+			}
+			_, err := svc.InternalCredit(ctx, tt.input)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("expected %v, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
 func TestSuccessfulTransferInPostsBalancedLedger(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 	transfer := mockInbound(t, svc, ctx, TransferRequest{
@@ -1035,6 +1187,14 @@ func setTransferCreatedAt(t *testing.T, store *memoryStore, transferID string, c
 	store.transfers[transferID] = transfer
 }
 
+func setMemoryAccountStatus(store *memoryStore, accountID, status string) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	account := store.accounts[accountID]
+	account.Status = status
+	store.accounts[accountID] = account
+}
+
 type memoryStore struct {
 	mu             sync.Mutex
 	institutions   map[string]Institution
@@ -1200,6 +1360,26 @@ func (m *memoryStore) GetAccount(ctx context.Context, institutionID, accountID s
 	return copyOf(account), nil
 }
 
+func (m *memoryStore) GetDefaultInternalCreditSourceAccount(ctx context.Context, institutionID, currencyID string) (*Account, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var defaultAccount *Account
+	for _, account := range m.accounts {
+		if !validInternalCreditSourceAccount(account, institutionID, currencyID) {
+			continue
+		}
+		if defaultAccount != nil {
+			return nil, ErrInvalidRequest
+		}
+		accountCopy := account
+		defaultAccount = &accountCopy
+	}
+	if defaultAccount == nil {
+		return nil, ErrNotFound
+	}
+	return defaultAccount, nil
+}
+
 func (m *memoryStore) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1361,7 +1541,8 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	if !ok || account.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
 	}
-	if _, ok = m.accounts[input.ClearingAccountID]; !ok {
+	clearing, ok := m.accounts[input.ClearingAccountID]
+	if !ok || clearing.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
 	}
 	providerStatus := strings.ToLower(strings.TrimSpace(input.ProviderStatus))

@@ -87,6 +87,31 @@ func (r *sqlAccountRepository) GetAccount(ctx context.Context, institutionID, ac
 	return &account, normalizeSQLError(err)
 }
 
+func (r *sqlAccountRepository) GetDefaultInternalCreditSourceAccount(ctx context.Context, institutionID, currencyID string) (*Account, error) {
+	var accounts []Account
+	err := r.db.SelectContext(ctx, &accounts, accountSelectSQL+`
+WHERE institution_id = $1
+  AND currency_id = $2
+  AND kind = 'internal'
+  AND product_type = 'internal'
+  AND allow_negative_balance = true
+  AND normal_balance = 'debit'
+  AND status = 'active'
+ORDER BY created_at, id
+LIMIT 2`, institutionID, currencyID)
+	if err != nil {
+		return nil, err
+	}
+	switch len(accounts) {
+	case 0:
+		return nil, ErrNotFound
+	case 1:
+		return &accounts[0], nil
+	default:
+		return nil, ErrInvalidRequest
+	}
+}
+
 func (r *sqlAccountRepository) GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error) {
 	var accountExists bool
 	if err := r.db.GetContext(ctx, &accountExists, `SELECT EXISTS (SELECT 1 FROM accounts WHERE institution_id = $1 AND id = $2)`, institutionID, accountID); err != nil {

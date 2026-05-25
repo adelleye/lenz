@@ -152,6 +152,70 @@ func (s *Service) GetBalance(ctx context.Context, institutionID, accountID strin
 	return s.repository.GetBalance(ctx, institutionID, accountID)
 }
 
+func (s *Service) InternalCredit(ctx context.Context, input InternalCreditInput) (*Transfer, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input.InstitutionID = institutionID
+	input.AccountID = strings.TrimSpace(input.AccountID)
+	input.SourceAccountID = strings.TrimSpace(input.SourceAccountID)
+	input.CurrencyID = strings.ToUpper(strings.TrimSpace(input.CurrencyID))
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.Reference = strings.TrimSpace(input.Reference)
+	input.Narration = strings.TrimSpace(input.Narration)
+	if input.Narration == "" {
+		input.Narration = "Internal credit"
+	}
+	if input.AmountMinor <= 0 || input.IdempotencyKey == "" || input.CurrencyID != "NGN" {
+		return nil, ErrInvalidRequest
+	}
+	if _, err := uuid.Parse(input.AccountID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	if input.SourceAccountID != "" {
+		if _, err := uuid.Parse(input.SourceAccountID); err != nil {
+			return nil, ErrInvalidRequest
+		}
+	}
+
+	account, err := s.repository.GetAccount(ctx, input.InstitutionID, input.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	if account.Kind != AccountKindCustomer || account.Status != "active" || account.CurrencyID != input.CurrencyID {
+		return nil, ErrInvalidRequest
+	}
+
+	source := (*Account)(nil)
+	if input.SourceAccountID == "" {
+		source, err = s.repository.GetDefaultInternalCreditSourceAccount(ctx, input.InstitutionID, input.CurrencyID)
+	} else {
+		source, err = s.repository.GetAccount(ctx, input.InstitutionID, input.SourceAccountID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !validInternalCreditSourceAccount(*source, input.InstitutionID, input.CurrencyID) {
+		return nil, ErrInvalidRequest
+	}
+
+	return s.repository.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     input.InstitutionID,
+		AccountID:         account.ID,
+		ClearingAccountID: source.ID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       input.AmountMinor,
+		CurrencyID:        input.CurrencyID,
+		IdempotencyKey:    input.IdempotencyKey,
+		Provider:          ProviderLedgerInternal,
+		ProviderReference: input.Reference,
+		ProviderStatus:    TransferStatusSucceeded,
+		Narration:         input.Narration,
+	})
+}
+
 func (s *Service) GetTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
@@ -486,6 +550,16 @@ func validCustomerAccountProduct(productType string) bool {
 	default:
 		return false
 	}
+}
+
+func validInternalCreditSourceAccount(account Account, institutionID, currencyID string) bool {
+	return account.InstitutionID == institutionID &&
+		account.Kind == AccountKindInternal &&
+		account.ProductType == AccountProductInternal &&
+		account.AllowNegative &&
+		account.CurrencyID == currencyID &&
+		account.NormalBalance == NormalBalanceDebit &&
+		account.Status == "active"
 }
 
 func isTenDigitAccountNumber(accountNumber string) bool {
