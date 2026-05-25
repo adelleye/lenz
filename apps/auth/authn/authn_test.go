@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,6 +31,56 @@ func TestRequiredAuthAcceptsConfiguredDevelopmentToken(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestDevelopmentAuthGuardAllowsDevelopment(t *testing.T) {
+	err := ValidateDevelopmentAuthGuard(func(key string) string {
+		switch key {
+		case EnvAppEnv:
+			return "development"
+		case EnvDevAuthToken:
+			return "test-token"
+		default:
+			return ""
+		}
+	}, AuthRequiredScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDevelopmentAuthGuardRejectsProductionWithDevToken(t *testing.T) {
+	err := ValidateDevelopmentAuthGuard(func(key string) string {
+		switch key {
+		case EnvAppEnv:
+			return "production"
+		case EnvDevAuthToken:
+			return "test-token"
+		default:
+			return ""
+		}
+	}, AuthRequiredScope)
+	if err == nil {
+		t.Fatal("expected production dev-token auth guard to fail")
+	}
+	if !strings.Contains(err.Error(), "production requires real auth/RBAC") {
+		t.Fatalf("expected clear production auth error, got %v", err)
+	}
+}
+
+func TestDevelopmentAuthGuardRejectsProductionWithoutConfiguredToken(t *testing.T) {
+	err := ValidateDevelopmentAuthGuard(func(key string) string {
+		if key == EnvEnv {
+			return "production"
+		}
+		return ""
+	}, AuthRequiredScope)
+	if err == nil {
+		t.Fatal("expected production auth guard to fail without real auth")
+	}
+	if !strings.Contains(err.Error(), "production requires real auth/RBAC") {
+		t.Fatalf("expected clear production auth error, got %v", err)
 	}
 }
 

@@ -28,6 +28,22 @@ func TestDemoModeCannotRunInProduction(t *testing.T) {
 	}
 }
 
+func TestDemoModeCannotRunWhenENVIsProduction(t *testing.T) {
+	_, err := DemoRoutesEnabledFromEnv(func(key string) string {
+		switch key {
+		case EnvDemoMode:
+			return "true"
+		case "ENV":
+			return "production"
+		default:
+			return ""
+		}
+	})
+	if err == nil {
+		t.Fatal("expected ENV=production demo mode to fail")
+	}
+}
+
 func TestDemoModeCanRunLocally(t *testing.T) {
 	enabled, err := DemoRoutesEnabledFromEnv(func(key string) string {
 		switch key {

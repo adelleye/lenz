@@ -2,6 +2,7 @@ package authn
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -22,9 +23,24 @@ const (
 	EnvDevActorID       = "LENZ_DEV_ACTOR_ID"
 	EnvDevAuthRoles     = "LENZ_DEV_AUTH_ROLES"
 	EnvDevAuthScopes    = "LENZ_DEV_AUTH_SCOPES"
+	EnvAppEnv           = "APP_ENV"
+	EnvEnv              = "ENV"
 
 	defaultDevInstitutionID = "11111111-1111-1111-1111-111111111111"
 )
+
+func ValidateDevelopmentAuthGuard(getenv func(string) string, scopes ...AuthScope) error {
+	if !requiresAuth(scopes) {
+		return nil
+	}
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	if productionEnv(getenv(EnvAppEnv)) || productionEnv(getenv(EnvEnv)) {
+		return fmt.Errorf("%s development-token auth is disabled in production; production requires real auth/RBAC before enabling non-health routes", EnvDevAuthToken)
+	}
+	return nil
+}
 
 func Authentication(scopes ...AuthScope) func(http.Handler) http.Handler {
 	return func(h http.Handler) http.Handler {
@@ -81,6 +97,11 @@ func requiresAuth(scopes []AuthScope) bool {
 		}
 	}
 	return false
+}
+
+func productionEnv(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "production" || value == "prod"
 }
 
 func validDevelopmentToken(token string) bool {

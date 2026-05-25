@@ -63,6 +63,9 @@ func NewServer(fns ...ServerOptions) *Server {
 
 func WithAuthn(scopes ...authn.AuthScope) ServerOptions {
 	return func(opts *Server) error {
+		if err := authn.ValidateDevelopmentAuthGuard(os.Getenv, scopes...); err != nil {
+			return err
+		}
 		mw := authn.Authentication(scopes...)
 		opts.router.Use(mw)
 
