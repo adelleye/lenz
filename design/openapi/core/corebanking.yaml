@@ -795,6 +795,142 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/admin/reconciliation-items:
+    get:
+      operationId: listReconciliationItems
+      summary: List transfers that need reconciliation or manual review
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - name: before_created_at
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: before_transfer_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, succeeded, failed]
+        - name: provider_status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, succeeded, failed, provider_unknown]
+        - name: ledger_status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, posted, no_posting, reversal_deficit]
+        - name: reconciliation_status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, matched, no_action, manual_review]
+      responses:
+        "200":
+          description: Reconciliation review items.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APIReconciliationItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/admin/reconciliation-items/{transfer_id}:
+    get:
+      operationId: getReconciliationItem
+      summary: Inspect one reconciliation review item
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Reconciliation review item.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIReconciliationItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/admin/reconciliation-items/{transfer_id}/mark-reviewed:
+    post:
+      operationId: markReconciliationItemReviewed
+      summary: Mark a reconciliation review item as reviewed
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkReconciliationItemReviewedRequest"
+      responses:
+        "200":
+          description: Updated reconciliation review item metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIReconciliationItem"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
 components:
   parameters:
     InstitutionID:
@@ -1355,6 +1491,123 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    APIReconciliationItem:
+      type: object
+      required:
+        - transfer_id
+        - institution_id
+        - account_id
+        - direction
+        - status
+        - provider
+        - provider_reference
+        - provider_status
+        - ledger_status
+        - reconciliation_status
+        - amount_minor
+        - currency_id
+        - created_at
+        - updated_at
+        - review_reason
+        - recommended_next_action
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [inbound, outbound, reversal]
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        provider:
+          type: string
+          minLength: 1
+        provider_reference:
+          type: string
+        provider_event_id:
+          type: string
+          nullable: true
+        provider_status:
+          type: string
+          enum: [pending, succeeded, failed, provider_unknown]
+        ledger_status:
+          type: string
+          enum: [pending, posted, no_posting, reversal_deficit]
+        reconciliation_status:
+          type: string
+          enum: [pending, matched, no_action, manual_review]
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          minLength: 3
+          maxLength: 3
+        failure_reason:
+          type: string
+          nullable: true
+        journal_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        review_reason:
+          type: string
+          enum:
+            - manual_review
+            - provider_unknown
+            - reversal_deficit
+            - provider_succeeded_ledger_not_posted
+            - provider_failed_ledger_posted
+            - stale_pending
+            - none
+        recommended_next_action:
+          type: string
+          enum:
+            - requery_provider
+            - inspect_journal
+            - contact_provider
+            - manual_customer_receivable_review
+            - no_action
+        review_status:
+          type: string
+          nullable: true
+          enum: [reviewed, resolved_no_action, manual_followup_required]
+        review_note:
+          type: string
+          nullable: true
+        reviewed_at:
+          type: string
+          format: date-time
+          nullable: true
+        reviewed_by:
+          type: string
+          nullable: true
+
+    MarkReconciliationItemReviewedRequest:
+      type: object
+      required: [resolution_note, resolution_status]
+      properties:
+        resolution_note:
+          type: string
+          minLength: 1
+        resolution_status:
+          type: string
+          enum: [reviewed, resolved_no_action, manual_followup_required]
 
     MockTransferRequest:
       type: object

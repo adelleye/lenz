@@ -24,6 +24,7 @@ const (
 	AuditActionPNDDeactivated         = "account.pnd_deactivated"
 	AuditActionLienPlaced             = "account.lien_placed"
 	AuditActionLienReleased           = "account.lien_released"
+	AuditActionReconciliationReviewed = "reconciliation.reviewed"
 )
 
 type auditEventInput struct {

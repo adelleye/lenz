@@ -87,6 +87,22 @@ const (
 	MaxTransactionHistoryLimit     = 200
 )
 
+const (
+	DefaultReconciliationItemLimit           = DefaultTransactionHistoryLimit
+	MaxReconciliationItemLimit               = MaxTransactionHistoryLimit
+	DefaultReconciliationStalePendingMinutes = 24 * 60
+
+	ReconciliationReviewStatusReviewed               = "reviewed"
+	ReconciliationReviewStatusResolvedNoAction       = "resolved_no_action"
+	ReconciliationReviewStatusManualFollowupRequired = "manual_followup_required"
+
+	ReconciliationActionRequeryProvider                = "requery_provider"
+	ReconciliationActionInspectJournal                 = "inspect_journal"
+	ReconciliationActionContactProvider                = "contact_provider"
+	ReconciliationActionManualCustomerReceivableReview = "manual_customer_receivable_review"
+	ReconciliationActionNoAction                       = "no_action"
+)
+
 type SeedResult struct {
 	Institution Institution `json:"institution"`
 	Branch      Branch      `json:"branch"`
@@ -355,6 +371,50 @@ type ListTransactionsOptions struct {
 	Limit            int
 	BeforeCreatedAt  *time.Time
 	BeforeTransferID string
+}
+
+type ReconciliationItem struct {
+	TransferID            string     `json:"transfer_id" db:"transfer_id"`
+	InstitutionID         string     `json:"institution_id" db:"institution_id"`
+	AccountID             string     `json:"account_id" db:"account_id"`
+	Direction             string     `json:"direction" db:"direction"`
+	Status                string     `json:"status" db:"status"`
+	Provider              string     `json:"provider" db:"provider"`
+	ProviderReference     string     `json:"provider_reference" db:"provider_reference"`
+	ProviderEventID       *string    `json:"provider_event_id,omitempty" db:"provider_event_id"`
+	ProviderStatus        string     `json:"provider_status" db:"provider_status"`
+	LedgerStatus          string     `json:"ledger_status" db:"ledger_status"`
+	ReconciliationStatus  string     `json:"reconciliation_status" db:"reconciliation_status"`
+	AmountMinor           int64      `json:"amount_minor" db:"amount_minor"`
+	CurrencyID            string     `json:"currency_id" db:"currency_id"`
+	FailureReason         *string    `json:"failure_reason,omitempty" db:"failure_reason"`
+	JournalEntryID        *string    `json:"journal_entry_id,omitempty" db:"journal_entry_id"`
+	CreatedAt             time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at" db:"updated_at"`
+	ReviewReason          string     `json:"review_reason" db:"-"`
+	RecommendedNextAction string     `json:"recommended_next_action" db:"-"`
+	ReviewStatus          *string    `json:"review_status,omitempty" db:"review_status"`
+	ReviewNote            *string    `json:"review_note,omitempty" db:"review_note"`
+	ReviewedAt            *time.Time `json:"reviewed_at,omitempty" db:"reviewed_at"`
+	ReviewedBy            *string    `json:"reviewed_by,omitempty" db:"reviewed_by"`
+}
+
+type ListReconciliationItemsOptions struct {
+	Limit                int
+	BeforeCreatedAt      *time.Time
+	BeforeTransferID     string
+	Status               string
+	ProviderStatus       string
+	LedgerStatus         string
+	ReconciliationStatus string
+	StalePendingMinutes  int
+}
+
+type MarkReconciliationItemReviewedInput struct {
+	InstitutionID    string
+	TransferID       string
+	ResolutionNote   string
+	ResolutionStatus string
 }
 
 type TransferRequest struct {

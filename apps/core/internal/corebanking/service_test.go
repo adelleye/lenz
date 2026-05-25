@@ -1985,9 +1985,17 @@ type memoryStore struct {
 	postings                  map[string][]Posting
 	holds                     map[string]AccountHold
 	audits                    []AuditEvent
+	reconciliationReviews     map[string]memoryReconciliationReview
 	idempotency               map[string]string
 	providerEvents            map[string]string
 	providerEventFingerprints map[string]string
+}
+
+type memoryReconciliationReview struct {
+	status     string
+	note       string
+	reviewedAt time.Time
+	reviewedBy string
 }
 
 func newMemoryStore() *memoryStore {
@@ -2002,6 +2010,7 @@ func newMemoryStore() *memoryStore {
 		postings:                  map[string][]Posting{},
 		holds:                     map[string]AccountHold{},
 		audits:                    []AuditEvent{},
+		reconciliationReviews:     map[string]memoryReconciliationReview{},
 		idempotency:               map[string]string{},
 		providerEvents:            map[string]string{},
 		providerEventFingerprints: map[string]string{},
@@ -2316,7 +2325,11 @@ func (m *memoryStore) ReleaseAccountLien(ctx context.Context, input ReleaseLienI
 }
 
 func (m *memoryStore) createAuditLocked(input auditEventInput) error {
-	event, _, err := newAuditEvent(context.Background(), input)
+	return m.createAuditLockedContext(context.Background(), input)
+}
+
+func (m *memoryStore) createAuditLockedContext(ctx context.Context, input auditEventInput) error {
+	event, _, err := newAuditEvent(ctx, input)
 	if err != nil {
 		return err
 	}
@@ -2367,6 +2380,165 @@ func (m *memoryStore) ListTransfers(ctx context.Context, institutionID string) (
 	}
 	sort.Slice(transfers, func(i, j int) bool { return transfers[i].CreatedAt.After(transfers[j].CreatedAt) })
 	return transfers, nil
+}
+
+func (m *memoryStore) ListReconciliationItems(ctx context.Context, institutionID string, options ListReconciliationItemsOptions) ([]ReconciliationItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := reconciliationStalePendingCutoff(options)
+	items := []ReconciliationItem{}
+	for _, transfer := range m.transfers {
+		if transfer.InstitutionID != institutionID {
+			continue
+		}
+		item := m.reconciliationItemFromTransferLocked(transfer)
+		decorateReconciliationItem(&item, cutoff)
+		if !reconciliationItemBelongsInQueue(item, cutoff) || !reconciliationItemMatchesFilters(item, options) || !reconciliationItemBeforeCursor(item, options) {
+			continue
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].TransferID > items[j].TransferID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	if len(items) > options.Limit {
+		items = items[:options.Limit]
+	}
+	return items, nil
+}
+
+func (m *memoryStore) GetReconciliationItem(ctx context.Context, institutionID, transferID string) (*ReconciliationItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	transfer, ok := m.transfers[transferID]
+	if !ok || transfer.InstitutionID != institutionID {
+		return nil, ErrNotFound
+	}
+	cutoff := reconciliationStalePendingCutoff(ListReconciliationItemsOptions{})
+	item := m.reconciliationItemFromTransferLocked(transfer)
+	decorateReconciliationItem(&item, cutoff)
+	if !isInspectableReconciliationItem(item, cutoff) {
+		return nil, ErrNotFound
+	}
+	return copyOf(item), nil
+}
+
+func (m *memoryStore) MarkReconciliationItemReviewed(ctx context.Context, input MarkReconciliationItemReviewedInput) (*ReconciliationItem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	transfer, ok := m.transfers[input.TransferID]
+	if !ok || transfer.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	cutoff := reconciliationStalePendingCutoff(ListReconciliationItemsOptions{})
+	item := m.reconciliationItemFromTransferLocked(transfer)
+	decorateReconciliationItem(&item, cutoff)
+	if !isInspectableReconciliationItem(item, cutoff) {
+		return nil, ErrNotFound
+	}
+	oldReviewStatus := optionalAuditValue(item.ReviewStatus)
+	_, actorID, _, _ := auditContext(ctx)
+	now := time.Now().UTC()
+	m.reconciliationReviews[input.TransferID] = memoryReconciliationReview{
+		status:     input.ResolutionStatus,
+		note:       input.ResolutionNote,
+		reviewedAt: now,
+		reviewedBy: actorID,
+	}
+	transfer.UpdatedAt = now
+	m.transfers[input.TransferID] = transfer
+	if err := m.createAuditLockedContext(ctx, auditEventInput{
+		InstitutionID:  transfer.InstitutionID,
+		Action:         AuditActionReconciliationReviewed,
+		EntityType:     "transfer",
+		EntityID:       transfer.ID,
+		AccountID:      transfer.AccountID,
+		TransferID:     transfer.ID,
+		JournalEntryID: optionalAuditValue(transfer.JournalEntryID),
+		Reference:      transfer.ProviderReference,
+		OldStatus:      oldReviewStatus,
+		NewStatus:      input.ResolutionStatus,
+		Metadata: map[string]string{
+			"resolution_note":       input.ResolutionNote,
+			"review_reason":         item.ReviewReason,
+			"recommended_action":    item.RecommendedNextAction,
+			"provider_status":       item.ProviderStatus,
+			"ledger_status":         item.LedgerStatus,
+			"reconciliation_status": item.ReconciliationStatus,
+		},
+		CreatedAt: now,
+	}); err != nil {
+		return nil, err
+	}
+	updated := m.reconciliationItemFromTransferLocked(transfer)
+	decorateReconciliationItem(&updated, cutoff)
+	return copyOf(updated), nil
+}
+
+func (m *memoryStore) reconciliationItemFromTransferLocked(transfer Transfer) ReconciliationItem {
+	item := ReconciliationItem{
+		TransferID:           transfer.ID,
+		InstitutionID:        transfer.InstitutionID,
+		AccountID:            transfer.AccountID,
+		Direction:            transfer.Direction,
+		Status:               transfer.Status,
+		Provider:             transfer.Provider,
+		ProviderReference:    transfer.ProviderReference,
+		ProviderEventID:      transfer.ProviderEventID,
+		ProviderStatus:       transfer.ProviderStatus,
+		LedgerStatus:         transfer.LedgerStatus,
+		ReconciliationStatus: transfer.ReconciliationStatus,
+		AmountMinor:          transfer.AmountMinor,
+		CurrencyID:           transfer.CurrencyID,
+		FailureReason:        transfer.FailureReason,
+		JournalEntryID:       transfer.JournalEntryID,
+		CreatedAt:            transfer.CreatedAt,
+		UpdatedAt:            transfer.UpdatedAt,
+	}
+	if review, ok := m.reconciliationReviews[transfer.ID]; ok {
+		item.ReviewStatus = &review.status
+		item.ReviewNote = &review.note
+		item.ReviewedAt = &review.reviewedAt
+		item.ReviewedBy = &review.reviewedBy
+	}
+	return item
+}
+
+func reconciliationItemBelongsInQueue(item ReconciliationItem, cutoff time.Time) bool {
+	if item.ReviewStatus != nil && *item.ReviewStatus != ReconciliationReviewStatusManualFollowupRequired {
+		return false
+	}
+	_, _, needsReview := reconciliationReviewState(item, cutoff)
+	return needsReview
+}
+
+func reconciliationItemMatchesFilters(item ReconciliationItem, options ListReconciliationItemsOptions) bool {
+	if options.Status != "" && item.Status != options.Status {
+		return false
+	}
+	if options.ProviderStatus != "" && item.ProviderStatus != options.ProviderStatus {
+		return false
+	}
+	if options.LedgerStatus != "" && item.LedgerStatus != options.LedgerStatus {
+		return false
+	}
+	if options.ReconciliationStatus != "" && item.ReconciliationStatus != options.ReconciliationStatus {
+		return false
+	}
+	return true
+}
+
+func reconciliationItemBeforeCursor(item ReconciliationItem, options ListReconciliationItemsOptions) bool {
+	if options.BeforeCreatedAt == nil {
+		return true
+	}
+	if options.BeforeTransferID != "" {
+		return item.CreatedAt.Before(*options.BeforeCreatedAt) || (item.CreatedAt.Equal(*options.BeforeCreatedAt) && item.TransferID < options.BeforeTransferID)
+	}
+	return item.CreatedAt.Before(*options.BeforeCreatedAt)
 }
 
 func (m *memoryStore) GetJournal(ctx context.Context, institutionID, journalEntryID string) (*JournalWithPostings, error) {

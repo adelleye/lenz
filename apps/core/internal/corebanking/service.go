@@ -403,6 +403,55 @@ func (s *Service) ListTransfers(ctx context.Context, institutionID string) ([]Tr
 	return s.repository.ListTransfers(ctx, institutionID)
 }
 
+func (s *Service) ListReconciliationItems(ctx context.Context, institutionID string, options ListReconciliationItemsOptions) ([]ReconciliationItem, error) {
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	normalized, err := normalizeListReconciliationItemsOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	items, err := s.repository.ListReconciliationItems(ctx, institutionID, normalized)
+	if err != nil {
+		return nil, err
+	}
+	if items == nil {
+		return []ReconciliationItem{}, nil
+	}
+	return items, nil
+}
+
+func (s *Service) GetReconciliationItem(ctx context.Context, institutionID, transferID string) (*ReconciliationItem, error) {
+	institutionID, err := requireInstitutionID(institutionID)
+	if err != nil {
+		return nil, err
+	}
+	transferID = strings.TrimSpace(transferID)
+	if _, err := uuid.Parse(transferID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	return s.repository.GetReconciliationItem(ctx, institutionID, transferID)
+}
+
+func (s *Service) MarkReconciliationItemReviewed(ctx context.Context, input MarkReconciliationItemReviewedInput) (*ReconciliationItem, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input.InstitutionID = institutionID
+	input.TransferID = strings.TrimSpace(input.TransferID)
+	input.ResolutionNote = strings.TrimSpace(input.ResolutionNote)
+	input.ResolutionStatus = strings.TrimSpace(input.ResolutionStatus)
+	if _, err := uuid.Parse(input.TransferID); err != nil {
+		return nil, ErrInvalidRequest
+	}
+	if input.ResolutionNote == "" || !validReconciliationReviewStatus(input.ResolutionStatus) {
+		return nil, ErrInvalidRequest
+	}
+	return s.repository.MarkReconciliationItemReviewed(ctx, input)
+}
+
 func (s *Service) GetJournal(ctx context.Context, institutionID, journalEntryID string) (*JournalWithPostings, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
@@ -701,6 +750,33 @@ func validProviderStatus(status string) bool {
 	}
 }
 
+func validLedgerStatus(status string) bool {
+	switch status {
+	case LedgerStatusPending, LedgerStatusPosted, LedgerStatusNoPosting, LedgerStatusReversalDeficit:
+		return true
+	default:
+		return false
+	}
+}
+
+func validReconciliationStatus(status string) bool {
+	switch status {
+	case ReconciliationStatusPending, ReconciliationStatusMatched, ReconciliationStatusNoAction, ReconciliationStatusManualReview:
+		return true
+	default:
+		return false
+	}
+}
+
+func validReconciliationReviewStatus(status string) bool {
+	switch status {
+	case ReconciliationReviewStatusReviewed, ReconciliationReviewStatusResolvedNoAction, ReconciliationReviewStatusManualFollowupRequired:
+		return true
+	default:
+		return false
+	}
+}
+
 func requireInstitutionID(institutionID string) (string, error) {
 	institutionID = strings.TrimSpace(institutionID)
 	if institutionID == "" {
@@ -774,4 +850,42 @@ func normalizeListTransactionsOptions(options ListTransactionsOptions) ListTrans
 		options.Limit = MaxTransactionHistoryLimit
 	}
 	return options
+}
+
+func normalizeListReconciliationItemsOptions(options ListReconciliationItemsOptions) (ListReconciliationItemsOptions, error) {
+	if options.Limit <= 0 {
+		options.Limit = DefaultReconciliationItemLimit
+	}
+	if options.Limit > MaxReconciliationItemLimit {
+		options.Limit = MaxReconciliationItemLimit
+	}
+	if options.StalePendingMinutes <= 0 {
+		options.StalePendingMinutes = DefaultReconciliationStalePendingMinutes
+	}
+	options.BeforeTransferID = strings.TrimSpace(options.BeforeTransferID)
+	if options.BeforeTransferID != "" {
+		if options.BeforeCreatedAt == nil {
+			return ListReconciliationItemsOptions{}, ErrInvalidRequest
+		}
+		if _, err := uuid.Parse(options.BeforeTransferID); err != nil {
+			return ListReconciliationItemsOptions{}, ErrInvalidRequest
+		}
+	}
+	options.Status = strings.TrimSpace(options.Status)
+	if options.Status != "" && !validTransferStatus(options.Status) {
+		return ListReconciliationItemsOptions{}, ErrInvalidRequest
+	}
+	options.ProviderStatus = strings.TrimSpace(options.ProviderStatus)
+	if options.ProviderStatus != "" && !validProviderStatus(options.ProviderStatus) {
+		return ListReconciliationItemsOptions{}, ErrInvalidRequest
+	}
+	options.LedgerStatus = strings.TrimSpace(options.LedgerStatus)
+	if options.LedgerStatus != "" && !validLedgerStatus(options.LedgerStatus) {
+		return ListReconciliationItemsOptions{}, ErrInvalidRequest
+	}
+	options.ReconciliationStatus = strings.TrimSpace(options.ReconciliationStatus)
+	if options.ReconciliationStatus != "" && !validReconciliationStatus(options.ReconciliationStatus) {
+		return ListReconciliationItemsOptions{}, ErrInvalidRequest
+	}
+	return options, nil
 }

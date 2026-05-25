@@ -8,6 +8,7 @@ type Repository interface {
 	AccountRepository
 	LedgerRepository
 	TransferRepository
+	ReconciliationRepository
 	AuditRepository
 }
 
@@ -42,6 +43,12 @@ type TransferRepository interface {
 	ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error)
 	RecordTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, error)
 	ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error)
+}
+
+type ReconciliationRepository interface {
+	ListReconciliationItems(ctx context.Context, institutionID string, options ListReconciliationItemsOptions) ([]ReconciliationItem, error)
+	GetReconciliationItem(ctx context.Context, institutionID, transferID string) (*ReconciliationItem, error)
+	MarkReconciliationItemReviewed(ctx context.Context, input MarkReconciliationItemReviewedInput) (*ReconciliationItem, error)
 }
 
 type AuditRepository interface {
