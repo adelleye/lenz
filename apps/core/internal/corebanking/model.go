@@ -155,10 +155,21 @@ type InternalCreditInput struct {
 	AccountID       string
 	SourceAccountID string
 	AmountMinor     int64
-	CurrencyID       string
+	CurrencyID      string
 	IdempotencyKey  string
 	Narration       string
 	Reference       string
+}
+
+type InternalDebitInput struct {
+	InstitutionID        string
+	AccountID            string
+	DestinationAccountID string
+	AmountMinor          int64
+	CurrencyID           string
+	IdempotencyKey       string
+	Narration            string
+	Reference            string
 }
 
 type Account struct {
@@ -302,6 +313,7 @@ type RecordTransferInput struct {
 	ReversalOfTransferID string
 	FailureReason        string
 	Narration            string
+	RejectInsufficient   bool
 }
 
 type ReverseTransferInput struct {

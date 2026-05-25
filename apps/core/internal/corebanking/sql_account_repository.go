@@ -87,7 +87,7 @@ func (r *sqlAccountRepository) GetAccount(ctx context.Context, institutionID, ac
 	return &account, normalizeSQLError(err)
 }
 
-func (r *sqlAccountRepository) GetDefaultInternalCreditSourceAccount(ctx context.Context, institutionID, currencyID string) (*Account, error) {
+func (r *sqlAccountRepository) GetDefaultInternalSettlementAccount(ctx context.Context, institutionID, currencyID string) (*Account, error) {
 	var accounts []Account
 	err := r.db.SelectContext(ctx, &accounts, accountSelectSQL+`
 WHERE institution_id = $1

@@ -181,6 +181,9 @@ func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner,
 	}
 	failureReason := input.FailureReason
 	if customerInitiatedOutbound(input) && !canUseAvailableBalance(account.Account, account.Balance.AvailableMinor, input.AmountMinor) {
+		if input.RejectInsufficient {
+			return nil, ErrInsufficient
+		}
 		status = TransferStatusFailed
 		failureReason = "insufficient_funds"
 	}

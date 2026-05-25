@@ -297,6 +297,41 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/internal/debits:
+    post:
+      operationId: createInternalDebit
+      summary: Debit a customer account into an internal destination account
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InternalDebitRequest"
+      responses:
+        "200":
+          description: Internal debit transfer record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APITransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/transfers/mock/inbound:
     post:
       operationId: mockInboundTransfer
@@ -638,6 +673,31 @@ components:
         narration:
           type: string
         source_account_id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+
+    InternalDebitRequest:
+      type: object
+      required: [account_id, amount_minor, currency_id, idempotency_key]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+        idempotency_key:
+          type: string
+          minLength: 1
+        narration:
+          type: string
+        destination_account_id:
           type: string
           format: uuid
         reference:
