@@ -1,60 +1,108 @@
-# Lenz Core - Core Banking Application
+# Lenz Core
 
-A next-generation, multi-tenant Core Banking Application for Nigeria (and beyond).
+Lenz Core currently contains the Simple Transaction CBA v0.1 spine: a
+multi-tenant, ledger-first core-banking slice for Nigerian MFB-style accounts.
+It is production-shaped, but it is not a production-ready bank yet.
 
-## Overview
-This repository currently contains a verified prototype transaction-spine slice
-for Lenz Core. It proves local ledger and transfer behavior, but it is not the
-production CBA architecture:
+## What Is Built
 
-- demo institution, branch, customer, customer account, and internal mock NIP
-  clearing account
-- integer-minor-unit account balances
-- balanced double-entry journal entries and postings
-- mock inbound and outbound transfers
-- request idempotency and provider-event duplicate protection
-- pending, failed, and reversal transfer flows
-- ledger-derived account transaction history
+The current API can run the basic customer and money lifecycle over real
+Postgres tables with demo mode disabled:
 
-## Local Demo
+- create customers and customer accounts;
+- read account balances split into `ledger_minor` and `available_minor`;
+- post internal credits, internal debits, and account-to-account transfers;
+- write balanced double-entry journal entries and postings for posted money;
+- prevent duplicate posting with idempotency keys;
+- reject insufficient available balance;
+- expose ledger-backed transaction history;
+- place and release liens;
+- freeze, unfreeze, activate post-no-debit, and deactivate post-no-debit with
+  strict state transitions;
+- write audit events for customer, account, money, and account-control actions;
+- verify journal totals and account ledger balances reconcile to postings.
 
-The fastest verified proof is:
+Mock/demo provider routes still exist for local transfer-provider experiments,
+but they are separate from the v0.1 UAT path.
+
+## What Is Not Built Yet
+
+This is not ready to host real customers in production. The remaining production
+work includes real auth/RBAC, maker-checker, limits, KYC/BVN/NIN verification,
+real provider/NIBSS/sponsor-bank adapters, signed webhooks, operational
+reconciliation jobs, compliance reporting, monitoring, and deployment hardening.
+
+## Prove It Works
+
+Prerequisites: Docker, Go, `curl`, and `jq`.
+
+Run the fastest real-world local proof:
 
 ```sh
-./scripts/demo_transfer_spine.sh
+./scripts/uat_simple_transaction_cba.sh
 ```
 
-This resets the demo Docker database volume, runs migrations, runs unit and
-Postgres-backed integration tests, starts the API, and asserts the transfer
-spine over HTTP.
+That script creates a temporary Postgres database, runs migrations, bootstraps
+an institution, branch, and internal settlement account, starts the API with
+`LENZ_DEMO_MODE=false`, then verifies over HTTP and SQL:
 
-Start Postgres and Redis:
+- customer creation;
+- account creation;
+- zero opening balance;
+- internal credit;
+- internal debit;
+- internal transfer between two customer accounts;
+- transaction history on both accounts;
+- lien behavior;
+- post-no-debit behavior;
+- freeze behavior;
+- audit-event writes;
+- balanced journals and account-ledger reconciliation.
+
+Expected final line:
+
+```text
+UAT simple transaction CBA passed.
+```
+
+If port `55432` or `3001` is busy, override them:
 
 ```sh
-docker compose -f infra/docker/docker-compose.yml up -d postgres redis
+POSTGRES_PORT=55433 API_PORT=3002 ./scripts/uat_simple_transaction_cba.sh
 ```
 
-Run migrations:
+## Run The API Locally
+
+Bootstrap a local tenant and settlement account:
 
 ```sh
-go run ./apps/core/cmd/migrate
+POSTGRES_PORT=55432 ./scripts/bootstrap_cba_v0_1.sh
 ```
 
-If you already have local Postgres on port 5432, start Compose with
-`POSTGRES_PORT=55432` and set:
+The script prints the environment variables to use. With the default values:
 
 ```sh
 export DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable'
-```
+export LENZ_DEV_AUTH_TOKEN='local-dev-token'
+export LENZ_DEV_INSTITUTION_ID='11111111-1111-1111-1111-111111111111'
+export APP_ENV='development'
+export LENZ_DEMO_MODE='false'
+export PORT='3001'
 
-Start the API:
-
-```sh
 go run ./apps/core
 ```
 
-Then follow [docs/TRANSFER_ENGINE_DEMO.md](docs/TRANSFER_ENGINE_DEMO.md) for
-the exact API calls and expected output shape.
+Health check:
+
+```sh
+curl -fsS \
+  -H 'Authorization: Bearer local-dev-token' \
+  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111' \
+  http://localhost:3001/api/v1/health
+```
+
+For a complete HTTP walkthrough, read
+[`scripts/uat_simple_transaction_cba.sh`](scripts/uat_simple_transaction_cba.sh).
 
 ## Generated OpenAPI Code
 
@@ -65,33 +113,46 @@ OpenAPI server code is generated locally and intentionally not committed.
 - `design/openapi/core/institution.yaml` generates
   `apps/core/internal/institution/institution.gen.go`.
 
-Regenerate both files before direct `go test` or `go build` commands:
+Regenerate before direct `go test` or `go build` commands:
 
 ```sh
 go generate ./apps/core/internal/corebanking
 go generate ./apps/core/internal/institution
 ```
 
-If `task` is installed, use:
+If `task` is installed:
 
 ```sh
 task generate
 ```
 
-The Taskfile `test`, `build`, and `demo_transfer_spine` tasks run generation
-first.
+## Other Verification
 
-## Security-Sensitive Local Configuration
-
-Authenticated local requests use the dev bearer token only:
+Run unit tests, race checks, and build:
 
 ```sh
-export LENZ_DEV_AUTH_TOKEN='choose-a-local-token'
-export LENZ_DEV_INSTITUTION_ID='11111111-1111-1111-1111-111111111111'
+go generate ./apps/core/internal/corebanking
+go generate ./apps/core/internal/institution
+go test -race -count=1 ./apps/core/internal/corebanking
+go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
+go build ./apps/core/... ./apps/auth/... ./packages/shared/...
 ```
 
-`X-Institution-ID` is optional and is only a consistency check against the
-authenticated principal institution. Do not pass access tokens in query strings.
+The older mock-provider demo is still available:
+
+```sh
+./scripts/demo_transfer_spine.sh
+```
+
+Use it only for demo/mock provider behavior. Use
+`./scripts/uat_simple_transaction_cba.sh` to prove the current non-demo CBA v0.1
+spine.
+
+## Local Security Notes
+
+Authenticated local requests use the dev bearer token only. `X-Institution-ID`
+is a consistency check against the authenticated institution, not a source of
+truth. Do not pass access tokens in query strings.
 
 CORS is explicit. Set allowed browser origins as a comma-separated list:
 
@@ -99,29 +160,5 @@ CORS is explicit. Set allowed browser origins as a comma-separated list:
 export LENZ_CORS_ALLOWED_ORIGINS='http://localhost:5173,http://127.0.0.1:5173'
 ```
 
-Production must configure concrete origins. Wildcard production CORS is rejected
-at startup.
-
-Demo/mock mutation routes are disabled by default. To run the local transfer
-spine demo:
-
-```sh
-export LENZ_DEMO_MODE=true
-export APP_ENV=development
-```
-
-`LENZ_DEMO_MODE=true` fails fast when `APP_ENV` or `ENV` is production.
-
-## Verification
-
-```sh
-task test
-```
-
-Without `task`, run the same flow directly:
-
-```sh
-go generate ./apps/core/internal/corebanking
-go generate ./apps/core/internal/institution
-go test ./apps/core/... ./apps/auth/... ./packages/shared/...
-```
+Wildcard production CORS is rejected at startup. `LENZ_DEMO_MODE=true` also
+fails fast when `APP_ENV` or `ENV` is production.
