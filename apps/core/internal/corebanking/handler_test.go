@@ -164,7 +164,7 @@ func TestCreateCustomerRouteCreatesAndGetsCustomer(t *testing.T) {
 	router := chi.NewRouter()
 	NewHandler(svc).Routes(router)
 
-	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	body := `{"branch_id":"` + DemoBranchID + `","customer_type":"individual","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = withTestPrincipal(req, DemoInstitutionID)
@@ -178,8 +178,11 @@ func TestCreateCustomerRouteCreatesAndGetsCustomer(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID == "" || created.InstitutionID != DemoInstitutionID || created.BranchID != DemoBranchID || created.Email != "adaeze@example.com" {
+	if created.ID == "" || created.InstitutionID != DemoInstitutionID || created.BranchID != DemoBranchID || created.CustomerType != CustomerTypeIndividual || created.Email != "adaeze@example.com" {
 		t.Fatalf("created customer response has wrong scope/data: %+v", created)
+	}
+	if created.KYCTier != CustomerKYCTier1 || created.BVNStatus != CustomerIdentityStatusNotCollected || created.NINStatus != CustomerIdentityStatusNotCollected {
+		t.Fatalf("created customer response has wrong identity defaults: %+v", created)
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/customers/"+created.ID, nil)
@@ -204,7 +207,7 @@ func TestCreateCustomerRouteRejectsInvalidInput(t *testing.T) {
 	router := chi.NewRouter()
 	NewHandler(svc).Routes(router)
 
-	body := `{"branch_id":"` + DemoBranchID + `","first_name":"","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	body := `{"branch_id":"` + DemoBranchID + `","customer_type":"individual","first_name":"","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = withTestPrincipal(req, DemoInstitutionID)
@@ -224,7 +227,7 @@ func TestCreateCustomerRouteRequiresAuth(t *testing.T) {
 	router.Use(authn.Authentication(authn.AuthRequiredScope))
 	NewHandler(svc).Routes(router)
 
-	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	body := `{"branch_id":"` + DemoBranchID + `","customer_type":"individual","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -240,7 +243,7 @@ func TestCreateCustomerRouteRejectsMismatchedInstitutionHeader(t *testing.T) {
 	router := chi.NewRouter()
 	NewHandler(svc).Routes(router)
 
-	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	body := `{"branch_id":"` + DemoBranchID + `","customer_type":"individual","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
@@ -258,6 +261,7 @@ func TestGetCustomerRouteDeniesCrossInstitutionRead(t *testing.T) {
 	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
 		InstitutionID: DemoInstitutionID,
 		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
 		FirstName:     "Adaeze",
 		LastName:      "Okafor",
 		Email:         "adaeze@example.com",
@@ -288,7 +292,7 @@ func TestCustomerCreateInternalErrorsAreSanitized(t *testing.T) {
 	router := chi.NewRouter()
 	NewHandler(svc).Routes(router)
 
-	body := `{"branch_id":"` + DemoBranchID + `","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
+	body := `{"branch_id":"` + DemoBranchID + `","customer_type":"individual","first_name":"Adaeze","last_name":"Okafor","email":"adaeze@example.com","phone":"+2348012345678"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/customers", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-ID", "req-customer-500")

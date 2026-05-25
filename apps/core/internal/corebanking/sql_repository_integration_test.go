@@ -216,6 +216,7 @@ func TestSQLRepositoryCustomerCreateGetIntegration(t *testing.T) {
 	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
 		InstitutionID: DemoInstitutionID,
 		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
 		FirstName:     "Adaeze",
 		LastName:      "Okafor",
 		Email:         "adaeze.sql@example.com",
@@ -224,8 +225,11 @@ func TestSQLRepositoryCustomerCreateGetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if customer.ID == "" || customer.InstitutionID != DemoInstitutionID || customer.BranchID != DemoBranchID || customer.Status != "active" {
+	if customer.ID == "" || customer.InstitutionID != DemoInstitutionID || customer.BranchID != DemoBranchID || customer.CustomerType != CustomerTypeIndividual || customer.Status != "active" {
 		t.Fatalf("created customer has wrong scope/data: %+v", customer)
+	}
+	if customer.KYCTier != CustomerKYCTier1 || customer.BVNStatus != CustomerIdentityStatusNotCollected || customer.NINStatus != CustomerIdentityStatusNotCollected {
+		t.Fatalf("created customer has wrong identity defaults: %+v", customer)
 	}
 
 	got, err := svc.GetCustomer(ctx, DemoInstitutionID, customer.ID)
@@ -240,8 +244,28 @@ func TestSQLRepositoryCustomerCreateGetIntegration(t *testing.T) {
 	if err := db.GetContext(ctx, &row, customerSelectSQL+` WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, customer.ID); err != nil {
 		t.Fatal(err)
 	}
-	if row.ID != customer.ID || row.FirstName != "Adaeze" || row.Phone != "+2348012345678" {
+	if row.ID != customer.ID || row.CustomerType != CustomerTypeIndividual || row.FirstName != "Adaeze" || row.Phone != "+2348012345678" || row.KYCTier != CustomerKYCTier1 || row.BVNStatus != CustomerIdentityStatusNotCollected || row.NINStatus != CustomerIdentityStatusNotCollected {
 		t.Fatalf("customer row was not created correctly: %+v", row)
+	}
+
+	var meta struct {
+		CustomerType string `db:"customer_type"`
+		KYCTier      string `db:"kyc_tier"`
+		BVNStatus    string `db:"bvn_status"`
+		NINStatus    string `db:"nin_status"`
+	}
+	if err := db.GetContext(ctx, &meta, `
+SELECT
+	meta->>'customer_type' AS customer_type,
+	meta->>'kyc_tier' AS kyc_tier,
+	meta->>'bvn_status' AS bvn_status,
+	meta->>'nin_status' AS nin_status
+FROM customers
+WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, customer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if meta.CustomerType != CustomerTypeIndividual || meta.KYCTier != CustomerKYCTier1 || meta.BVNStatus != CustomerIdentityStatusNotCollected || meta.NINStatus != CustomerIdentityStatusNotCollected {
+		t.Fatalf("customer metadata was not stored correctly: %+v", meta)
 	}
 
 	if _, err := svc.GetCustomer(ctx, "99999999-9999-9999-9999-999999999999", customer.ID); !errors.Is(err, ErrNotFound) {
@@ -250,6 +274,7 @@ func TestSQLRepositoryCustomerCreateGetIntegration(t *testing.T) {
 	if _, err := svc.CreateCustomer(ctx, CreateCustomerInput{
 		InstitutionID: DemoInstitutionID,
 		BranchID:      "99999999-9999-9999-9999-999999999999",
+		CustomerType:  CustomerTypeIndividual,
 		FirstName:     "Ada",
 		LastName:      "Missing",
 		Email:         "ada.missing@example.com",

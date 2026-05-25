@@ -35,17 +35,37 @@ func (s *Service) CreateCustomer(ctx context.Context, input CreateCustomerInput)
 	}
 	input.InstitutionID = institutionID
 	input.BranchID = strings.TrimSpace(input.BranchID)
+	input.CustomerType = strings.ToLower(strings.TrimSpace(input.CustomerType))
 	input.FirstName = strings.TrimSpace(input.FirstName)
 	input.LastName = strings.TrimSpace(input.LastName)
+	input.BusinessName = strings.TrimSpace(input.BusinessName)
 	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
 	input.Phone = strings.TrimSpace(input.Phone)
-	if input.BranchID == "" || input.FirstName == "" || input.LastName == "" || input.Email == "" || input.Phone == "" {
+	if input.BranchID == "" {
 		return nil, ErrInvalidRequest
 	}
-	address, err := mail.ParseAddress(input.Email)
-	if err != nil || address.Address != input.Email {
+	switch input.CustomerType {
+	case CustomerTypeIndividual:
+		if input.FirstName == "" || input.LastName == "" {
+			return nil, ErrInvalidRequest
+		}
+		input.BusinessName = ""
+	case CustomerTypeBusiness:
+		if input.BusinessName == "" {
+			return nil, ErrInvalidRequest
+		}
+	default:
 		return nil, ErrInvalidRequest
 	}
+	if input.Email != "" {
+		address, err := mail.ParseAddress(input.Email)
+		if err != nil || address.Address != input.Email {
+			return nil, ErrInvalidRequest
+		}
+	}
+	input.KYCTier = CustomerKYCTier1
+	input.BVNStatus = CustomerIdentityStatusNotCollected
+	input.NINStatus = CustomerIdentityStatusNotCollected
 	return s.repository.CreateCustomer(ctx, input)
 }
 

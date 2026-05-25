@@ -222,11 +222,7 @@ func validateCreateCustomerRequest(req *CreateCustomerRequest) error {
 	if req == nil {
 		return ErrInvalidRequest
 	}
-	if req.BranchId.String() == "00000000-0000-0000-0000-000000000000" ||
-		strings.TrimSpace(req.FirstName) == "" ||
-		strings.TrimSpace(req.LastName) == "" ||
-		strings.TrimSpace(string(req.Email)) == "" ||
-		strings.TrimSpace(req.Phone) == "" {
+	if req.BranchId.String() == "00000000-0000-0000-0000-000000000000" || strings.TrimSpace(string(req.CustomerType)) == "" {
 		return ErrInvalidRequest
 	}
 	return nil
@@ -308,10 +304,12 @@ func bindCreateCustomerRequest(institutionID string, body *CreateCustomerRequest
 	return CreateCustomerInput{
 		InstitutionID: institutionID,
 		BranchID:      body.BranchId.String(),
-		FirstName:     body.FirstName,
-		LastName:      body.LastName,
-		Email:         string(body.Email),
-		Phone:         body.Phone,
+		CustomerType:  string(body.CustomerType),
+		FirstName:     optionalString(body.FirstName),
+		LastName:      optionalString(body.LastName),
+		BusinessName:  optionalString(body.BusinessName),
+		Email:         optionalEmailString(body.Email),
+		Phone:         optionalString(body.Phone),
 	}, nil
 }
 
@@ -373,6 +371,13 @@ func optionalUUIDString(value *openapi_types.UUID) string {
 		return ""
 	}
 	return value.String()
+}
+
+func optionalEmailString(value *openapi_types.Email) string {
+	if value == nil {
+		return ""
+	}
+	return string(*value)
 }
 
 func optionalInt64(value *int64) int64 {

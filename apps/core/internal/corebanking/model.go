@@ -53,6 +53,13 @@ const (
 	HoldStatusReleased = "released"
 	HoldStatusConsumed = "consumed"
 
+	CustomerTypeIndividual = "individual"
+	CustomerTypeBusiness   = "business"
+
+	CustomerKYCTier1 = "tier1"
+
+	CustomerIdentityStatusNotCollected = "not_collected"
+
 	ProviderMockNIP = "mock_nip"
 )
 
@@ -103,11 +110,16 @@ type Customer struct {
 	ID            string    `json:"id" db:"id"`
 	InstitutionID string    `json:"institution_id" db:"institution_id"`
 	BranchID      string    `json:"branch_id" db:"branch_id"`
+	CustomerType  string    `json:"customer_type" db:"customer_type"`
 	FirstName     string    `json:"first_name" db:"first_name"`
 	LastName      string    `json:"last_name" db:"last_name"`
+	BusinessName  *string   `json:"business_name,omitempty" db:"business_name"`
 	Email         string    `json:"email" db:"email"`
 	Phone         string    `json:"phone" db:"phone"`
 	Status        string    `json:"status" db:"status"`
+	KYCTier       string    `json:"kyc_tier" db:"kyc_tier"`
+	BVNStatus     string    `json:"bvn_status" db:"bvn_status"`
+	NINStatus     string    `json:"nin_status" db:"nin_status"`
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
 }
@@ -115,10 +127,15 @@ type Customer struct {
 type CreateCustomerInput struct {
 	InstitutionID string
 	BranchID      string
+	CustomerType  string
 	FirstName     string
 	LastName      string
+	BusinessName  string
 	Email         string
 	Phone         string
+	KYCTier       string
+	BVNStatus     string
+	NINStatus     string
 }
 
 type Account struct {

@@ -19,6 +19,7 @@ func TestCreateCustomerStoresCustomerInInstitutionBranch(t *testing.T) {
 	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
 		InstitutionID: DemoInstitutionID,
 		BranchID:      DemoBranchID,
+		CustomerType:  " individual ",
 		FirstName:     "  Adaeze ",
 		LastName:      " Okafor ",
 		Email:         " ADAEZE@example.com ",
@@ -30,7 +31,10 @@ func TestCreateCustomerStoresCustomerInInstitutionBranch(t *testing.T) {
 	if customer.ID == "" || customer.InstitutionID != DemoInstitutionID || customer.BranchID != DemoBranchID {
 		t.Fatalf("created customer has wrong scope: %+v", customer)
 	}
-	if customer.FirstName != "Adaeze" || customer.LastName != "Okafor" || customer.Email != "adaeze@example.com" || customer.Phone != "+2348012345678" || customer.Status != "active" {
+	if customer.CustomerType != CustomerTypeIndividual || customer.FirstName != "Adaeze" || customer.LastName != "Okafor" || customer.Email != "adaeze@example.com" || customer.Phone != "+2348012345678" || customer.Status != "active" {
+		t.Fatalf("created customer was not normalized: %+v", customer)
+	}
+	if customer.KYCTier != CustomerKYCTier1 || customer.BVNStatus != CustomerIdentityStatusNotCollected || customer.NINStatus != CustomerIdentityStatusNotCollected {
 		t.Fatalf("created customer was not normalized: %+v", customer)
 	}
 
@@ -43,16 +47,38 @@ func TestCreateCustomerStoresCustomerInInstitutionBranch(t *testing.T) {
 	}
 }
 
+func TestCreateBusinessCustomerStoresBusinessNameInMeta(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	customer, err := svc.CreateCustomer(ctx, CreateCustomerInput{
+		InstitutionID: DemoInstitutionID,
+		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeBusiness,
+		BusinessName:  "Clive Alliance",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.CustomerType != CustomerTypeBusiness || customer.BusinessName == nil || *customer.BusinessName != "Clive Alliance" {
+		t.Fatalf("business customer did not preserve business metadata: %+v", customer)
+	}
+	if customer.FirstName != "" || customer.LastName != "" || customer.Email != "" || customer.Phone != "" {
+		t.Fatalf("business customer should not require individual/contact fields: %+v", customer)
+	}
+}
+
 func TestCreateCustomerRejectsInvalidInput(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 
 	tests := []CreateCustomerInput{
-		{InstitutionID: "", BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "ada@example.com", Phone: "+2348012345678"},
-		{InstitutionID: DemoInstitutionID, BranchID: "", FirstName: "Ada", LastName: "Demo", Email: "ada@example.com", Phone: "+2348012345678"},
-		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "", LastName: "Demo", Email: "ada@example.com", Phone: "+2348012345678"},
-		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "", Email: "ada@example.com", Phone: "+2348012345678"},
-		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "not-email", Phone: "+2348012345678"},
-		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "ada@example.com", Phone: ""},
+		{InstitutionID: "", BranchID: DemoBranchID, CustomerType: CustomerTypeIndividual, FirstName: "Ada", LastName: "Demo"},
+		{InstitutionID: DemoInstitutionID, BranchID: "", CustomerType: CustomerTypeIndividual, FirstName: "Ada", LastName: "Demo"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, CustomerType: "", FirstName: "Ada", LastName: "Demo"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, CustomerType: "invalid", FirstName: "Ada", LastName: "Demo"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, CustomerType: CustomerTypeIndividual, FirstName: "", LastName: "Demo"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, CustomerType: CustomerTypeIndividual, FirstName: "Ada", LastName: ""},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, CustomerType: CustomerTypeIndividual, FirstName: "Ada", LastName: "Demo", Email: "not-email"},
+		{InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, CustomerType: CustomerTypeBusiness, BusinessName: ""},
 	}
 	for i, input := range tests {
 		t.Run(fmt.Sprintf("invalid_%d", i), func(t *testing.T) {
@@ -70,6 +96,7 @@ func TestCreateCustomerRequiresBranchInInstitution(t *testing.T) {
 	_, err := svc.CreateCustomer(ctx, CreateCustomerInput{
 		InstitutionID: "99999999-9999-9999-9999-999999999999",
 		BranchID:      DemoBranchID,
+		CustomerType:  CustomerTypeIndividual,
 		FirstName:     "Ada",
 		LastName:      "Demo",
 		Email:         "ada@example.com",
@@ -857,7 +884,7 @@ func (m *memoryStore) EnsureDemoData(ctx context.Context) (*SeedResult, error) {
 	customerID := DemoCustomerID
 	m.institutions[DemoInstitutionID] = Institution{ID: DemoInstitutionID, Name: "Lenz Demo Microfinance Bank", ShortName: "Lenz Demo", Code: "999001", CurrencyID: "NGN", Status: "active", CreatedAt: now, UpdatedAt: now}
 	m.branches[DemoBranchID] = Branch{ID: DemoBranchID, InstitutionID: DemoInstitutionID, Code: "HQ", Name: "Demo HQ", Status: "active", CreatedAt: now, UpdatedAt: now}
-	m.customers[DemoCustomerID] = Customer{ID: DemoCustomerID, InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, FirstName: "Ada", LastName: "Demo", Email: "ada.demo@example.com", Phone: "+2348000000000", Status: "active", CreatedAt: now, UpdatedAt: now}
+	m.customers[DemoCustomerID] = Customer{ID: DemoCustomerID, InstitutionID: DemoInstitutionID, BranchID: DemoBranchID, CustomerType: CustomerTypeIndividual, FirstName: "Ada", LastName: "Demo", Email: "ada.demo@example.com", Phone: "+2348000000000", Status: "active", KYCTier: CustomerKYCTier1, BVNStatus: CustomerIdentityStatusNotCollected, NINStatus: CustomerIdentityStatusNotCollected, CreatedAt: now, UpdatedAt: now}
 	m.accounts[DemoCustomerAccountID] = Account{ID: DemoCustomerAccountID, InstitutionID: DemoInstitutionID, CustomerID: &customerID, AccountNumber: "9990000001", Name: "Ada Demo Wallet", Kind: AccountKindCustomer, ProductType: AccountProductStandardWallet, AllowNegative: false, CurrencyID: "NGN", NormalBalance: NormalBalanceCredit, Status: "active", CreatedAt: now, UpdatedAt: now}
 	m.accounts[DemoClearingAccountID] = Account{ID: DemoClearingAccountID, InstitutionID: DemoInstitutionID, AccountNumber: "9999999999", Name: "Mock NIP Clearing", Kind: AccountKindInternal, ProductType: AccountProductInternal, AllowNegative: true, CurrencyID: "NGN", NormalBalance: NormalBalanceDebit, Status: "active", CreatedAt: now, UpdatedAt: now}
 	if _, ok := m.balances[DemoCustomerAccountID]; !ok {
@@ -892,13 +919,20 @@ func (m *memoryStore) CreateCustomer(ctx context.Context, input CreateCustomerIn
 		ID:            uuid.Must(uuid.NewRandom()).String(),
 		InstitutionID: input.InstitutionID,
 		BranchID:      input.BranchID,
+		CustomerType:  input.CustomerType,
 		FirstName:     input.FirstName,
 		LastName:      input.LastName,
 		Email:         input.Email,
 		Phone:         input.Phone,
 		Status:        "active",
+		KYCTier:       input.KYCTier,
+		BVNStatus:     input.BVNStatus,
+		NINStatus:     input.NINStatus,
 		CreatedAt:     now,
 		UpdatedAt:     now,
+	}
+	if input.BusinessName != "" {
+		customer.BusinessName = &input.BusinessName
 	}
 	m.customers[customer.ID] = customer
 	return copyOf(customer), nil

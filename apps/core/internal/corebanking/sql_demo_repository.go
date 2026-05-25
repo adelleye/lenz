@@ -42,8 +42,8 @@ ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, u
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO customers (id, institution_id, branch_id, first_name, last_name, email, phone, status, meta, created_at, updated_at)
-VALUES ($1, $2, $3, 'Ada', 'Demo', 'ada.demo@example.com', '+2348000000000', 'active', '{}'::jsonb, $4, $4)
-ON CONFLICT (id) DO UPDATE SET first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
+VALUES ($1, $2, $3, 'Ada', 'Demo', 'ada.demo@example.com', '+2348000000000', 'active', '{"customer_type":"individual","kyc_tier":"tier1","bvn_status":"not_collected","nin_status":"not_collected"}'::jsonb, $4, $4)
+ON CONFLICT (id) DO UPDATE SET first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, email = EXCLUDED.email, phone = EXCLUDED.phone, status = EXCLUDED.status, meta = EXCLUDED.meta, updated_at = EXCLUDED.updated_at`,
 			DemoCustomerID, DemoInstitutionID, DemoBranchID, now); err != nil {
 			return err
 		}
@@ -88,7 +88,7 @@ func (r *sqlDemoRepository) seedResult(ctx context.Context) (*SeedResult, error)
 	if err := r.db.GetContext(ctx, &out.Branch, `SELECT id, institution_id, code, name, status, created_at, updated_at FROM branches WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, DemoBranchID); err != nil {
 		return nil, err
 	}
-	if err := r.db.GetContext(ctx, &out.Customer, `SELECT id, institution_id, branch_id, first_name, last_name, email, phone, status, created_at, updated_at FROM customers WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, DemoCustomerID); err != nil {
+	if err := r.db.GetContext(ctx, &out.Customer, customerSelectSQL+` WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, DemoCustomerID); err != nil {
 		return nil, err
 	}
 	if err := r.db.GetContext(ctx, &out.Account, accountSelectSQL+` WHERE institution_id = $1 AND id = $2`, DemoInstitutionID, DemoCustomerAccountID); err != nil {

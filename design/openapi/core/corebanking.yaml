@@ -470,15 +470,21 @@ components:
 
     CreateCustomerRequest:
       type: object
-      required: [branch_id, first_name, last_name, email, phone]
+      required: [branch_id, customer_type]
       properties:
         branch_id:
           type: string
           format: uuid
+        customer_type:
+          type: string
+          enum: [individual, business]
         first_name:
           type: string
           minLength: 1
         last_name:
+          type: string
+          minLength: 1
+        business_name:
           type: string
           minLength: 1
         email:
@@ -555,7 +561,7 @@ components:
 
     APICustomer:
       type: object
-      required: [id, institution_id, branch_id, first_name, last_name, email, phone, status, created_at, updated_at]
+      required: [id, institution_id, branch_id, customer_type, status, kyc_tier, bvn_status, nin_status, created_at, updated_at]
       properties:
         id:
           type: string
@@ -566,16 +572,30 @@ components:
         branch_id:
           type: string
           format: uuid
+        customer_type:
+          type: string
+          enum: [individual, business]
         first_name:
           type: string
         last_name:
           type: string
+        business_name:
+          type: string
+          nullable: true
         email:
           type: string
         phone:
           type: string
         status:
           type: string
+        kyc_tier:
+          type: string
+        bvn_status:
+          type: string
+          enum: [not_collected, pending, verified, failed]
+        nin_status:
+          type: string
+          enum: [not_collected, pending, verified, failed]
         created_at:
           type: string
           format: date-time
