@@ -23,10 +23,6 @@ const (
 	defaultDevInstitutionID = "11111111-1111-1111-1111-111111111111"
 )
 
-func CoreAuthn(scopes ...AuthScope) {
-
-}
-
 func Authentication(scopes ...AuthScope) func(http.Handler) http.Handler {
 	return func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

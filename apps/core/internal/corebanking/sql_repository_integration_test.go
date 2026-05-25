@@ -959,6 +959,43 @@ func TestSQLRepositoryInternalTransferIntegration(t *testing.T) {
 	assertSQLReplayIntegrity(t, ctx, db)
 }
 
+func TestSQLRepositoryInternalTransferReversalUsesOriginalCounterparty(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := seededSQLService(t, db, ctx)
+
+	source := createSQLCustomerAccount(t, svc, ctx, "Reverse", "SQLSource", "reverse.sql.source@example.com", "2234567896", "Reverse SQL Source")
+	destination := createSQLCustomerAccount(t, svc, ctx, "Reverse", "SQLDestination", "reverse.sql.destination@example.com", "2234567897", "Reverse SQL Destination")
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      source.ID,
+		AmountMinor:    20000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-reverse-internal-fund",
+	})
+	original := mustInternalTransfer(t, svc, ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      source.ID,
+		DestinationAccountID: destination.ID,
+		AmountMinor:          7000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "sql-reverse-internal-transfer",
+		Reference:            "sql-reverse-internal-transfer-ref",
+	})
+
+	reversal := reverseTransfer(t, svc, ctx, original.ID, "sql-reverse-internal-transfer-reversal")
+
+	if reversal.Direction != TransferDirectionReversal || reversal.ReversalOfTransferID == nil || *reversal.ReversalOfTransferID != original.ID {
+		t.Fatalf("SQL reversal did not reference original internal transfer: %+v", reversal)
+	}
+	assertSQLAccountBalancePair(t, svc, ctx, source.ID, 20000, 20000)
+	assertSQLAccountBalancePair(t, svc, ctx, destination.ID, 0, 0)
+	assertSQLJournalBalanced(t, svc, ctx, reversal, 7000)
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSQLRepositoryInternalTransferConcurrentIdempotency(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()

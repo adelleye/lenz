@@ -1149,6 +1149,38 @@ func TestReversalCreatesNewLedgerEvent(t *testing.T) {
 	}
 }
 
+func TestReversalUsesOriginalInternalTransferCounterparty(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	source := createMemoryCustomerAccount(t, svc, ctx, "Reverse", "Source", "reverse.source@example.com", uniqueAccountNumber("90"))
+	destination := createMemoryCustomerAccount(t, svc, ctx, "Reverse", "Destination", "reverse.destination@example.com", uniqueAccountNumber("91"))
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      source.ID,
+		AmountMinor:    20000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "reverse-internal-fund",
+	})
+	original := mustInternalTransfer(t, svc, ctx, InternalTransferInput{
+		InstitutionID:        DemoInstitutionID,
+		SourceAccountID:      source.ID,
+		DestinationAccountID: destination.ID,
+		AmountMinor:          7000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "reverse-internal-transfer",
+		Reference:            "reverse-internal-transfer-ref",
+	})
+
+	reversal := reverseTransfer(t, svc, ctx, original.ID, "reverse-internal-transfer-reversal")
+
+	if reversal.Direction != TransferDirectionReversal || reversal.ReversalOfTransferID == nil || *reversal.ReversalOfTransferID != original.ID {
+		t.Fatalf("reversal did not reference original internal transfer: %+v", reversal)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, source.ID, 20000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, destination.ID, 0)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoClearingAccountID, 20000)
+	assertJournalBalanced(t, store, reversal)
+}
+
 func TestReversalDeficitIsMarkedForManualReview(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 	original := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "spent-rev-in", ProviderEventID: "evt-spent-rev-in"})
@@ -2137,7 +2169,11 @@ func (m *memoryStore) ReverseTransfer(ctx context.Context, input ReverseTransfer
 	if original.Direction == TransferDirectionOutbound {
 		direction = TransferDirectionInbound
 	}
-	reversal, err := m.recordTransferLocked(RecordTransferInput{InstitutionID: input.InstitutionID, AccountID: original.AccountID, ClearingAccountID: DemoClearingAccountID, Direction: direction, Status: TransferStatusSucceeded, AmountMinor: original.AmountMinor, CurrencyID: original.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: provider, ProviderReference: providerReference, ProviderEventID: strings.TrimSpace(input.ProviderEventID), ReversalOfTransferID: original.ID, FailureReason: strings.TrimSpace(input.FailureReason), Narration: narration})
+	counterpartyAccountID, err := m.originalCounterpartyAccountIDLocked(original)
+	if err != nil {
+		return nil, err
+	}
+	reversal, err := m.recordTransferLocked(RecordTransferInput{InstitutionID: input.InstitutionID, AccountID: original.AccountID, ClearingAccountID: counterpartyAccountID, Direction: direction, Status: TransferStatusSucceeded, AmountMinor: original.AmountMinor, CurrencyID: original.CurrencyID, IdempotencyKey: input.IdempotencyKey, Provider: provider, ProviderReference: providerReference, ProviderEventID: strings.TrimSpace(input.ProviderEventID), ReversalOfTransferID: original.ID, FailureReason: strings.TrimSpace(input.FailureReason), Narration: narration})
 	if err != nil {
 		return nil, err
 	}
@@ -2147,6 +2183,27 @@ func (m *memoryStore) ReverseTransfer(ctx context.Context, input ReverseTransfer
 	reversal.Direction = TransferDirectionReversal
 	m.transfers[reversal.ID] = *reversal
 	return reversal, nil
+}
+
+func (m *memoryStore) originalCounterpartyAccountIDLocked(original Transfer) (string, error) {
+	if original.JournalEntryID == nil {
+		return "", ErrInvalidRequest
+	}
+	postings := m.postings[*original.JournalEntryID]
+	counterpartyAccountID := ""
+	for _, posting := range postings {
+		if posting.AccountID == original.AccountID {
+			continue
+		}
+		if counterpartyAccountID != "" && posting.AccountID != counterpartyAccountID {
+			return "", ErrDataIntegrity
+		}
+		counterpartyAccountID = posting.AccountID
+	}
+	if counterpartyAccountID == "" {
+		return "", ErrDataIntegrity
+	}
+	return counterpartyAccountID, nil
 }
 
 func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer, error) {

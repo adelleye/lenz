@@ -86,10 +86,14 @@ func (r *sqlTransferRepository) ReverseTransfer(ctx context.Context, input Rever
 		if original.Direction == TransferDirectionOutbound {
 			direction = TransferDirectionInbound
 		}
+		counterpartyAccountID, err := r.originalCounterpartyAccountID(ctx, tx, *original)
+		if err != nil {
+			return err
+		}
 		transfer, err = r.recordTransfer(ctx, tx, RecordTransferInput{
 			InstitutionID:        input.InstitutionID,
 			AccountID:            original.AccountID,
-			ClearingAccountID:    DemoClearingAccountID,
+			ClearingAccountID:    counterpartyAccountID,
 			Direction:            direction,
 			Status:               TransferStatusSucceeded,
 			AmountMinor:          original.AmountMinor,
@@ -115,6 +119,26 @@ func (r *sqlTransferRepository) ReverseTransfer(ctx context.Context, input Rever
 		return nil
 	})
 	return transfer, err
+}
+
+func (r *sqlTransferRepository) originalCounterpartyAccountID(ctx context.Context, tx TxRunner, original Transfer) (string, error) {
+	if original.JournalEntryID == nil {
+		return "", ErrInvalidRequest
+	}
+	var accountIDs []string
+	if err := tx.SelectContext(ctx, &accountIDs, `
+SELECT account_id
+FROM postings
+WHERE institution_id = $1
+  AND journal_entry_id = $2
+  AND account_id <> $3
+ORDER BY account_id`, original.InstitutionID, *original.JournalEntryID, original.AccountID); err != nil {
+		return "", err
+	}
+	if len(accountIDs) != 1 {
+		return "", ErrDataIntegrity
+	}
+	return accountIDs[0], nil
 }
 
 func (r *sqlTransferRepository) recordTransfer(ctx context.Context, tx TxRunner, input RecordTransferInput) (*Transfer, error) {
