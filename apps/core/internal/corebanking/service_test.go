@@ -1987,7 +1987,7 @@ func (m *memoryStore) GetDefaultInternalSettlementAccount(ctx context.Context, i
 	return defaultAccount, nil
 }
 
-func (m *memoryStore) SetAccountStatus(ctx context.Context, input AccountControlInput, status string) (*Account, error) {
+func (m *memoryStore) SetAccountStatus(ctx context.Context, input AccountControlInput, status string, allowedCurrentStatuses ...string) (*Account, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	account, ok := m.accounts[input.AccountID]
@@ -1995,6 +1995,9 @@ func (m *memoryStore) SetAccountStatus(ctx context.Context, input AccountControl
 		return nil, ErrNotFound
 	}
 	oldStatus := account.Status
+	if !allowedAccountStatusTransition(oldStatus, allowedCurrentStatuses) {
+		return nil, ErrInvalidRequest
+	}
 	if oldStatus == status {
 		return copyOf(account), nil
 	}

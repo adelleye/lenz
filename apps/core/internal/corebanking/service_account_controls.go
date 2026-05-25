@@ -19,7 +19,7 @@ func (s *Service) FreezeAccount(ctx context.Context, input AccountControlInput) 
 	if !controllableAccount(*account) {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input, AccountStatusFrozen)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusFrozen, AccountStatusActive, AccountStatusPostNoDebit)
 }
 
 func (s *Service) UnfreezeAccount(ctx context.Context, input AccountControlInput) (*Account, error) {
@@ -34,7 +34,7 @@ func (s *Service) UnfreezeAccount(ctx context.Context, input AccountControlInput
 	if !controllableAccount(*account) {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input, AccountStatusActive)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusActive, AccountStatusFrozen)
 }
 
 func (s *Service) ActivatePostNoDebit(ctx context.Context, input AccountControlInput) (*Account, error) {
@@ -46,10 +46,10 @@ func (s *Service) ActivatePostNoDebit(ctx context.Context, input AccountControlI
 	if err != nil {
 		return nil, err
 	}
-	if !controllableAccount(*account) || account.Status == AccountStatusFrozen {
+	if !controllableAccount(*account) {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input, AccountStatusPostNoDebit)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusPostNoDebit, AccountStatusActive)
 }
 
 func (s *Service) DeactivatePostNoDebit(ctx context.Context, input AccountControlInput) (*Account, error) {
@@ -61,10 +61,10 @@ func (s *Service) DeactivatePostNoDebit(ctx context.Context, input AccountContro
 	if err != nil {
 		return nil, err
 	}
-	if !controllableAccount(*account) || account.Status == AccountStatusFrozen {
+	if !controllableAccount(*account) {
 		return nil, ErrInvalidRequest
 	}
-	return s.repository.SetAccountStatus(ctx, input, AccountStatusActive)
+	return s.repository.SetAccountStatus(ctx, input, AccountStatusActive, AccountStatusPostNoDebit)
 }
 
 func (s *Service) PlaceAccountLien(ctx context.Context, input AccountLienInput) (*AccountHold, error) {
@@ -110,6 +110,18 @@ func (s *Service) ReleaseAccountLien(ctx context.Context, input ReleaseLienInput
 
 func controllableAccount(account Account) bool {
 	return account.Kind == AccountKindCustomer && account.Status != AccountStatusClosed
+}
+
+func allowedAccountStatusTransition(current string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, status := range allowed {
+		if current == status {
+			return true
+		}
+	}
+	return false
 }
 
 func validateAccountControlInput(input AccountControlInput, requireReason bool) (AccountControlInput, error) {

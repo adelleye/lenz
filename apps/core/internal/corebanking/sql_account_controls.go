@@ -8,13 +8,16 @@ import (
 	"github.com/google/uuid"
 )
 
-func (r *sqlAccountRepository) SetAccountStatus(ctx context.Context, input AccountControlInput, status string) (*Account, error) {
+func (r *sqlAccountRepository) SetAccountStatus(ctx context.Context, input AccountControlInput, status string, allowedCurrentStatuses ...string) (*Account, error) {
 	var account Account
 	err := WithTx(ctx, r.db, func(tx TxRunner) error {
 		institutionID, accountID := input.InstitutionID, input.AccountID
 		if err := tx.GetContext(ctx, &account, accountSelectSQL+`
 WHERE institution_id = $1 AND id = $2 FOR UPDATE`, institutionID, accountID); err != nil {
 			return normalizeSQLError(err)
+		}
+		if !allowedAccountStatusTransition(account.Status, allowedCurrentStatuses) {
+			return ErrInvalidRequest
 		}
 		if account.Status == status {
 			return nil

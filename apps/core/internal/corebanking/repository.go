@@ -24,7 +24,7 @@ type AccountRepository interface {
 	CreateAccount(ctx context.Context, input CreateAccountInput) (*Account, error)
 	ListAccountsByCustomer(ctx context.Context, institutionID, customerID string) ([]Account, error)
 	GetAccount(ctx context.Context, institutionID, accountID string) (*Account, error)
-	SetAccountStatus(ctx context.Context, input AccountControlInput, status string) (*Account, error)
+	SetAccountStatus(ctx context.Context, input AccountControlInput, status string, allowedCurrentStatuses ...string) (*Account, error)
 	GetDefaultInternalSettlementAccount(ctx context.Context, institutionID, currencyID string) (*Account, error)
 	GetBalance(ctx context.Context, institutionID, accountID string) (*AccountBalance, error)
 	ListTransactions(ctx context.Context, institutionID, accountID string, options ListTransactionsOptions) ([]Transaction, error)

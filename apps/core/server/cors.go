@@ -31,7 +31,7 @@ func newCORSFromEnv(getenv func(string) string) (*cors.Cors, error) {
 	}
 	return cors.New(cors.Options{
 		AllowedOrigins: origins,
-		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodOptions},
+		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders: []string{
 			"Authorization",
 			"Content-Type",

@@ -222,7 +222,7 @@ paths:
   /api/v1/accounts/{account_id}/freeze:
     post:
       operationId: freezeAccount
-      summary: Freeze an account
+      summary: Freeze an active or post-no-debit account
       tags: [Corebanking]
       parameters:
         - $ref: "#/components/parameters/InstitutionID"
@@ -259,7 +259,7 @@ paths:
   /api/v1/accounts/{account_id}/unfreeze:
     post:
       operationId: unfreezeAccount
-      summary: Unfreeze an account
+      summary: Unfreeze a frozen account
       tags: [Corebanking]
       parameters:
         - $ref: "#/components/parameters/InstitutionID"
@@ -296,7 +296,7 @@ paths:
   /api/v1/accounts/{account_id}/post-no-debit:
     post:
       operationId: activatePostNoDebit
-      summary: Activate post-no-debit on an account
+      summary: Activate post-no-debit on an active account
       tags: [Corebanking]
       parameters:
         - $ref: "#/components/parameters/InstitutionID"
@@ -331,7 +331,7 @@ paths:
           $ref: "#/components/responses/InternalServerError"
     delete:
       operationId: deactivatePostNoDebit
-      summary: Deactivate post-no-debit on an account
+      summary: Deactivate post-no-debit on a post-no-debit account
       tags: [Corebanking]
       parameters:
         - $ref: "#/components/parameters/InstitutionID"

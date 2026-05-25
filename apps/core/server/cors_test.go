@@ -26,6 +26,20 @@ func TestCORSUsesExplicitSafeDevDefaults(t *testing.T) {
 		t.Fatalf("expected safe dev origin to be allowed, headers=%v", rec.Header())
 	}
 
+	req = httptest.NewRequest(http.MethodOptions, "/api/v1/accounts/demo/post-no-debit", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Access-Control-Request-Method", http.MethodDelete)
+	req.Header.Set("Access-Control-Request-Headers", "authorization, content-type, x-institution-id")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Header().Get("Access-Control-Allow-Origin") != "http://localhost:5173" {
+		t.Fatalf("expected safe dev origin to be allowed for DELETE, headers=%v", rec.Header())
+	}
+	if rec.Header().Get("Access-Control-Allow-Methods") == "" {
+		t.Fatalf("expected DELETE preflight to return allowed methods, headers=%v", rec.Header())
+	}
+
 	req = httptest.NewRequest(http.MethodOptions, "/api/v1/accounts/demo/balance", nil)
 	req.Header.Set("Origin", "https://evil.example")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)

@@ -77,6 +77,57 @@ func TestPostNoDebitBlocksOutflowsAndAllowsInflows(t *testing.T) {
 	mustInternalDebit(t, svc, ctx, InternalDebitInput{InstitutionID: DemoInstitutionID, AccountID: source.ID, AmountMinor: 1000, CurrencyID: "NGN", IdempotencyKey: "pnd-removed-debit"})
 }
 
+func TestAccountControlStateTransitionsAreStrict(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	account := createMemoryCustomerAccount(t, svc, ctx, "Control", "Transitions", "control.transitions@example.com", uniqueAccountNumber("86"))
+
+	if _, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "active-unfreeze", Reason: "not frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected active account unfreeze to fail, got %v", err)
+	}
+	if _, err := svc.DeactivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "active-pnd-off", Reason: "not pnd"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected active account PND deactivation to fail, got %v", err)
+	}
+
+	pnd, err := svc.ActivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "activate-pnd", Reason: "ops hold"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pnd.Status != AccountStatusPostNoDebit {
+		t.Fatalf("expected PND status, got %+v", pnd)
+	}
+	if _, err := svc.ActivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "activate-pnd-again", Reason: "already pnd"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected repeated PND activation to fail, got %v", err)
+	}
+	if _, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "pnd-unfreeze", Reason: "not frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected PND account unfreeze to fail, got %v", err)
+	}
+
+	frozen, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "freeze-pnd", Reason: "security escalation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frozen.Status != AccountStatusFrozen {
+		t.Fatalf("expected frozen status, got %+v", frozen)
+	}
+	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "freeze-again", Reason: "already frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected repeated freeze to fail, got %v", err)
+	}
+	if _, err := svc.ActivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "frozen-pnd-on", Reason: "frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected frozen account PND activation to fail, got %v", err)
+	}
+	if _, err := svc.DeactivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "frozen-pnd-off", Reason: "not pnd"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected frozen account PND deactivation to fail, got %v", err)
+	}
+
+	active, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, Reference: "unfreeze-frozen", Reason: "review clear"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != AccountStatusActive {
+		t.Fatalf("expected active status, got %+v", active)
+	}
+}
+
 func TestAccountLienReducesAvailableAndReleaseRestores(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	account := createMemoryCustomerAccount(t, svc, ctx, "Lien", "Holder", "lien.holder@example.com", uniqueAccountNumber("84"))

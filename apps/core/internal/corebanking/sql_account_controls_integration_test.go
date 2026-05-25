@@ -92,6 +92,39 @@ func TestSQLAccountControlsGoal08(t *testing.T) {
 	}
 	mustInternalDebit(t, svc, ctx, InternalDebitInput{InstitutionID: DemoInstitutionID, AccountID: pndSource.ID, AmountMinor: 1000, CurrencyID: "NGN", IdempotencyKey: "sql-pnd-removed-debit"})
 
+	transitionAccount := createSQLCustomerAccount(t, svc, ctx, "SQL", "Transitions", "sql.transitions@example.com", "8234567896", "SQL Transitions")
+	if _, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-active-unfreeze", Reason: "not frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected active SQL account unfreeze to fail, got %v", err)
+	}
+	if _, err := svc.DeactivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-active-pnd-off", Reason: "not pnd"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected active SQL account PND deactivation to fail, got %v", err)
+	}
+	if _, err := svc.ActivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-pnd", Reason: "ops pnd"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ActivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-pnd-again", Reason: "already pnd"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected repeated SQL PND activation to fail, got %v", err)
+	}
+	if _, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-pnd-unfreeze", Reason: "not frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected SQL PND account unfreeze to fail, got %v", err)
+	}
+	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-freeze", Reason: "security escalation"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-freeze-again", Reason: "already frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected repeated SQL freeze to fail, got %v", err)
+	}
+	if _, err := svc.ActivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-frozen-pnd-on", Reason: "frozen"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected frozen SQL account PND activation to fail, got %v", err)
+	}
+	if _, err := svc.DeactivatePostNoDebit(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-frozen-pnd-off", Reason: "not pnd"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected frozen SQL account PND deactivation to fail, got %v", err)
+	}
+	if _, err := svc.UnfreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: transitionAccount.ID, Reference: "sql-transition-unfreeze", Reason: "review clear"}); err != nil {
+		t.Fatal(err)
+	}
+	assertSQLAccountStatus(t, ctx, db, transitionAccount.ID, AccountStatusActive)
+
 	if _, err := svc.ReleaseAccountLien(ctx, ReleaseLienInput{InstitutionID: "99999999-9999-9999-9999-999999999999", AccountID: lienAccount.ID, LienID: lien.ID, Reference: "cross-release"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected cross-tenant lien release to fail, got %v", err)
 	}
