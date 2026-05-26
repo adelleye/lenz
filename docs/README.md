@@ -37,3 +37,11 @@ Start here if the repository feels large.
 The current source of truth is the code, OpenAPI spec, migrations, README, and
 the proof scripts. Older goal documents explain why features were added, but
 they are not the fastest way to learn how to run the app today.
+
+## OpenAPI Sources
+
+- `design/openapi/core/corebanking.yaml` is the active source of truth for the
+  transaction CBA v0.1 HTTP contract.
+- `design/openapi/core/institution.yaml` is an intentional no-route placeholder
+  for a future institution module. It is generated but not registered by the
+  runtime API.

@@ -35,6 +35,9 @@ design/openapi/core/corebanking.yaml
 ```
 
 Generated files are ignored by git and should not be edited manually.
+`design/openapi/core/institution.yaml` is a no-route placeholder for a future
+institution module; it is generated to keep that path explicit but does not
+define any active runtime route today.
 
 ## Module Boundaries
 

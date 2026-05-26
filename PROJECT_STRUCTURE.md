@@ -29,8 +29,17 @@ apps/core/
   cmd/migrate/                    runs SQL migrations
   server/                         HTTP server, middleware, dependency wiring
   internal/corebanking/           CBA v0.1 transaction spine
-  internal/institution/           institution OpenAPI module placeholder
+  internal/institution/           no-route OpenAPI module placeholder
 ```
+
+Active OpenAPI inputs:
+
+- `design/openapi/core/corebanking.yaml` is the current source of truth for the
+  transaction CBA v0.1 HTTP surface and the runtime routes registered by
+  `apps/core`.
+- `design/openapi/core/institution.yaml` is intentionally a placeholder with no
+  routes. It is generated only to keep the institution module workflow visible;
+  it does not define runtime API behavior yet.
 
 The core-banking module is split by responsibility:
 
