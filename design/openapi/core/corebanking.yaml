@@ -719,6 +719,7 @@ paths:
             format: uuid
         - $ref: "#/components/parameters/InstitutionID"
       requestBody:
+        description: Optional. Omit the body to requery the provider's current status, or send JSON to provide mock-only requery overrides.
         required: false
         content:
           application/json:

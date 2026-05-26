@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"lenz-core/apps/auth/authn"
 	"log"
 	"net/http"
@@ -44,29 +43,11 @@ func (h *HTTPServer) Routes(r chi.Router) {
 		RequestErrorHandlerFunc:  openAPIRequestError,
 		ResponseErrorHandlerFunc: openAPIResponseError,
 	})
-	r.Group(func(r chi.Router) {
-		r.Use(optionalExternalRequeryBody)
-		HandlerWithOptions(strictHandler, ChiServerOptions{
-			BaseRouter:       r,
-			ErrorHandlerFunc: openAPIRequestError,
-		})
+	HandlerWithOptions(strictHandler, ChiServerOptions{
+		BaseRouter:       r,
+		ErrorHandlerFunc: openAPIRequestError,
 	})
-}
-
-func optionalExternalRequeryBody(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost &&
-			strings.HasPrefix(r.URL.Path, "/api/v1/external/transfers/") &&
-			strings.HasSuffix(r.URL.Path, "/requery") &&
-			(r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0) {
-			r.Body = io.NopCloser(strings.NewReader("{}"))
-			r.ContentLength = 2
-			if r.Header.Get("Content-Type") == "" {
-				r.Header.Set("Content-Type", "application/json")
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+	r.Post("/api/v1/external/transfers/{transfer_id}/requery", h.externalTransferRequeryHTTP)
 }
 
 func openAPIRequestError(w http.ResponseWriter, r *http.Request, err error) {
@@ -286,6 +267,65 @@ func (h *HTTPServer) ExternalTransferRequery(ctx context.Context, request Extern
 		return nil, err
 	}
 	return okResponse(result), nil
+}
+
+func (h *HTTPServer) externalTransferRequeryHTTP(w http.ResponseWriter, r *http.Request) {
+	transferID, err := uuid.Parse(chi.URLParam(r, "transfer_id"))
+	if err != nil {
+		openAPIRequestError(w, r, err)
+		return
+	}
+	params, err := externalTransferRequeryParamsFromRequest(r)
+	if err != nil {
+		openAPIRequestError(w, r, err)
+		return
+	}
+	body, err := decodeOptionalExternalRequeryBody(r)
+	if err != nil {
+		openAPIRequestError(w, r, err)
+		return
+	}
+	response, err := h.ExternalTransferRequery(r.Context(), ExternalTransferRequeryRequestObject{
+		TransferId: transferID,
+		Params:     params,
+		Body:       body,
+	})
+	if err != nil {
+		openAPIResponseError(w, r, err)
+		return
+	}
+	if response == nil {
+		openAPIResponseError(w, r, errors.New("nil external transfer requery response"))
+		return
+	}
+	if err := response.VisitExternalTransferRequeryResponse(w); err != nil {
+		openAPIResponseError(w, r, err)
+	}
+}
+
+func externalTransferRequeryParamsFromRequest(r *http.Request) (ExternalTransferRequeryParams, error) {
+	var params ExternalTransferRequeryParams
+	headerInstitutionID := strings.TrimSpace(r.Header.Get("X-Institution-ID"))
+	if headerInstitutionID == "" {
+		return params, nil
+	}
+	institutionID, err := uuid.Parse(headerInstitutionID)
+	if err != nil {
+		return params, err
+	}
+	params.XInstitutionID = &institutionID
+	return params, nil
+}
+
+func decodeOptionalExternalRequeryBody(r *http.Request) (*ExternalTransferRequeryRequest, error) {
+	if r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0 {
+		return nil, nil
+	}
+	var body ExternalTransferRequeryRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return &body, nil
 }
 
 func (h *HTTPServer) ListAccountTransactions(ctx context.Context, request ListAccountTransactionsRequestObject) (ListAccountTransactionsResponseObject, error) {

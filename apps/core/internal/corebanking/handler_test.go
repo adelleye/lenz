@@ -1575,8 +1575,42 @@ func TestExternalTransferRequeryRouteOutcomesAndSchema(t *testing.T) {
 }
 
 func TestExternalTransferRequeryRouteNoBodyAlreadyFinalAndInternal(t *testing.T) {
+	t.Run("empty body pending requery", func(t *testing.T) {
+		ctx, svc, store := newTestService(t)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "http-requery-empty-pending-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("http-requery-empty-pending", 10000, MockProviderScenarioPending))
+		journalCountBefore := len(store.journals)
+		router := chi.NewRouter()
+		NewHandler(svc).Routes(router)
+
+		rec := postExternalRequeryNoBody(t, router, pending.TransferID, DemoInstitutionID)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected empty-body pending requery to return 200, got %d body=%s", rec.Code, rec.Body.String())
+		}
+		var result ExternalTransferRequeryResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Message != "requery_pending" ||
+			result.Status != TransferStatusPending ||
+			result.ProviderStatus != TransferStatusPending ||
+			result.LedgerStatus != LedgerStatusPending ||
+			result.ReconciliationStatus != ReconciliationStatusPending {
+			t.Fatalf("empty-body pending route mismatch: %+v", result)
+		}
+		if len(store.journals) != journalCountBefore {
+			t.Fatalf("empty-body pending requery changed journal count: before=%d after=%d", journalCountBefore, len(store.journals))
+		}
+	})
+
 	t.Run("empty body already final no-op", func(t *testing.T) {
-		ctx, svc, _ := newTestService(t)
+		ctx, svc, store := newTestService(t)
 		mustInternalCredit(t, svc, ctx, InternalCreditInput{
 			InstitutionID:  DemoInstitutionID,
 			AccountID:      DemoCustomerAccountID,
@@ -1585,14 +1619,11 @@ func TestExternalTransferRequeryRouteNoBodyAlreadyFinalAndInternal(t *testing.T)
 			IdempotencyKey: "http-requery-final-fund",
 		})
 		final := externalOutbound(t, svc, ctx, externalOutboundTestInput("http-requery-final", 10000, MockProviderScenarioSuccess))
+		journalCountBefore := len(store.journals)
 		router := chi.NewRouter()
 		NewHandler(svc).Routes(router)
 
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+final.TransferID+"/requery", nil)
-		req = withTestPrincipal(req, DemoInstitutionID)
-		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, req)
-
+		rec := postExternalRequeryNoBody(t, router, final.TransferID, DemoInstitutionID)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected empty-body final requery to return 200, got %d body=%s", rec.Code, rec.Body.String())
 		}
@@ -1603,10 +1634,13 @@ func TestExternalTransferRequeryRouteNoBodyAlreadyFinalAndInternal(t *testing.T)
 		if result.Message != "already_final" || result.Status != TransferStatusSucceeded {
 			t.Fatalf("already-final route mismatch: %+v", result)
 		}
+		if len(store.journals) != journalCountBefore {
+			t.Fatalf("already-final requery changed journal count: before=%d after=%d", journalCountBefore, len(store.journals))
+		}
 	})
 
 	t.Run("internal transfer rejected", func(t *testing.T) {
-		ctx, svc, _ := newTestService(t)
+		ctx, svc, store := newTestService(t)
 		internal := mustInternalCredit(t, svc, ctx, InternalCreditInput{
 			InstitutionID:  DemoInstitutionID,
 			AccountID:      DemoCustomerAccountID,
@@ -1614,12 +1648,16 @@ func TestExternalTransferRequeryRouteNoBodyAlreadyFinalAndInternal(t *testing.T)
 			CurrencyID:     "NGN",
 			IdempotencyKey: "http-requery-internal",
 		})
+		journalCountBefore := len(store.journals)
 		router := chi.NewRouter()
 		NewHandler(svc).Routes(router)
 
 		rec := postExternalRequery(t, router, internal.ID, `{}`, DemoInstitutionID)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected internal transfer requery to return 400, got %d body=%s", rec.Code, rec.Body.String())
+		}
+		if len(store.journals) != journalCountBefore {
+			t.Fatalf("internal transfer requery changed journal count: before=%d after=%d", journalCountBefore, len(store.journals))
 		}
 	})
 }
@@ -1710,6 +1748,15 @@ func postExternalRequery(t *testing.T, router http.Handler, transferID, body, in
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+transferID+"/requery", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, institutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func postExternalRequeryNoBody(t *testing.T, router http.Handler, transferID, institutionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+transferID+"/requery", nil)
 	req = withTestPrincipal(req, institutionID)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
