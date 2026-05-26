@@ -36,9 +36,9 @@ BankOne, Monnify, Interswitch, Providus, or a sponsor bank.
 ## What Is Not Built
 
 Before real customer money, the product still needs production auth/RBAC,
-maker-checker, limits, KYC/BVN/NIN verification, true NUBAN issuance, real
-provider adapters, signed webhooks, provider settlement files, compliance
-reporting, monitoring, deployment hardening, and operating procedures.
+maker-checker, limits, KYC/BVN/NIN verification, real provider adapters, signed
+webhooks, provider settlement files, compliance reporting, monitoring,
+deployment hardening, and operating procedures. Full NUBAN generation/check-digit validation is deferred.
 
 ## Prove It Works
 

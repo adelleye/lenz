@@ -84,6 +84,9 @@ Customer and account:
 - `GET /accounts/{account_id}/balance`
 - `GET /accounts/{account_id}/transactions`
 
+Account creation currently validates a supplied unique 10-digit test account
+number. Full NUBAN generation/check-digit validation is deferred.
+
 Account controls:
 
 - `POST /accounts/{account_id}/freeze`

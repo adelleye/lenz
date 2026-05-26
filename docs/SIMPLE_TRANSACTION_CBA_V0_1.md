@@ -32,7 +32,7 @@ It is compliance-shaped, not CBN-compliant production software.
 - production auth/RBAC;
 - maker-checker;
 - KYC/BVN/NIN verification;
-- true NUBAN issuance/check-digit generation;
+- true NUBAN issuance/check-digit generation. Full NUBAN generation/check-digit validation is deferred;
 - limits and fraud monitoring;
 - loans, cards, fees, interest, statements, regulatory returns;
 - frontend/mobile apps;

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"lenz-core/apps/auth/authn"
 	"log"
@@ -22,7 +23,7 @@ import (
 )
 
 const (
-	writeTimeout              = 10 * time.Second
+	writeTimeout              = 30 * time.Second
 	readTimeout               = 5 * time.Second
 	readHeaderTimeout         = 2 * time.Second
 	idleTimeout               = 60 * time.Second
@@ -154,7 +155,7 @@ func (s *Server) Run() {
 
 	go func() {
 		log.Printf("Server starting at %s\n", port)
-		if err := s.httpServer.ListenAndServe(); err != nil {
+		if err := s.httpServer.ListenAndServe(); shouldLogListenAndServeError(err) {
 			log.Fatal(err)
 		}
 	}()
@@ -171,4 +172,8 @@ func (s *Server) Run() {
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		log.Printf("Error shutting down server: %+v", err)
 	}
+}
+
+func shouldLogListenAndServeError(err error) bool {
+	return err != nil && !errors.Is(err, http.ErrServerClosed)
 }
