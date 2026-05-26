@@ -14,9 +14,12 @@ RUN cd apps/core && go mod download
 
 # Copy source code
 COPY apps ./apps
+COPY design ./design
 COPY packages ./packages
 
-# Build
+# Generate ignored OpenAPI bindings, then build
+RUN go generate ./apps/core/internal/corebanking
+RUN go generate ./apps/core/internal/institution
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o bin/server ./apps/core
 
 # Final stage
