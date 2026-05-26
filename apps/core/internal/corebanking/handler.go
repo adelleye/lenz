@@ -216,6 +216,22 @@ func (h *HTTPServer) ExternalNameEnquiry(ctx context.Context, request ExternalNa
 	return okResponse(result), nil
 }
 
+func (h *HTTPServer) ExternalOutboundTransfer(ctx context.Context, request ExternalOutboundTransferRequestObject) (ExternalOutboundTransferResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input, err := bindExternalOutboundTransferRequest(institutionID, request.Body)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.service.ExternalOutboundTransfer(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(result), nil
+}
+
 func (h *HTTPServer) ListAccountTransactions(ctx context.Context, request ListAccountTransactionsRequestObject) (ListAccountTransactionsResponseObject, error) {
 	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
@@ -398,6 +414,43 @@ func validateExternalNameEnquiryRequest(req *ExternalNameEnquiryRequest) error {
 	return nil
 }
 
+func (req *ExternalOutboundTransferRequest) Bind(r *http.Request) error {
+	return validateExternalOutboundTransferRequest(req)
+}
+
+func validateExternalOutboundTransferRequest(req *ExternalOutboundTransferRequest) error {
+	if req == nil {
+		return ErrInvalidRequest
+	}
+	if req.SourceAccountId.String() == "00000000-0000-0000-0000-000000000000" ||
+		req.AmountMinor <= 0 ||
+		strings.TrimSpace(req.IdempotencyKey) == "" ||
+		(strings.TrimSpace(optionalString(req.DestinationInstitutionCode)) == "" && strings.TrimSpace(optionalString(req.BankCode)) == "") ||
+		!isTenDigitAccountNumber(strings.TrimSpace(req.DestinationAccountNumber)) {
+		return ErrInvalidRequest
+	}
+	if req.CurrencyId != nil && string(*req.CurrencyId) != "NGN" {
+		return ErrInvalidRequest
+	}
+	if req.Scenario != nil && !validExternalOutboundRequestScenario(*req.Scenario) {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
+func validExternalOutboundRequestScenario(scenario ExternalOutboundTransferRequestScenario) bool {
+	switch scenario {
+	case ExternalOutboundTransferRequestScenarioSuccess,
+		ExternalOutboundTransferRequestScenarioFailed,
+		ExternalOutboundTransferRequestScenarioPending,
+		ExternalOutboundTransferRequestScenarioTimeout,
+		ExternalOutboundTransferRequestScenarioProviderUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 func (req *MockTransferRequest) Bind(r *http.Request) error {
 	return validateMockTransferRequest(req)
 }
@@ -556,6 +609,27 @@ func bindExternalNameEnquiryRequest(institutionID string, body *ExternalNameEnqu
 		DestinationInstitutionCode: body.DestinationInstitutionCode,
 		AccountNumber:              body.AccountNumber,
 		CurrencyID:                 optionalEnumString(body.CurrencyId),
+	}, nil
+}
+
+func bindExternalOutboundTransferRequest(institutionID string, body *ExternalOutboundTransferRequest) (ExternalOutboundTransferInput, error) {
+	if err := validateExternalOutboundTransferRequest(body); err != nil {
+		return ExternalOutboundTransferInput{}, ErrInvalidRequest
+	}
+	return ExternalOutboundTransferInput{
+		InstitutionID:              institutionID,
+		SourceAccountID:            body.SourceAccountId.String(),
+		DestinationInstitutionCode: optionalString(body.DestinationInstitutionCode),
+		BankCode:                   optionalString(body.BankCode),
+		DestinationAccountNumber:   body.DestinationAccountNumber,
+		DestinationAccountName:     optionalString(body.DestinationAccountName),
+		AmountMinor:                body.AmountMinor,
+		CurrencyID:                 optionalEnumString(body.CurrencyId),
+		IdempotencyKey:             body.IdempotencyKey,
+		Provider:                   optionalString(body.Provider),
+		Narration:                  optionalString(body.Narration),
+		Reference:                  optionalString(body.Reference),
+		Scenario:                   optionalEnumString(body.Scenario),
 	}, nil
 }
 
@@ -733,6 +807,10 @@ func (response strictJSONResponse) VisitMockInboundTransferResponse(w http.Respo
 }
 
 func (response strictJSONResponse) VisitMockOutboundTransferResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitExternalOutboundTransferResponse(w http.ResponseWriter) error {
 	return response.write(w)
 }
 

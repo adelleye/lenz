@@ -1335,6 +1335,99 @@ func TestExternalNameEnquiryRouteRejectsInvalidBody(t *testing.T) {
 	}
 }
 
+func TestExternalOutboundTransferRouteSucceedsAndMatchesSchema(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "http-external-outbound-fund",
+	})
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"source_account_id":"` + DemoCustomerAccountID + `","destination_institution_code":"` + mockNIPDemoBankCode + `","destination_account_number":"` + mockNIPDemoAccountNumber + `","destination_account_name":"` + mockNIPDemoAccountName + `","amount_minor":12000,"currency_id":"NGN","idempotency_key":"http-external-outbound","narration":"HTTP external outbound","reference":"http-external-outbound-ref","scenario":"success"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected external outbound to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	assertResponseMatchesOpenAPISchema(t, req, rec)
+	var result ExternalOutboundTransferResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.TransferID == "" ||
+		result.SourceAccountID != DemoCustomerAccountID ||
+		result.Provider != ProviderMockNIP ||
+		result.Status != TransferStatusSucceeded ||
+		result.ProviderStatus != TransferStatusSucceeded ||
+		result.LedgerStatus != LedgerStatusPosted ||
+		result.ReconciliationStatus != ReconciliationStatusMatched ||
+		result.JournalEntryID == nil ||
+		result.HoldID == nil {
+		t.Fatalf("external outbound route response mismatch: %+v", result)
+	}
+}
+
+func TestExternalOutboundTransferRouteWorksForCreatedAccount(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	account := createMemoryCustomerAccount(t, svc, ctx, "HTTPExternal", "Source", "http.external.source@example.com", uniqueAccountNumber("74"))
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "http-external-created-source-fund",
+	})
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"source_account_id":"` + account.ID + `","destination_institution_code":"` + mockNIPDemoBankCode + `","destination_account_number":"` + mockNIPDemoAccountNumber + `","amount_minor":12000,"currency_id":"NGN","idempotency_key":"http-external-created-source","reference":"http-external-created-source-ref","scenario":"success"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected external outbound to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExternalOutboundTransferRouteRequiresAuthAndTenantScope(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	body := `{"source_account_id":"` + DemoCustomerAccountID + `","destination_institution_code":"` + mockNIPDemoBankCode + `","destination_account_number":"` + mockNIPDemoAccountNumber + `","amount_minor":1000,"idempotency_key":"http-external-out-auth"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/outbound", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched tenant to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func withTestPrincipal(req *http.Request, institutionID string) *http.Request {
 	return authn.RequestWithPrincipal(req, authn.Principal{
 		InstitutionID: institutionID,

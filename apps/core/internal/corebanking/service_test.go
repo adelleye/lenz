@@ -1860,6 +1860,212 @@ func TestMockOutboundRecordsProviderUnknownOnTimeout(t *testing.T) {
 	assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000, 50000)
 }
 
+func TestExternalOutboundSuccessPostsJournalAndConsumesHold(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "external-out-success-fund",
+	})
+
+	result := externalOutbound(t, svc, ctx, externalOutboundTestInput("external-out-success", 12000, MockProviderScenarioSuccess))
+
+	if result.Status != TransferStatusSucceeded ||
+		result.ProviderStatus != TransferStatusSucceeded ||
+		result.LedgerStatus != LedgerStatusPosted ||
+		result.ReconciliationStatus != ReconciliationStatusMatched ||
+		result.JournalEntryID == nil ||
+		result.HoldID == nil {
+		t.Fatalf("external outbound success mismatch: %+v", result)
+	}
+	transfer, err := svc.GetTransfer(ctx, DemoInstitutionID, result.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJournalBalanced(t, store, transfer)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 38000)
+	assertMemoryTransferHold(t, store, result.TransferID, HoldStatusConsumed)
+}
+
+func TestExternalOutboundCreatedSourceAccountSucceeds(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	account := createMemoryCustomerAccount(t, svc, ctx, "External", "Source", "external.source@example.com", uniqueAccountNumber("73"))
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      account.ID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "external-created-source-fund",
+	})
+	input := externalOutboundTestInput("external-created-source", 12000, MockProviderScenarioSuccess)
+	input.SourceAccountID = account.ID
+
+	result := externalOutbound(t, svc, ctx, input)
+
+	if result.SourceAccountID != account.ID || result.Status != TransferStatusSucceeded || result.JournalEntryID == nil || result.HoldID == nil {
+		t.Fatalf("created source external outbound mismatch: %+v", result)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, account.ID, 38000)
+	assertMemoryTransferHold(t, store, result.TransferID, HoldStatusConsumed)
+}
+
+func TestExternalOutboundFailurePendingAndUnknownLifecycle(t *testing.T) {
+	tests := []struct {
+		name               string
+		scenario           string
+		wantStatus         string
+		wantProviderStatus string
+		wantLedgerStatus   string
+		wantReconStatus    string
+		wantAvailable      int64
+		wantLedger         int64
+		wantHoldStatus     string
+		wantReviewQueue    bool
+	}{
+		{name: "failed", scenario: MockProviderScenarioFailed, wantStatus: TransferStatusFailed, wantProviderStatus: TransferStatusFailed, wantLedgerStatus: LedgerStatusNoPosting, wantReconStatus: ReconciliationStatusNoAction, wantAvailable: 50000, wantLedger: 50000, wantHoldStatus: HoldStatusReleased},
+		{name: "pending", scenario: MockProviderScenarioPending, wantStatus: TransferStatusPending, wantProviderStatus: TransferStatusPending, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusPending, wantAvailable: 40000, wantLedger: 50000, wantHoldStatus: HoldStatusActive},
+		{name: "provider_unknown", scenario: MockProviderScenarioProviderUnknown, wantStatus: TransferStatusPending, wantProviderStatus: TransferProviderStatusUnknown, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusManualReview, wantAvailable: 40000, wantLedger: 50000, wantHoldStatus: HoldStatusActive, wantReviewQueue: true},
+		{name: "timeout", scenario: MockProviderScenarioTimeout, wantStatus: TransferStatusPending, wantProviderStatus: TransferProviderStatusUnknown, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusManualReview, wantAvailable: 40000, wantLedger: 50000, wantHoldStatus: HoldStatusActive, wantReviewQueue: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, svc, store := newTestService(t)
+			mustInternalCredit(t, svc, ctx, InternalCreditInput{
+				InstitutionID:  DemoInstitutionID,
+				AccountID:      DemoCustomerAccountID,
+				AmountMinor:    50000,
+				CurrencyID:     "NGN",
+				IdempotencyKey: "external-out-" + tt.name + "-fund",
+			})
+			journalCountBefore := len(store.journals)
+
+			result := externalOutbound(t, svc, ctx, externalOutboundTestInput("external-out-"+tt.name, 10000, tt.scenario))
+
+			if result.Status != tt.wantStatus ||
+				result.ProviderStatus != tt.wantProviderStatus ||
+				result.LedgerStatus != tt.wantLedgerStatus ||
+				result.ReconciliationStatus != tt.wantReconStatus ||
+				result.JournalEntryID != nil ||
+				result.HoldID == nil {
+				t.Fatalf("external outbound %s mismatch: %+v", tt.name, result)
+			}
+			if len(store.journals) != journalCountBefore {
+				t.Fatalf("%s created a fake journal: before=%d after=%d", tt.name, journalCountBefore, len(store.journals))
+			}
+			assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, tt.wantAvailable, tt.wantLedger)
+			assertMemoryTransferHold(t, store, result.TransferID, tt.wantHoldStatus)
+			items, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: tt.wantProviderStatus})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantReviewQueue {
+				assertReconciliationItem(t, items, result.TransferID, "provider_unknown", ReconciliationActionRequeryProvider)
+			} else {
+				assertNoReconciliationItem(t, items, result.TransferID)
+			}
+		})
+	}
+}
+
+func TestExternalOutboundRejectsBeforeProviderCall(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(*memoryStore)
+		input  ExternalOutboundTransferInput
+		want   error
+		funded bool
+	}{
+		{name: "insufficient funds", input: externalOutboundTestInput("external-out-insufficient", 60000, MockProviderScenarioSuccess), want: ErrInsufficient, funded: true},
+		{name: "frozen source", setup: func(store *memoryStore) { setMemoryAccountStatus(store, DemoCustomerAccountID, AccountStatusFrozen) }, input: externalOutboundTestInput("external-out-frozen", 10000, MockProviderScenarioSuccess), want: ErrInvalidRequest, funded: true},
+		{name: "pnd source", setup: func(store *memoryStore) {
+			setMemoryAccountStatus(store, DemoCustomerAccountID, AccountStatusPostNoDebit)
+		}, input: externalOutboundTestInput("external-out-pnd", 10000, MockProviderScenarioSuccess), want: ErrInvalidRequest, funded: true},
+		{name: "unsupported provider", input: func() ExternalOutboundTransferInput {
+			input := externalOutboundTestInput("external-out-real-provider", 10000, MockProviderScenarioSuccess)
+			input.Provider = "real_nibss"
+			return input
+		}(), want: ErrUnsupportedProvider, funded: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := newMemoryStore()
+			provider := &spyTransferProvider{initiateResult: ProviderTransferResult{Provider: ProviderMockNIP, ProviderReference: "should-not-run", Status: TransferStatusSucceeded}}
+			svc := NewService(store, provider)
+			if _, err := svc.SeedDemo(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if tt.funded {
+				mustInternalCredit(t, svc, ctx, InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, AmountMinor: 50000, CurrencyID: "NGN", IdempotencyKey: "fund-" + tt.name})
+			}
+			if tt.setup != nil {
+				tt.setup(store)
+			}
+
+			_, err := svc.ExternalOutboundTransfer(ctx, tt.input)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("expected %v, got %v", tt.want, err)
+			}
+			if provider.initiateCalls != 0 {
+				t.Fatalf("provider should not be called before validation failure, got %d calls", provider.initiateCalls)
+			}
+			if _, ok := store.idempotency[DemoInstitutionID+"|"+tt.input.IdempotencyKey]; ok {
+				t.Fatalf("validation failure created transfer state for %s", tt.input.IdempotencyKey)
+			}
+		})
+	}
+}
+
+func TestExternalOutboundIdempotencyReplayAndConflict(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{
+		initiateResult: ProviderTransferResult{
+			Provider:          ProviderMockNIP,
+			ProviderReference: "external-idem-provider-ref",
+			Status:            TransferStatusSucceeded,
+			ProviderStatus:    TransferStatusSucceeded,
+			Narration:         "provider accepted once",
+		},
+	}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "external-idem-fund",
+	})
+	input := externalOutboundTestInput("external-idem", 10000, MockProviderScenarioSuccess)
+
+	first := externalOutbound(t, svc, ctx, input)
+	second := externalOutbound(t, svc, ctx, input)
+
+	if first.TransferID != second.TransferID {
+		t.Fatalf("same request replay returned different transfer: first=%s second=%s", first.TransferID, second.TransferID)
+	}
+	if provider.initiateCalls != 1 {
+		t.Fatalf("same idempotency replay should call provider once, got %d", provider.initiateCalls)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000)
+
+	changed := input
+	changed.AmountMinor = 15000
+	if _, err := svc.ExternalOutboundTransfer(ctx, changed); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected changed idempotency request conflict, got %v", err)
+	}
+	if provider.initiateCalls != 1 {
+		t.Fatalf("changed idempotency request should not call provider again, got %d", provider.initiateCalls)
+	}
+}
+
 func TestMockInboundCallsProviderAdapter(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
@@ -1967,6 +2173,51 @@ func mockOutbound(t *testing.T, svc *Service, ctx context.Context, req TransferR
 	t.Helper()
 	transfer, err := svc.MockOutbound(ctx, req)
 	return mustTransfer(t, transfer, err)
+}
+
+func externalOutbound(t *testing.T, svc *Service, ctx context.Context, input ExternalOutboundTransferInput) *ExternalOutboundTransferResult {
+	t.Helper()
+	result, err := svc.ExternalOutboundTransfer(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func externalOutboundTestInput(idempotencyKey string, amountMinor int64, scenario string) ExternalOutboundTransferInput {
+	return ExternalOutboundTransferInput{
+		InstitutionID:              DemoInstitutionID,
+		SourceAccountID:            DemoCustomerAccountID,
+		DestinationInstitutionCode: mockNIPDemoBankCode,
+		DestinationAccountNumber:   mockNIPDemoAccountNumber,
+		DestinationAccountName:     mockNIPDemoAccountName,
+		AmountMinor:                amountMinor,
+		CurrencyID:                 "NGN",
+		IdempotencyKey:             idempotencyKey,
+		Narration:                  "External outbound test",
+		Reference:                  idempotencyKey + "-ref",
+		Scenario:                   scenario,
+	}
+}
+
+func assertMemoryTransferHold(t *testing.T, store *memoryStore, transferID, status string) {
+	t.Helper()
+	hold, ok := store.holds[transferID]
+	if !ok {
+		t.Fatalf("missing hold for transfer %s", transferID)
+	}
+	if hold.Status != status {
+		t.Fatalf("hold status mismatch: got %+v want status=%s", hold, status)
+	}
+}
+
+func assertNoReconciliationItem(t *testing.T, items []ReconciliationItem, transferID string) {
+	t.Helper()
+	for _, item := range items {
+		if item.TransferID == transferID {
+			t.Fatalf("unexpected reconciliation item %s in %+v", transferID, items)
+		}
+	}
 }
 
 func reverseTransfer(t *testing.T, svc *Service, ctx context.Context, transferID, idempotencyKey string) *Transfer {
@@ -2770,6 +3021,112 @@ func (m *memoryStore) RecordTransfer(ctx context.Context, input RecordTransferIn
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.recordTransferLocked(input)
+}
+
+func (m *memoryStore) BeginExternalOutboundTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	requestFingerprint := transferRequestFingerprint(input)
+	if id := m.idempotency[input.InstitutionID+"|"+input.IdempotencyKey]; id != "" {
+		transfer := m.transfers[id]
+		if !m.sameTransferReplayLocked(transfer, input, requestFingerprint) {
+			return nil, false, ErrConflict
+		}
+		return copyOf(transfer), false, nil
+	}
+	transfer, err := m.recordTransferLocked(input)
+	return transfer, err == nil, err
+}
+
+func (m *memoryStore) CompleteExternalOutboundTransfer(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending, ok := m.transfers[transferID]
+	if !ok || pending.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	if pending.Direction != TransferDirectionOutbound ||
+		pending.AccountID != input.AccountID ||
+		pending.AmountMinor != input.AmountMinor ||
+		pending.CurrencyID != input.CurrencyID ||
+		pending.Provider != input.Provider {
+		return nil, ErrConflict
+	}
+	if input.RequestFingerprint != "" && pending.RequestFingerprint != "" && input.RequestFingerprint != pending.RequestFingerprint {
+		return nil, ErrConflict
+	}
+	if pending.Status != TransferStatusPending {
+		return copyOf(pending), nil
+	}
+
+	account := m.accounts[pending.AccountID]
+	clearing, ok := m.accounts[input.ClearingAccountID]
+	if !ok || clearing.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	status, providerStatus, err := externalOutboundTransferStatuses(input)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	failureReason := strings.TrimSpace(input.FailureReason)
+	ledgerStatus, reconciliationStatus := transferStatuses(status)
+	if providerStatus == TransferProviderStatusUnknown {
+		reconciliationStatus = ReconciliationStatusManualReview
+	}
+	switch status {
+	case TransferStatusSucceeded:
+		if err := enforceTransferControls(input, account, clearing); err != nil {
+			return nil, err
+		}
+		hold, ok := m.holds[pending.ID]
+		if !ok || hold.Status != HoldStatusActive {
+			return nil, ErrConflict
+		}
+		journalID := m.postJournalLocked(input, pending.ID, now, pending.AccountID)
+		pending.JournalEntryID = &journalID
+		m.consumeHoldLocked(pending.ID, now)
+	case TransferStatusFailed:
+		m.releaseHoldLocked(pending.ID, now)
+	case TransferStatusPending:
+		hold, ok := m.holds[pending.ID]
+		if !ok || hold.Status != HoldStatusActive {
+			return nil, ErrConflict
+		}
+	default:
+		return nil, ErrInvalidRequest
+	}
+	pending.Status = status
+	pending.ProviderStatus = providerStatus
+	pending.LedgerStatus = ledgerStatus
+	pending.ReconciliationStatus = reconciliationStatus
+	pending.ProviderReference = firstNonBlank(input.ProviderReference, pending.ProviderReference)
+	pending.Narration = firstNonBlank(input.Narration, pending.Narration)
+	pending.UpdatedAt = now
+	if input.ProviderEventID != "" {
+		pending.ProviderEventID = &input.ProviderEventID
+	}
+	if failureReason != "" {
+		pending.FailureReason = &failureReason
+	}
+	m.transfers[pending.ID] = pending
+	if auditInput, ok := externalOutboundTransferAuditInput(input, pending, account, clearing); ok {
+		if err := m.createAuditLockedContext(ctx, auditInput); err != nil {
+			return nil, err
+		}
+	}
+	return copyOf(pending), nil
+}
+
+func (m *memoryStore) GetTransferHold(ctx context.Context, institutionID, transferID string) (*AccountHold, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	hold, ok := m.holds[transferID]
+	if !ok || hold.InstitutionID != institutionID {
+		return nil, ErrNotFound
+	}
+	return copyOf(hold), nil
 }
 
 func (m *memoryStore) ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error) {

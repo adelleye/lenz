@@ -41,18 +41,21 @@ type NameEnquiryResult struct {
 }
 
 type ProviderTransferRequest struct {
-	InstitutionID     string
-	AccountID         string
-	AmountMinor       int64
-	CurrencyID        string
-	IdempotencyKey    string
-	ProviderReference string
-	ProviderEventID   string
-	Status            string
-	FailureReason     string
-	Narration         string
-	Scenario          string
-	DelaySeconds      int64
+	InstitutionID              string
+	AccountID                  string
+	DestinationInstitutionCode string
+	DestinationAccountNumber   string
+	DestinationAccountName     string
+	AmountMinor                int64
+	CurrencyID                 string
+	IdempotencyKey             string
+	ProviderReference          string
+	ProviderEventID            string
+	Status                     string
+	FailureReason              string
+	Narration                  string
+	Scenario                   string
+	DelaySeconds               int64
 }
 
 type ProviderTransferResult struct {

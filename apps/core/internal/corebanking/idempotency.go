@@ -53,6 +53,24 @@ func mockTransferRequestFingerprint(direction string, req TransferRequest) strin
 	)
 }
 
+func externalOutboundTransferRequestFingerprint(input ExternalOutboundTransferInput) string {
+	return fingerprintValues(
+		"external_outbound_transfer",
+		input.InstitutionID,
+		input.SourceAccountID,
+		input.DestinationInstitutionCode,
+		input.DestinationAccountNumber,
+		input.DestinationAccountName,
+		strconv.FormatInt(input.AmountMinor, 10),
+		input.CurrencyID,
+		input.IdempotencyKey,
+		input.Provider,
+		input.Reference,
+		input.Narration,
+		input.Scenario,
+	)
+}
+
 func providerWebhookRequestFingerprint(event ProviderWebhookEvent, originalProviderReference string, delaySeconds int64) string {
 	return fingerprintValues(
 		"provider_webhook",

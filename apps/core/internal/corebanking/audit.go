@@ -13,18 +13,22 @@ import (
 )
 
 const (
-	AuditActionCustomerCreated        = "customer.created"
-	AuditActionAccountCreated         = "account.created"
-	AuditActionInternalCreditPosted   = "internal_credit.posted"
-	AuditActionInternalDebitPosted    = "internal_debit.posted"
-	AuditActionInternalTransferPosted = "internal_transfer.posted"
-	AuditActionAccountFrozen          = "account.frozen"
-	AuditActionAccountUnfrozen        = "account.unfrozen"
-	AuditActionPNDActivated           = "account.pnd_activated"
-	AuditActionPNDDeactivated         = "account.pnd_deactivated"
-	AuditActionLienPlaced             = "account.lien_placed"
-	AuditActionLienReleased           = "account.lien_released"
-	AuditActionReconciliationReviewed = "reconciliation.reviewed"
+	AuditActionCustomerCreated           = "customer.created"
+	AuditActionAccountCreated            = "account.created"
+	AuditActionInternalCreditPosted      = "internal_credit.posted"
+	AuditActionInternalDebitPosted       = "internal_debit.posted"
+	AuditActionInternalTransferPosted    = "internal_transfer.posted"
+	AuditActionAccountFrozen             = "account.frozen"
+	AuditActionAccountUnfrozen           = "account.unfrozen"
+	AuditActionPNDActivated              = "account.pnd_activated"
+	AuditActionPNDDeactivated            = "account.pnd_deactivated"
+	AuditActionLienPlaced                = "account.lien_placed"
+	AuditActionLienReleased              = "account.lien_released"
+	AuditActionReconciliationReviewed    = "reconciliation.reviewed"
+	AuditActionExternalOutboundSucceeded = "external_outbound.succeeded"
+	AuditActionExternalOutboundFailed    = "external_outbound.failed"
+	AuditActionExternalOutboundPending   = "external_outbound.pending"
+	AuditActionExternalOutboundUnknown   = "external_outbound.provider_unknown"
 )
 
 type auditEventInput struct {

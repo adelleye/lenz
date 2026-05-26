@@ -631,6 +631,41 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/external/transfers/outbound:
+    post:
+      operationId: externalOutboundTransfer
+      summary: Initiate a mock external outbound transfer lifecycle
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalOutboundTransferRequest"
+      responses:
+        "200":
+          description: External outbound transfer lifecycle result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIExternalOutboundTransfer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/transfers/mock/inbound:
     post:
       operationId: mockInboundTransfer
@@ -1217,6 +1252,112 @@ components:
         message:
           type: string
           minLength: 1
+        created_at:
+          type: string
+          format: date-time
+
+    ExternalOutboundTransferRequest:
+      type: object
+      required:
+        - source_account_id
+        - destination_account_number
+        - amount_minor
+        - idempotency_key
+      properties:
+        source_account_id:
+          type: string
+          format: uuid
+        destination_institution_code:
+          type: string
+          minLength: 1
+        bank_code:
+          type: string
+          minLength: 1
+          description: Alias for destination_institution_code.
+        destination_account_number:
+          type: string
+          pattern: "^[0-9]{10}$"
+        destination_account_name:
+          type: string
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+          default: NGN
+        idempotency_key:
+          type: string
+          minLength: 1
+        provider:
+          type: string
+          minLength: 1
+          default: mock_nip
+        narration:
+          type: string
+        reference:
+          type: string
+        scenario:
+          type: string
+          enum: [success, failed, pending, timeout, provider_unknown]
+          description: Mock-only test field for MockNIPProvider outcomes.
+
+    APIExternalOutboundTransfer:
+      type: object
+      required:
+        - transfer_id
+        - source_account_id
+        - provider
+        - provider_reference
+        - provider_status
+        - ledger_status
+        - reconciliation_status
+        - status
+        - amount_minor
+        - currency_id
+        - journal_entry_id
+        - hold_id
+        - created_at
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+        source_account_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          minLength: 1
+        provider_reference:
+          type: string
+        provider_status:
+          type: string
+          enum: [pending, succeeded, failed, provider_unknown]
+        ledger_status:
+          type: string
+          enum: [pending, posted, no_posting, reversal_deficit]
+        reconciliation_status:
+          type: string
+          enum: [pending, matched, no_action, manual_review]
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+        journal_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+        hold_id:
+          type: string
+          format: uuid
+          nullable: true
         created_at:
           type: string
           format: date-time

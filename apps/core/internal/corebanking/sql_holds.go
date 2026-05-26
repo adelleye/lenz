@@ -72,3 +72,12 @@ WHERE institution_id = $1 AND transfer_id = $2 AND status = 'active'
 FOR UPDATE`, institutionID, transferID)
 	return &hold, normalizeSQLError(err)
 }
+
+func (r *sqlHoldRepository) getForTransfer(ctx context.Context, runner TxRunner, institutionID, transferID string) (*AccountHold, error) {
+	var hold AccountHold
+	err := runner.GetContext(ctx, &hold, `
+SELECT id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, reference, created_at, updated_at, released_at
+FROM account_holds
+WHERE institution_id = $1 AND transfer_id = $2`, institutionID, transferID)
+	return &hold, normalizeSQLError(err)
+}

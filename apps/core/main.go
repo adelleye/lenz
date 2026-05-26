@@ -25,12 +25,8 @@ func routes(r *chi.Mux, deps server.Deps) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var providers []corebanking.TransferProvider
-	if demoRoutes {
-		providers = append(providers, corebanking.NewMockNIPProvider())
-	}
 	handler := corebanking.NewHandler(
-		corebanking.NewService(repository, providers...),
+		corebanking.NewService(repository, corebanking.NewMockNIPProvider()),
 		corebanking.WithDemoRoutes(demoRoutes),
 	)
 	handler.Routes(r)

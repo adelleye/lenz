@@ -114,6 +114,45 @@ assert_history_row() {
   assert_json "$body" "[.[] | select(.transfer_id == \"${transfer_id}\" and .direction == \"${direction}\" and .signed_amount_minor == ${signed_amount} and .status == \"succeeded\" and .journal_entry_id != null)] | length == 1" "history missing ${direction} ${signed_amount} for ${account_id}"
 }
 
+assert_history_state() {
+  local account_id="$1"
+  local transfer_id="$2"
+  local status="$3"
+  local provider_status="$4"
+  local ledger_status="$5"
+  local reconciliation_status="$6"
+  local signed_amount="$7"
+  local journal_filter="$8"
+  local body
+  body="$(request "${BASE_URL}/api/v1/accounts/${account_id}/transactions?limit=50")"
+  assert_json "$body" "[.[] | select(.transfer_id == \"${transfer_id}\" and .status == \"${status}\" and .provider_status == \"${provider_status}\" and .ledger_status == \"${ledger_status}\" and .reconciliation_status == \"${reconciliation_status}\" and .signed_amount_minor == ${signed_amount} and .journal_entry_id ${journal_filter})] | length == 1" "history missing transfer ${transfer_id} with status ${status}/${provider_status}"
+}
+
+assert_transfer_hold_status() {
+  local transfer_id="$1"
+  local want_status="$2"
+  local status
+  status="$(sql_scalar "SELECT status FROM account_holds WHERE institution_id = '${INSTITUTION_ID}' AND transfer_id = '${transfer_id}'")"
+  [[ "$status" == "$want_status" ]] || fail "hold for transfer ${transfer_id} status=${status}, want ${want_status}"
+}
+
+assert_transfer_journal_count() {
+  local transfer_id="$1"
+  local want_count="$2"
+  local count
+  count="$(sql_scalar "SELECT COUNT(*) FROM journal_entries WHERE institution_id = '${INSTITUTION_ID}' AND transfer_id = '${transfer_id}'")"
+  [[ "$count" == "$want_count" ]] || fail "journal count for transfer ${transfer_id}=${count}, want ${want_count}"
+}
+
+assert_reconciliation_item() {
+  local transfer_id="$1"
+  local review_reason="$2"
+  local action="$3"
+  local body
+  body="$(request "${BASE_URL}/api/v1/admin/reconciliation-items?provider_status=provider_unknown")"
+  assert_json "$body" "[.[] | select(.transfer_id == \"${transfer_id}\" and .review_reason == \"${review_reason}\" and .recommended_next_action == \"${action}\")] | length == 1" "missing reconciliation item ${transfer_id}"
+}
+
 assert_blocked_money_request() {
   local message="$1"
   shift
@@ -291,6 +330,52 @@ assert_history_row "$account_b_id" "$transfer_id" "credit" 300000
 assert_journal_balanced "$transfer_journal_id" 300000
 pass "transfer posted with matching history on both accounts"
 
+external_success="$(request -X POST "${BASE_URL}/api/v1/external/transfers/outbound" \
+  -H "Content-Type: application/json" \
+  -d "{\"source_account_id\":\"${account_a_id}\",\"destination_institution_code\":\"999001\",\"destination_account_number\":\"9990000001\",\"destination_account_name\":\"Ada Demo Wallet\",\"amount_minor\":25000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-external-out-success\",\"narration\":\"UAT external outbound success\",\"reference\":\"uat-external-out-success-ref\",\"scenario\":\"success\"}")"
+external_success_id="$(json_get '.transfer_id' "$external_success")"
+external_success_journal_id="$(json_get '.journal_entry_id' "$external_success")"
+assert_json "$external_success" '.status == "succeeded" and .provider_status == "succeeded" and .ledger_status == "posted" and .reconciliation_status == "matched" and .journal_entry_id != null and .hold_id != null' "external outbound success mismatch"
+assert_balance "$account_a_id" 425000 425000
+assert_transfer_hold_status "$external_success_id" "consumed"
+assert_journal_balanced "$external_success_journal_id" 25000
+assert_history_state "$account_a_id" "$external_success_id" "succeeded" "succeeded" "posted" "matched" -25000 "!= null"
+pass "external outbound success posted ledger after consuming hold"
+
+external_failed="$(request -X POST "${BASE_URL}/api/v1/external/transfers/outbound" \
+  -H "Content-Type: application/json" \
+  -d "{\"source_account_id\":\"${account_a_id}\",\"destination_institution_code\":\"999001\",\"destination_account_number\":\"9990000001\",\"amount_minor\":12000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-external-out-failed\",\"narration\":\"UAT external outbound failed\",\"reference\":\"uat-external-out-failed-ref\",\"scenario\":\"failed\"}")"
+external_failed_id="$(json_get '.transfer_id' "$external_failed")"
+assert_json "$external_failed" '.status == "failed" and .provider_status == "failed" and .ledger_status == "no_posting" and .reconciliation_status == "no_action" and .journal_entry_id == null and .hold_id != null' "external outbound failed mismatch"
+assert_balance "$account_a_id" 425000 425000
+assert_transfer_hold_status "$external_failed_id" "released"
+assert_transfer_journal_count "$external_failed_id" 0
+assert_history_state "$account_a_id" "$external_failed_id" "failed" "failed" "no_posting" "no_action" 0 "== null"
+pass "external outbound failure released hold without a journal"
+
+external_pending="$(request -X POST "${BASE_URL}/api/v1/external/transfers/outbound" \
+  -H "Content-Type: application/json" \
+  -d "{\"source_account_id\":\"${account_a_id}\",\"destination_institution_code\":\"999001\",\"destination_account_number\":\"9990000001\",\"amount_minor\":10000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-external-out-pending\",\"narration\":\"UAT external outbound pending\",\"reference\":\"uat-external-out-pending-ref\",\"scenario\":\"pending\"}")"
+external_pending_id="$(json_get '.transfer_id' "$external_pending")"
+assert_json "$external_pending" '.status == "pending" and .provider_status == "pending" and .ledger_status == "pending" and .reconciliation_status == "pending" and .journal_entry_id == null and .hold_id != null' "external outbound pending mismatch"
+assert_balance "$account_a_id" 415000 425000
+assert_transfer_hold_status "$external_pending_id" "active"
+assert_transfer_journal_count "$external_pending_id" 0
+assert_history_state "$account_a_id" "$external_pending_id" "pending" "pending" "pending" "pending" 0 "== null"
+pass "external outbound pending kept active hold without a journal"
+
+external_unknown="$(request -X POST "${BASE_URL}/api/v1/external/transfers/outbound" \
+  -H "Content-Type: application/json" \
+  -d "{\"source_account_id\":\"${account_a_id}\",\"destination_institution_code\":\"999001\",\"destination_account_number\":\"9990000001\",\"amount_minor\":8000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-external-out-unknown\",\"narration\":\"UAT external outbound unknown\",\"reference\":\"uat-external-out-unknown-ref\",\"scenario\":\"provider_unknown\"}")"
+external_unknown_id="$(json_get '.transfer_id' "$external_unknown")"
+assert_json "$external_unknown" '.status == "pending" and .provider_status == "provider_unknown" and .ledger_status == "pending" and .reconciliation_status == "manual_review" and .journal_entry_id == null and .hold_id != null' "external outbound provider_unknown mismatch"
+assert_balance "$account_a_id" 407000 425000
+assert_transfer_hold_status "$external_unknown_id" "active"
+assert_transfer_journal_count "$external_unknown_id" 0
+assert_reconciliation_item "$external_unknown_id" "provider_unknown" "requery_provider"
+assert_history_state "$account_a_id" "$external_unknown_id" "pending" "provider_unknown" "pending" "manual_review" 0 "== null"
+pass "external provider_unknown kept hold, avoided fallback, and entered reconciliation"
+
 lien="$(request -X POST "${BASE_URL}/api/v1/accounts/${account_b_id}/liens" \
   -H "Content-Type: application/json" \
   -d '{"amount_minor":100000,"currency_id":"NGN","reference":"uat-lien-001","reason":"UAT ops hold"}')"
@@ -316,7 +401,7 @@ pnd_transfer_in="$(request -X POST "${BASE_URL}/api/v1/internal/transfers" \
   -H "Content-Type: application/json" \
   -d "{\"source_account_id\":\"${account_a_id}\",\"destination_account_id\":\"${account_b_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-pnd-transfer-in-001\",\"narration\":\"UAT PND transfer in\",\"reference\":\"uat-pnd-transfer-in-ref-001\"}")"
 assert_json "$pnd_transfer_in" '.status == "succeeded" and .journal_entry_id != null' "PND transfer-in should succeed"
-assert_balance "$account_a_id" 449000 449000
+assert_balance "$account_a_id" 406000 424000
 assert_balance "$account_b_id" 202000 302000
 pass "PND blocked outflows and allowed inflows"
 
@@ -346,7 +431,7 @@ assert_blocked_money_request "frozen transfer out should fail" -X POST "${BASE_U
   -H "Content-Type: application/json" \
   -d "{\"source_account_id\":\"${account_b_id}\",\"destination_account_id\":\"${account_a_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-freeze-transfer-out-blocked\",\"narration\":\"blocked\",\"reference\":\"uat-freeze-transfer-out-blocked\"}"
 assert_no_transfers_for_keys "'uat-pnd-debit-blocked','uat-pnd-transfer-out-blocked','uat-freeze-credit-blocked','uat-freeze-debit-blocked','uat-freeze-transfer-in-blocked','uat-freeze-transfer-out-blocked'"
-assert_balance "$account_a_id" 449000 449000
+assert_balance "$account_a_id" 406000 424000
 assert_balance "$account_b_id" 202000 302000
 pass "freeze blocked all money movement"
 
@@ -357,6 +442,10 @@ assert_audit_action_count "account.created" 2
 assert_audit_action_count "internal_credit.posted" 2
 assert_audit_action_count "internal_debit.posted" 1
 assert_audit_action_count "internal_transfer.posted" 2
+assert_audit_action_count "external_outbound.succeeded" 1
+assert_audit_action_count "external_outbound.failed" 1
+assert_audit_action_count "external_outbound.pending" 1
+assert_audit_action_count "external_outbound.provider_unknown" 1
 assert_audit_action_count "account.lien_placed" 1
 assert_audit_action_count "account.pnd_activated" 1
 assert_audit_action_count "account.pnd_deactivated" 1

@@ -458,8 +458,29 @@ pnd_off_account="$(request -X DELETE "${BASE_URL}/api/v1/accounts/${control_acco
 assert_json "$pnd_off_account" '.status == "active"' "PND deactivation did not mark account active"
 pass "PND deactivation restored active account status"
 
+external_outbound="$(request -X POST "${BASE_URL}/api/v1/external/transfers/outbound" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"source_account_id\":\"${control_account_id}\",\"destination_institution_code\":\"999001\",\"destination_account_number\":\"9990000001\",\"destination_account_name\":\"Ada Demo Wallet\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-external-outbound-success\",\"reference\":\"demo-external-outbound-success-ref\",\"narration\":\"Demo external outbound\",\"scenario\":\"success\"}")"
+external_outbound_journal_id="$(json_get '.journal_entry_id' "$external_outbound")"
+assert_json "$external_outbound" '.status == "succeeded" and .provider_status == "succeeded" and .ledger_status == "posted" and .reconciliation_status == "matched" and .journal_entry_id != null and .hold_id != null' "external outbound success mismatch"
+assert_account_balance_pair "$control_account_id" 5000 5000
+assert_journal_balanced "$external_outbound_journal_id" 1000
+pass "external outbound success consumed its hold and posted a balanced journal"
+
+external_unknown="$(request -X POST "${BASE_URL}/api/v1/external/transfers/outbound" \
+  -H 'Content-Type: application/json' \
+  -H "X-Institution-ID: ${INSTITUTION_ID}" \
+  -d "{\"source_account_id\":\"${control_account_id}\",\"destination_institution_code\":\"999001\",\"destination_account_number\":\"9990000001\",\"amount_minor\":500,\"currency_id\":\"NGN\",\"idempotency_key\":\"demo-external-outbound-unknown\",\"reference\":\"demo-external-outbound-unknown-ref\",\"narration\":\"Demo external outbound unknown\",\"scenario\":\"provider_unknown\"}")"
+external_unknown_id="$(json_get '.transfer_id' "$external_unknown")"
+assert_json "$external_unknown" '.status == "pending" and .provider_status == "provider_unknown" and .ledger_status == "pending" and .reconciliation_status == "manual_review" and .journal_entry_id == null and .hold_id != null' "external provider_unknown mismatch"
+assert_account_balance_pair "$control_account_id" 4500 5000
+reconciliation_items="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/admin/reconciliation-items?provider_status=provider_unknown")"
+assert_json "$reconciliation_items" "[.[] | select(.transfer_id == \"${external_unknown_id}\" and .review_reason == \"provider_unknown\" and .recommended_next_action == \"requery_provider\")] | length == 1" "external provider_unknown was not surfaced in reconciliation queue"
+pass "external provider_unknown kept a hold without posting and entered reconciliation"
+
 transfers="$(request -H "X-Institution-ID: ${INSTITUTION_ID}" "${BASE_URL}/api/v1/admin/transfers")"
-assert_json "$transfers" 'length >= 11' "admin transfer list did not include demo and account-control transfer records"
+assert_json "$transfers" 'length >= 13' "admin transfer list did not include demo and account-control transfer records"
 pass "admin transfer list returned all demo transfers"
 
 assert_audit_action "customer.created"
@@ -473,6 +494,8 @@ assert_audit_action "account.pnd_activated"
 assert_audit_action "account.pnd_deactivated"
 assert_audit_action "account.lien_placed"
 assert_audit_action "account.lien_released"
+assert_audit_action "external_outbound.succeeded"
+assert_audit_action "external_outbound.provider_unknown"
 audit_link_count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND action = 'internal_credit.posted' AND account_id = '${control_account_id}' AND transfer_id = '${control_credit_id}' AND journal_entry_id = '${control_credit_journal_id}'")"
 [[ "$audit_link_count" == "1" ]] || fail "internal credit audit link mismatch: ${audit_link_count}"
 transfer_audit_link_count="$(sql_scalar "SELECT COUNT(*) FROM audit_events WHERE institution_id = '${INSTITUTION_ID}' AND action = 'internal_transfer.posted' AND account_id = '${control_account_id}' AND transfer_id = '${control_transfer_id}' AND journal_entry_id = '${control_transfer_journal_id}'")"

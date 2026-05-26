@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	MockProviderScenarioSuccess   = "success"
-	MockProviderScenarioPending   = "pending"
-	MockProviderScenarioFailed    = "failed"
-	MockProviderScenarioDuplicate = "duplicate"
-	MockProviderScenarioDelayed   = "delayed"
-	MockProviderScenarioReversal  = "reversal"
+	MockProviderScenarioSuccess         = "success"
+	MockProviderScenarioPending         = "pending"
+	MockProviderScenarioFailed          = "failed"
+	MockProviderScenarioTimeout         = "timeout"
+	MockProviderScenarioProviderUnknown = "provider_unknown"
+	MockProviderScenarioDuplicate       = "duplicate"
+	MockProviderScenarioDelayed         = "delayed"
+	MockProviderScenarioReversal        = "reversal"
 )
 
 const (
@@ -93,8 +95,12 @@ func (p *MockNIPProvider) InitiateTransfer(ctx context.Context, request Provider
 	if strings.TrimSpace(request.AccountID) == "" || request.AmountMinor <= 0 || strings.TrimSpace(request.IdempotencyKey) == "" {
 		return nil, ErrInvalidRequest
 	}
+	scenario := mockScenario(request.Scenario)
+	if scenario == MockProviderScenarioTimeout {
+		return nil, ErrProviderStatusUnknown
+	}
 
-	status, failureReason, delayed, err := p.resolveScenario(request.Status, request.FailureReason, request.Scenario)
+	status, failureReason, delayed, err := p.resolveScenario(request.Status, request.FailureReason, scenario)
 	if err != nil {
 		return nil, err
 	}
@@ -103,9 +109,14 @@ func (p *MockNIPProvider) InitiateTransfer(ctx context.Context, request Provider
 		ProviderReference: p.providerReference("mock-nip-out", request.ProviderReference),
 		ProviderEventID:   strings.TrimSpace(request.ProviderEventID),
 		Status:            status,
+		ProviderStatus:    status,
 		FailureReason:     failureReason,
 		Narration:         strings.TrimSpace(request.Narration),
 		Delayed:           delayed,
+	}
+	if scenario == MockProviderScenarioProviderUnknown {
+		result.ProviderStatus = TransferProviderStatusUnknown
+		result.FailureReason = providerUnknownFailureReason
 	}
 	if delayed {
 		delayedUntil := p.clock().Add(delayDuration(request.DelaySeconds))
@@ -224,7 +235,7 @@ type mockWebhookPayload struct {
 func (p *MockNIPProvider) resolveScenario(requestedStatus, requestedFailureReason, scenario string) (string, string, bool, error) {
 	status := strings.ToLower(strings.TrimSpace(requestedStatus))
 	failureReason := strings.TrimSpace(requestedFailureReason)
-	scenario = strings.ToLower(strings.TrimSpace(scenario))
+	scenario = mockScenario(scenario)
 	if scenario == "" {
 		scenario = MockProviderScenarioSuccess
 	}
@@ -235,7 +246,7 @@ func (p *MockNIPProvider) resolveScenario(requestedStatus, requestedFailureReaso
 		if status == "" {
 			status = TransferStatusSucceeded
 		}
-	case MockProviderScenarioPending:
+	case MockProviderScenarioPending, MockProviderScenarioProviderUnknown:
 		status = TransferStatusPending
 	case MockProviderScenarioFailed:
 		status = TransferStatusFailed
@@ -260,6 +271,10 @@ func (p *MockNIPProvider) resolveScenario(requestedStatus, requestedFailureReaso
 		return "", "", false, ErrInvalidRequest
 	}
 	return status, failureReason, delayed, nil
+}
+
+func mockScenario(scenario string) string {
+	return strings.ToLower(strings.TrimSpace(scenario))
 }
 
 func (p *MockNIPProvider) providerReference(prefix, existing string) string {

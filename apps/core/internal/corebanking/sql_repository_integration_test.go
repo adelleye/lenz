@@ -204,6 +204,97 @@ func TestSQLRepositoryTransferSpineIntegration(t *testing.T) {
 	}
 }
 
+func TestSQLExternalOutboundTransferLifecycleIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := seededSQLService(t, db, ctx)
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "sql-external-outbound-fund",
+	})
+
+	successResult := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-external-outbound-success", 12000, MockProviderScenarioSuccess))
+	successTransfer := mustGetSQLTransfer(t, svc, ctx, successResult.TransferID)
+	if successResult.HoldID == nil || successTransfer.JournalEntryID == nil {
+		t.Fatalf("successful external outbound should return hold and journal: result=%+v transfer=%+v", successResult, successTransfer)
+	}
+	assertStatus(t, successTransfer, TransferStatusSucceeded)
+	assertSQLBalance(t, svc, ctx, 38000)
+	assertSQLJournalBalanced(t, svc, ctx, successTransfer, 12000)
+	assertSQLTransferHold(t, ctx, db, successTransfer.ID, HoldStatusConsumed)
+
+	failedResult := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-external-outbound-failed", 5000, MockProviderScenarioFailed))
+	failedTransfer := mustGetSQLTransfer(t, svc, ctx, failedResult.TransferID)
+	if failedTransfer.JournalEntryID != nil || failedTransfer.LedgerStatus != LedgerStatusNoPosting || failedTransfer.ReconciliationStatus != ReconciliationStatusNoAction {
+		t.Fatalf("failed external outbound should not post journal: %+v", failedTransfer)
+	}
+	assertSQLBalance(t, svc, ctx, 38000)
+	assertSQLTransferHold(t, ctx, db, failedTransfer.ID, HoldStatusReleased)
+	assertSQLJournalCountByTransfer(t, ctx, db, failedTransfer.ID, 0)
+
+	pendingResult := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-external-outbound-pending", 7000, MockProviderScenarioPending))
+	pendingTransfer := mustGetSQLTransfer(t, svc, ctx, pendingResult.TransferID)
+	if pendingTransfer.JournalEntryID != nil || pendingTransfer.LedgerStatus != LedgerStatusPending || pendingTransfer.ReconciliationStatus != ReconciliationStatusPending {
+		t.Fatalf("pending external outbound should keep hold without journal: %+v", pendingTransfer)
+	}
+	assertSQLBalancePair(t, svc, ctx, 31000, 38000)
+	assertSQLTransferHold(t, ctx, db, pendingTransfer.ID, HoldStatusActive)
+	assertSQLJournalCountByTransfer(t, ctx, db, pendingTransfer.ID, 0)
+
+	unknownResult := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-external-outbound-unknown", 6000, MockProviderScenarioProviderUnknown))
+	unknownTransfer := mustGetSQLTransfer(t, svc, ctx, unknownResult.TransferID)
+	if unknownTransfer.ProviderStatus != TransferProviderStatusUnknown ||
+		unknownTransfer.LedgerStatus != LedgerStatusPending ||
+		unknownTransfer.ReconciliationStatus != ReconciliationStatusManualReview ||
+		unknownTransfer.JournalEntryID != nil {
+		t.Fatalf("provider_unknown external outbound mismatch: %+v", unknownTransfer)
+	}
+	assertSQLBalancePair(t, svc, ctx, 25000, 38000)
+	assertSQLTransferHold(t, ctx, db, unknownTransfer.ID, HoldStatusActive)
+	assertSQLJournalCountByTransfer(t, ctx, db, unknownTransfer.ID, 0)
+	reconItems, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: TransferProviderStatusUnknown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationItem(t, reconItems, unknownTransfer.ID, "provider_unknown", ReconciliationActionRequeryProvider)
+
+	if _, err := svc.ExternalOutboundTransfer(ctx, externalOutboundTestInput("sql-external-outbound-overspend", 26000, MockProviderScenarioSuccess)); !errors.Is(err, ErrInsufficient) {
+		t.Fatalf("expected active holds to block overspend, got %v", err)
+	}
+	assertSQLTransferCountByIdempotency(t, ctx, db, "sql-external-outbound-overspend", 0)
+
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSQLHistoryRow(t, history, successTransfer.ID, TransferStatusSucceeded, -12000, true)
+	assertSQLHistoryRow(t, history, failedTransfer.ID, TransferStatusFailed, 0, false)
+	assertSQLHistoryRow(t, history, pendingTransfer.ID, TransferStatusPending, 0, false)
+	assertSQLHistoryRow(t, history, unknownTransfer.ID, TransferStatusPending, 0, false)
+
+	if _, err := svc.ExternalOutboundTransfer(ctx, ExternalOutboundTransferInput{
+		InstitutionID:              "99999999-9999-9999-9999-999999999999",
+		SourceAccountID:            DemoCustomerAccountID,
+		DestinationInstitutionCode: mockNIPDemoBankCode,
+		DestinationAccountNumber:   mockNIPDemoAccountNumber,
+		AmountMinor:                1000,
+		CurrencyID:                 "NGN",
+		IdempotencyKey:             "sql-external-outbound-cross-tenant",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-tenant external outbound to fail, got %v", err)
+	}
+
+	if err := assertAllSQLJournalsBalanced(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSQLRepositoryCustomerCreateGetIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()
@@ -1407,7 +1498,7 @@ func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 		Narration:         "WithTx commit proof",
 	}
 	if err := WithTx(ctx, db, func(tx TxRunner) error {
-		_, err := repo.sqlTransferRepository.recordTransfer(ctx, tx, commitInput)
+		_, _, err := repo.sqlTransferRepository.recordTransfer(ctx, tx, commitInput)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1430,7 +1521,7 @@ func TestWithTxCommitsAndRollsBackMoneyMovementIntegration(t *testing.T) {
 	}
 	forcedRollback := errors.New("force rollback after posting")
 	err := WithTx(ctx, db, func(tx TxRunner) error {
-		if _, err := repo.sqlTransferRepository.recordTransfer(ctx, tx, rollbackInput); err != nil {
+		if _, _, err := repo.sqlTransferRepository.recordTransfer(ctx, tx, rollbackInput); err != nil {
 			return err
 		}
 		return forcedRollback
@@ -1647,6 +1738,15 @@ func createSQLCustomerAccount(t *testing.T, svc *Service, ctx context.Context, f
 	return account
 }
 
+func mustGetSQLTransfer(t *testing.T, svc *Service, ctx context.Context, transferID string) *Transfer {
+	t.Helper()
+	transfer, err := svc.GetTransfer(ctx, DemoInstitutionID, transferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return transfer
+}
+
 func runConcurrentTransfers(t *testing.T, count int, fn func(int) (*Transfer, error)) []concurrentTransferResult {
 	t.Helper()
 	start := make(chan struct{})
@@ -1815,6 +1915,34 @@ WHERE t.institution_id = $1 AND t.provider_reference = $2 AND t.direction = $3`,
 	}
 	if count != want {
 		t.Fatalf("journal count for provider_reference %q direction %q = %d, want %d", providerReference, direction, count, want)
+	}
+}
+
+func assertSQLJournalCountByTransfer(t *testing.T, ctx context.Context, db *sqlx.DB, transferID string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM journal_entries
+WHERE institution_id = $1 AND transfer_id = $2`, DemoInstitutionID, transferID); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("journal count for transfer %q = %d, want %d", transferID, count, want)
+	}
+}
+
+func assertSQLTransferHold(t *testing.T, ctx context.Context, db *sqlx.DB, transferID, wantStatus string) {
+	t.Helper()
+	var hold AccountHold
+	if err := db.GetContext(ctx, &hold, `
+SELECT id, institution_id, account_id, transfer_id, amount_minor, currency_id, status, reason, reference, created_at, updated_at, released_at
+FROM account_holds
+WHERE institution_id = $1 AND transfer_id = $2`, DemoInstitutionID, transferID); err != nil {
+		t.Fatal(err)
+	}
+	if hold.Status != wantStatus {
+		t.Fatalf("hold for transfer %s status=%s, want %s: %+v", transferID, hold.Status, wantStatus, hold)
 	}
 }
 
@@ -2069,6 +2197,26 @@ func assertSQLHistory(t *testing.T, history []Transaction, inboundID, outboundID
 			t.Fatalf("non-posted history row should not have a journal: %+v", got)
 		}
 	}
+}
+
+func assertSQLHistoryRow(t *testing.T, history []Transaction, transferID, status string, signedMinor int64, hasJournal bool) {
+	t.Helper()
+	for _, row := range history {
+		if row.TransferID != transferID {
+			continue
+		}
+		if row.Status != status || row.SignedAmountMinor != signedMinor {
+			t.Fatalf("history row mismatch for transfer %s: got %+v want status=%s signed=%d", transferID, row, status, signedMinor)
+		}
+		if hasJournal && row.JournalEntryID == nil {
+			t.Fatalf("history row should have journal: %+v", row)
+		}
+		if !hasJournal && row.JournalEntryID != nil {
+			t.Fatalf("history row should not have journal: %+v", row)
+		}
+		return
+	}
+	t.Fatalf("missing history row for transfer %s: %+v", transferID, history)
 }
 
 func assertAllSQLJournalsBalanced(ctx context.Context, db *sqlx.DB) error {

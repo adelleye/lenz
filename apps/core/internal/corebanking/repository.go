@@ -42,6 +42,9 @@ type TransferRepository interface {
 	GetTransferByIdempotency(ctx context.Context, institutionID, idempotencyKey string) (*Transfer, error)
 	ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error)
 	RecordTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, error)
+	BeginExternalOutboundTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, bool, error)
+	CompleteExternalOutboundTransfer(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error)
+	GetTransferHold(ctx context.Context, institutionID, transferID string) (*AccountHold, error)
 	ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error)
 }
 
