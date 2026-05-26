@@ -1,309 +1,57 @@
 # Transfer Engine Demo
 
-This demo proves the first Lenz Core transaction spine:
+`scripts/demo_transfer_spine.sh` is the one-command proof for the fuller mock
+provider transaction spine.
 
-institution -> customer -> account -> hold -> ledger -> transfer-in -> transfer-out -> transaction history.
-
-It also proves the current account policy boundary: standard customer accounts
-cannot initiate spend above available balance, pending outbound transfers
-reserve available balance without posting ledger money, and reversal deficits
-are marked for manual review.
-
-## Prerequisites
-
-- Go 1.25.6+
-- Docker with Compose
-- `jq`
-
-The API defaults to:
+Run it from the repository root:
 
 ```sh
-DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:5432/lenzcore?sslmode=disable'
-PORT=3001
+TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/demo_transfer_spine.sh
 ```
 
-All non-health routes require a bearer token. The local demo script starts the
-API with `LENZ_DEMO_MODE=true` and a throwaway `LENZ_DEV_AUTH_TOKEN` so the
-demo-only seed/mock routes are explicit and unavailable by default.
-
-## Start Locally
-
-The verified one-command proof is:
-
-```sh
-./scripts/demo_transfer_spine.sh
-```
-
-If your shell does not have `go` on `PATH`, pass an explicit Go binary:
-
-```sh
-GO_BIN=/path/to/go ./scripts/demo_transfer_spine.sh
-```
-
-The script resets the repo's demo database volume for a clean proof run, starts
-Postgres and Redis, runs migrations, runs the normal Go test suite, runs the
-Postgres-backed integration test suite, starts the API, and asserts the transfer
-spine over HTTP.
-
-By default the script maps Postgres to host port `55432` to avoid colliding with
-an existing local Postgres on `5432`. Override it with `POSTGRES_PORT=5432` if
-that port is free.
-
-Manual flow:
-
-```sh
-docker compose -f infra/docker/docker-compose.yml up -d postgres redis
-go run ./apps/core/cmd/migrate
-LENZ_DEMO_MODE=true LENZ_DEV_AUTH_TOKEN=local-demo-token go run ./apps/core
-```
-
-If port `5432` is already used by another local Postgres, run:
-
-```sh
-POSTGRES_PORT=55432 docker compose -f infra/docker/docker-compose.yml up -d postgres redis
-export DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable'
-go run ./apps/core/cmd/migrate
-LENZ_DEMO_MODE=true LENZ_DEV_AUTH_TOKEN=local-demo-token go run ./apps/core
-```
-
-In another terminal:
-
-```sh
-curl -s http://localhost:3001/api/v1/health
-```
-
-Expected:
-
-```json
-{"status":"ok"}
-```
-
-## Seed Demo Data
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/demo/seed \
-  -H 'Authorization: Bearer local-demo-token'
-```
-
-Important seeded IDs:
+Expected final line:
 
 ```text
-institution_id=11111111-1111-1111-1111-111111111111
-customer_id=33333333-3333-3333-3333-333333333333
-account_id=44444444-4444-4444-4444-444444444444
-clearing_account_id=55555555-5555-5555-5555-555555555555
+DEMO TRANSFER SPINE: PASS
 ```
 
-## Read Customer Accounts
+## What The Script Does
+
+The script:
+
+- resets the local Docker Postgres/Redis services for a clean run;
+- runs migrations;
+- runs Go tests and SQL integration checks;
+- starts the API with `LENZ_DEMO_MODE=true`;
+- seeds a demo institution, branch, customer, wallet account, and clearing
+  account;
+- exercises mock inbound, outbound, pending, failed, reversal, admin, history,
+  reconciliation, and requery flows over HTTP;
+- verifies journals balance and cached balances reconcile to ledger postings
+  and active holds.
+
+## What It Proves
+
+- successful inbound credits once;
+- duplicate idempotency keys and duplicate provider events do not double-post;
+- successful outbound debits once;
+- pending outbound creates a hold without posting;
+- failed pending outbound releases the hold without posting;
+- successful pending outbound consumes the hold and posts one journal;
+- pending/provider-unknown requery keeps unresolved transfers visible;
+- reversal creates a new ledger event and can enter manual review;
+- transaction history comes from Lenz records;
+- admin transfer, journal, and reconciliation paths expose the expected state.
+
+## What It Does Not Prove
+
+The demo does not connect to real NIBSS, BankOne, Monnify, Interswitch,
+Providus, or a sponsor bank. It does not prove production auth, signed
+webhooks, maker-checker, KYC/BVN/NIN, limits, fraud monitoring, statements, or
+regulatory reporting.
+
+For the non-demo CBA v0.1 proof, run:
 
 ```sh
-curl -s http://localhost:3001/api/v1/customers/33333333-3333-3333-3333-333333333333/accounts \
-  -H 'Authorization: Bearer local-demo-token' \
-  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
+TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/uat_simple_transaction_cba.sh
 ```
-
-Expected: one customer wallet account with account number `9990000001`.
-
-The demo wallet is a `standard_wallet` account with
-`allow_negative_balance: false`.
-
-## Transfer In
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/transfers/mock/inbound \
-  -H 'Authorization: Bearer local-demo-token' \
-  -H 'Content-Type: application/json' \
-  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111' \
-  -H 'Idempotency-Key: demo-in-001' \
-  -d '{
-    "account_id": "44444444-4444-4444-4444-444444444444",
-    "amount_minor": 500000,
-    "provider_event_id": "mock-event-in-001",
-    "provider_reference": "nip-in-001",
-    "narration": "Mock inbound transfer"
-  }'
-```
-
-Expected: `status` is `succeeded`, `journal_entry_id` is present, and the
-journal contains one debit and one credit for the same minor-unit amount.
-
-Check balance:
-
-```sh
-curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-444444444444/balance \
-  -H 'Authorization: Bearer local-demo-token' \
-  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
-```
-
-Expected: `available_minor` and `ledger_minor` are `500000`.
-
-## Duplicate Protection
-
-Repeat the transfer-in call with the same `Idempotency-Key`; the returned
-transfer ID should be unchanged and the balance should remain `500000`.
-
-Repeat it with a new `Idempotency-Key` but the same `provider_event_id`; the
-returned transfer ID should still be the original transfer and the balance
-should remain `500000`.
-
-## Transfer Out
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/transfers/mock/outbound \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-out-001' \
-  -d '{
-    "account_id": "44444444-4444-4444-4444-444444444444",
-    "amount_minor": 125000,
-    "provider_reference": "nip-out-001",
-    "narration": "Mock outbound transfer"
-  }'
-```
-
-Expected: `status` is `succeeded`.
-
-Balance should now be `375000`.
-
-## Pending Outbound Holds
-
-Pending outbound transfer:
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/transfers/mock/outbound \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-pending-out-001' \
-  -d '{
-    "account_id": "44444444-4444-4444-4444-444444444444",
-    "amount_minor": 50000,
-    "provider_reference": "nip-pending-out-001",
-    "status": "pending",
-    "narration": "Pending outbound transfer"
-  }'
-```
-
-Expected: `status` is `pending`, `journal_entry_id` is absent, ledger balance
-stays `375000`, and available balance drops to `325000`.
-
-Failed settlement for the same provider reference:
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/transfers/mock/outbound \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-pending-out-failed-001' \
-  -d '{
-    "account_id": "44444444-4444-4444-4444-444444444444",
-    "amount_minor": 50000,
-    "provider_reference": "nip-pending-out-001",
-    "status": "failed",
-    "narration": "Failed pending outbound transfer"
-  }'
-```
-
-Expected: the same transfer is marked `failed`, the hold is released, no ledger
-posting is created, and both available and ledger balance return to `375000`.
-
-Successful settlement follows the same pattern but with `status: "succeeded"`:
-the transfer receives a journal entry, the hold is consumed, and available and
-ledger balance become equal after the posting.
-
-## Pending And Failed Transfers
-
-Pending inbound transfer, no ledger posting and no available-balance increase:
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/transfers/mock/inbound \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-pending-001' \
-  -d '{
-    "account_id": "44444444-4444-4444-4444-444444444444",
-    "amount_minor": 100000,
-    "provider_event_id": "mock-event-pending-001",
-    "status": "pending",
-    "narration": "Pending inbound transfer"
-  }'
-```
-
-Failed transfer, no ledger posting:
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/transfers/mock/outbound \
-  -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: demo-failed-001' \
-  -d '{
-    "account_id": "44444444-4444-4444-4444-444444444444",
-    "amount_minor": 999999999,
-    "narration": "Insufficient funds demo"
-  }'
-```
-
-Expected: `status` is `failed`, `failure_reason` is `insufficient_funds`, and
-balance is unchanged.
-
-## Transaction History
-
-```sh
-curl -s http://localhost:3001/api/v1/accounts/44444444-4444-4444-4444-444444444444/transactions \
-  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
-```
-
-Expected: succeeded rows have `journal_entry_id` and signed amounts from Lenz
-postings. Pending and failed rows appear with `signed_amount_minor: 0`.
-
-## Journal Inspection
-
-Use a `journal_entry_id` from a succeeded transfer:
-
-```sh
-curl -s http://localhost:3001/api/v1/admin/ledger/journal/<journal_entry_id> \
-  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
-```
-
-Expected:
-
-```json
-{
-  "balanced": true,
-  "postings": [
-    {"direction": "debit", "amount_minor": 500000},
-    {"direction": "credit", "amount_minor": 500000}
-  ]
-}
-```
-
-## Reversal
-
-Reverse a succeeded transfer:
-
-```sh
-curl -s -X POST http://localhost:3001/api/v1/transfers/<transfer_id>/reverse \
-  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111' \
-  -H 'Idempotency-Key: demo-reversal-001'
-```
-
-Expected: a new transfer is created with `direction: reversal`,
-`reversal_of_transfer_id` set to the original transfer, and a new balanced
-journal entry. The original ledger history is not deleted.
-
-If the reversal pushes the standard customer wallet below zero, the transfer is
-still posted but marked `ledger_status: reversal_deficit` and
-`reconciliation_status: manual_review`.
-
-## Admin Transfer List
-
-```sh
-curl -s http://localhost:3001/api/v1/admin/transfers \
-  -H 'X-Institution-ID: 11111111-1111-1111-1111-111111111111'
-```
-
-Expected: all demo transfer records for the demo institution.
-
-## Provider Adapter Boundary
-
-The mock routes now go through `MockNIPProvider`, which implements the provider
-adapter contract described in [Provider Adapters](PROVIDER_ADAPTERS.md). The
-mock provider simulates provider responses and webhook payloads; Lenz Core still
-owns the ledger, balances, history, idempotency, duplicate provider-event
-protection, and reversals.
-
-See [Architecture Decisions](ARCHITECTURE_DECISIONS.md) for the policy model
-that must hold before real provider integrations are added.

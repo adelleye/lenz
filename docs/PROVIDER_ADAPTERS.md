@@ -1,12 +1,11 @@
 # Provider Adapters
 
-Lenz Core keeps provider-specific behavior behind a transfer provider adapter.
-The ledger, balances, transaction history, idempotency, duplicate provider-event
-protection, and reconciliation state remain owned by Lenz Core.
+Provider adapters translate external provider behavior into a small Lenz Core
+contract. The ledger and reconciliation decisions stay inside Lenz Core.
 
 ## Interface
 
-The current adapter contract is:
+The current transfer-provider contract is:
 
 ```go
 type TransferProvider interface {
@@ -18,63 +17,64 @@ type TransferProvider interface {
 }
 ```
 
-Adapters translate provider behavior into Lenz Core transfer results and
-webhook events. They do not post journals, mutate balances, write transaction
-history, or decide tenant scoping.
+Adapters may parse provider payloads, map provider statuses, and return
+provider references. They must not:
 
-## MockNIPProvider
+- post journals;
+- mutate balances;
+- create or release holds;
+- decide tenant scope;
+- suppress reconciliation exceptions;
+- silently fall back to another provider.
 
-`MockNIPProvider` is the only implemented adapter. It is demo-only and is wired
-for the mock transfer routes. It supports:
+## Current Adapter
 
-- inbound webhook parsing for successful, pending, failed, duplicate, delayed,
-  and reversal scenarios;
-- outbound transfer initiation for successful, pending, and failed outcomes;
-- generated provider references when a request omits one;
+`MockNIPProvider` is the only implemented adapter. It is mock-only and exists to
+prove provider-shaped flows locally.
+
+It supports:
+
+- account-name enquiry simulation;
+- outbound initiation scenarios: `success`, `pending`, `failed`, `timeout`,
+  and `provider_unknown`;
+- inbound event parsing for success, pending, failed, duplicate, delayed, and
+  reversal-style mock scenarios;
 - requery of initiated mock transfers;
-- account-name enquiry simulation.
+- explicit mock requery override scenarios: `success`, `pending`, `failed`,
+  `timeout`, and `provider_unknown`;
+- generated provider references when a request omits one.
 
-Mock scenarios are controlled by the optional `scenario` JSON/request field:
-`success`, `pending`, `failed`, `duplicate`, `delayed`, or `reversal`.
-Duplicate protection is still enforced by Lenz Core through provider event IDs,
-not by trusting the mock provider.
+Duplicate protection is enforced by Lenz Core using idempotency keys and
+provider event IDs. It is not trusted to provider memory.
 
-## Future Adapters
+## Who Owns What
 
-A future Monnify, Interswitch, NIBSS, Providus, sponsor-bank, or BankOne
-adapter should implement `TransferProvider` and be registered when constructing
-`corebanking.Service`.
+Provider adapter owns:
 
-No fallback provider is wired into the prototype. That is intentional: the
-current provider boundary is demo scaffolding, not the production CBA provider
-architecture. A real NIBSS/NIP or sponsor-bank adapter should be designed as a
-production slice with tenant credentials, signed webhooks, requery, and
-reconciliation behavior, not hidden behind the mock routes.
+- external provider naming;
+- provider reference and event parsing;
+- provider status mapping;
+- mock scenario behavior for local proof.
 
-The adapter should:
+Lenz Core owns:
 
-- load credentials from runtime configuration or a secrets manager, never from
-  checked-in code;
-- map provider status codes into `pending`, `succeeded`, or `failed`;
-- generate or return provider references and provider event IDs exactly as the
-  provider defines them;
-- verify webhook authenticity before returning a `ProviderWebhookEvent`;
-- return parsed provider payloads to Lenz Core without posting ledger entries.
-
-## Core Ownership
-
-These concerns must remain in Lenz Core, not in provider adapters:
-
-- ledger journal creation and balanced debit/credit postings;
-- ledger-backed available and ledger balances;
-- transaction history;
 - institution and tenant scoping;
-- idempotency-key enforcement;
+- customer/account policy;
+- idempotency;
 - duplicate provider-event protection;
-- insufficient-funds handling;
-- reversal recording;
-- reconciliation state and auditability.
+- holds;
+- ledger journals and postings;
+- account balance cache updates;
+- transaction history;
+- audit events;
+- reconciliation/manual-review state.
 
-Demo-only behavior must stay in mock provider or demo route paths. Production
-style endpoints must receive an explicit institution scope instead of silently
-falling back to demo institution IDs.
+## Future Real Adapters
+
+A future Monnify, Interswitch, NIBSS, Providus, BankOne, sponsor-bank, or other
+adapter should implement the same contract, but only as an explicit production
+slice.
+
+That future work must include credentials/secrets handling, signed webhook
+verification, provider-specific status mapping, idempotency/reference rules,
+requery behavior, reconciliation behavior, tests, and operational docs.

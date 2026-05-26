@@ -2,6 +2,12 @@
 # Lenz Core — Product Requirements Document (PRD)
 *A next‑gen, multi‑tenant Core Banking Application for Nigeria (and beyond)*
 
+> Current status: this is a product north-star document, not the current
+> implementation guide. The current repository is a Go/sqlx/Postgres core API in
+> `apps/core` with no frontend in this checkout. Start with `README.md`,
+> `PROJECT_STRUCTURE.md`, and `docs/README.md` for what is actually built and
+> how to run it today.
+
 **Owner:** Clive Alliance — Lenz Team  
 **Product Name:** Lenz Core  
 **Version:** v1.0 (PRD)  

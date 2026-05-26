@@ -1,109 +1,117 @@
 # Architecture Status
 
-## Corebanking HTTP Architecture
+This document explains the current shape of the system. It is not a future
+architecture proposal.
 
-Corebanking routes now follow the same OpenAPI-first direction as the
-institution module:
+## Current Slice
 
-- `design/openapi/core/corebanking.yaml` is the source of truth for the current
-  transaction-spine HTTP surface.
-- `apps/core/internal/corebanking/config.yaml` configures `oapi-codegen` for
-  chi server routes, models, strict-server types, and the embedded spec.
-- `apps/core/internal/corebanking/doc.go` wires `go generate` to regenerate the
-  corebanking server stubs.
-- `apps/core/internal/corebanking/corebanking.gen.go` is generated code and is
-  intentionally ignored by git.
-- `apps/core/internal/institution/institution.gen.go` is generated from
-  `design/openapi/core/institution.yaml` and is intentionally ignored by git.
+Lenz Core currently implements the Simple Transaction CBA v0.1 transaction
+spine:
 
-The hand-written HTTP server is intentionally thin. It satisfies the generated
-`ServerInterface`, lets generated routing bind path and header parameters, uses
-`chi/render` binding for JSON request bodies that still need manual decoding,
-and calls the service only after request validation succeeds.
+- customers and accounts;
+- account balances split into ledger and available balance;
+- internal credits, debits, and transfers;
+- account controls: freeze, post-no-debit, and liens;
+- audit events;
+- reconciliation/manual-review views;
+- mock external name enquiry, outbound transfer, inbound event ingestion, and
+  transfer requery.
 
-## Repository Layer
+The external paths are provider-shaped mock flows only. They do not connect to
+real NIBSS, BankOne, Monnify, Interswitch, Providus, or a sponsor bank.
 
-The service depends on repository interfaces in `repository.go`, not direct SQL.
-The SQL implementation is split by concern:
+## Request Path
 
-- `sql_account_repository.go` handles account, balance, and transaction-history
-  reads.
-- `sql_ledger_repository.go` handles journal/posting reads and posting writes.
-- `sql_transfer_repository.go` handles transfer creation, lookup, settlement,
-  idempotency, and reversal orchestration.
-- `sql_holds.go` handles pending outbound hold creation, release, and
-  consumption.
-- `sql_provider_event_repository.go` handles duplicate provider-event
-  protection and transfer linking.
-- `sql_demo_repository.go` keeps demo seed writes separate from money movement.
+The main request path is:
 
-`NewRepository` is the constructor used by `apps/core/main.go` through the
-existing `server.Deps` wiring.
+```text
+design/openapi/core/corebanking.yaml
+  -> go generate
+  -> generated strict handler/types
+  -> apps/core/internal/corebanking/handler*.go
+  -> service*.go
+  -> repository.go interfaces
+  -> sql_*.go Postgres implementations
+```
 
-## Transaction Helper
+Generated files are ignored by git and should not be edited manually.
 
-`WithTx(ctx, db, func(tx TxRunner) error)` is the reusable transaction wrapper.
-It begins a `sqlx.Tx`, runs the callback, commits on nil error, and rolls back
-on callback or commit failure. Core money-moving operations use this helper so
-ledger postings, balance cache updates, holds, transfers, and provider-event
-links remain atomic.
+## Module Boundaries
 
-The integration test suite verifies both commit and rollback behavior around
-money movement.
+`apps/core/server` owns server setup:
 
-## Provider Shape
+- auth middleware;
+- institution-scope checks;
+- CORS;
+- demo-mode gates;
+- route registration;
+- dependency wiring through `server.Deps`.
 
-Provider abstractions now separate the external institution/provider identity
-from transfer-specific capability:
+`apps/core/internal/corebanking/handler*.go` owns the HTTP boundary:
 
-- `Provider` names the external provider.
-- `TransferProvider` embeds `Provider` and adds name enquiry, transfer
-  initiation, transfer requery, and webhook parsing.
+- generated strict-handler methods;
+- request validation/adaptation;
+- response shaping;
+- mapping service errors to HTTP responses.
 
-`MockNIPProvider` remains the only implemented provider. It is still a demo
-adapter for transfer-spine proof flows and is not a real Monnify, Interswitch,
-NIBSS, Providus, BankOne, SkyPay, MFB, or sponsor-bank integration.
+`service*.go` owns banking decisions:
 
-Fallback-provider scaffolding is not part of the current code path. Future
-provider work should be a production-shaped slice with explicit credentials,
-signed webhooks, requery, and reconciliation rules.
+- account policy;
+- balance availability;
+- holds;
+- ledger posting decisions;
+- provider status handling;
+- reconciliation status;
+- audit writes.
 
-## Mock/Demo vs Production-Shaped
+`sql_*.go` owns persistence:
 
-Mock/demo:
+- SQL transactions;
+- idempotency constraints;
+- provider-event duplicate protection;
+- journal/posting writes;
+- balance and hold updates;
+- list/read queries.
 
-- `POST /api/v1/demo/seed`
-- `POST /api/v1/transfers/mock/inbound`
-- `POST /api/v1/transfers/mock/outbound`
-- `MockNIPProvider`
+## Provider Boundary
 
-Those routes are still registered for local proof flows only when
-`LENZ_DEMO_MODE=true`. All non-health routes remain protected by the existing
-development bearer-token gate.
+Provider adapters return provider-shaped results. They do not post journals,
+mutate balances, decide tenant scope, release holds, or mark reconciliation
+items reviewed.
 
-Production-shaped:
+The current adapter is `MockNIPProvider`. It supports mock name enquiry,
+outbound initiation, inbound webhook/event parsing, and transfer requery. It is
+a proof adapter, not a real NIP integration.
 
-- institution-scoped reads and writes,
-- idempotency keys,
-- duplicate provider-event protection,
-- double-entry journal postings,
-- ledger balance vs available balance separation,
-- pending outbound holds,
-- hold release/consumption on provider settlement,
-- reversal-as-new-ledger-event behavior,
-- reversal deficit/manual-review classification.
+Important rule: unknown provider outcomes do not fall back to another provider.
+They remain visible as pending or provider-unknown transfers for reconciliation
+or explicit requery.
 
-## Before Real SkyPay/MFB Use
+## Requery Behavior
 
-Before real SkyPay, MFB, sponsor-bank, or scheme use, Lenz Core still needs:
+`POST /api/v1/external/transfers/{transfer_id}/requery` only acts on external
+transfers that are still `pending` or `provider_unknown`.
 
-- real authn/authz and tenant/user role enforcement instead of the development
-  bearer token;
-- production provider adapters and signed webhook verification;
-- maker-checker and limit checks for sensitive transfers and reversals;
-- reconciliation jobs and provider requery workers;
-- operational audit/event trails around every money-control decision;
-- provider-specific failure mapping and settlement finality handling;
-- account-product configuration for overdrafts, fees, statements, reports, and
-  regulatory disclosures;
-- CI enforcement that generated OpenAPI stubs stay current with the spec.
+- Outbound success consumes the hold and posts one journal.
+- Outbound failure releases the hold and posts no journal.
+- Still-pending or provider-unknown keeps the hold and remains visible for
+  reconciliation.
+- Inbound success credits once.
+- Already-final transfers are deterministic no-ops.
+- Internal transfers are rejected/no-op at this boundary.
+
+Concurrent requery calls are expected to converge on one money effect without
+500 responses for legitimate duplicate calls.
+
+## Production Gaps
+
+Before production use, the system still needs:
+
+- real auth/RBAC and tenant/user role enforcement;
+- maker-checker and limit checks;
+- KYC/BVN/NIN verification;
+- true NUBAN issuance/check-digit validation;
+- real provider adapters and signed webhooks;
+- provider settlement/reconciliation operations;
+- monitoring, alerting, and deployment hardening;
+- compliance reporting and operating procedures.

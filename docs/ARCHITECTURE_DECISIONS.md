@@ -63,6 +63,28 @@ When the provider later succeeds:
 Pending inbound transfers are recorded in transfer history, but they do not
 increase available balance or ledger balance until provider success.
 
+## External Requery Policy
+
+External requery is an explicit operator/API action, not background polling in
+this prototype.
+
+`POST /api/v1/external/transfers/{transfer_id}/requery` only applies to
+external transfers that are still `pending` or `provider_unknown`. Already-final
+transfers are deterministic no-ops, and internal transfers are rejected/no-op at
+this boundary.
+
+Requery outcomes follow the same ledger rules as settlement:
+
+- outbound success consumes the existing hold and posts exactly one journal;
+- outbound failure releases the hold and posts no journal;
+- outbound still-pending or provider-unknown keeps the hold active for later
+  reconciliation;
+- inbound success credits the destination account once;
+- inbound pending, provider-unknown, or failed outcomes do not credit money.
+
+Unknown provider outcomes must not silently fall back to another provider. They
+must remain visible in transfer and reconciliation views.
+
 ## Reversal Deficit Policy
 
 Reversals always create new ledger events. Lenz Core must never delete or edit
@@ -103,10 +125,11 @@ Transfers carry three separate status concerns:
 The legacy `status` field remains as the API-level transfer summary for the
 current demo.
 
-## Demo/Mock Behavior vs Production Behavior
+## Mock Behavior vs Production Behavior
 
-The mock provider routes are proof tools, not production transfer rails. They
-can simulate immediate success, pending, failure, settlement, and duplicate
+The mock provider routes and mock external endpoints are proof tools, not
+production transfer rails. They can simulate immediate success, pending,
+failure, timeout/provider-unknown outcomes, settlement, requery, and duplicate
 provider events, but they do not prove settlement finality with a real scheme or
 bank.
 

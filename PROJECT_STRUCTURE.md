@@ -1,132 +1,138 @@
-# Lenz Core - Project Structure
+# Lenz Core Project Structure
 
-This document outlines the complete monorepo structure for Lenz Core Banking Application.
+This is the quick map of the repository as it exists now.
 
-## Directory Structure
+## Top-Level Folders
 
-```
-lenz-core/
-├── apps/
-│   ├── core/                       # Go core banking API
-│   │   ├── cmd/migrate/            # SQL migration runner
-│   │   ├── internal/corebanking/    # First transaction-spine slice
-│   │   ├── internal/institution/    # Institution placeholder module
-│   │   ├── server/                 # HTTP server setup
-│   │   ├── main.go
-│   │   ├── go.mod
-│   │   └── go.sum
-│   └── auth/                       # Auth scaffolding
-│       ├── authn/
-│       ├── authz/
-│       ├── main.go
-│       └── go.mod
-│
-├── packages/
-│   └── shared/                     # Shared code
-│       ├── config/
-│       ├── httpmiddleware/
-│       └── utils/
-│
-├── infra/
-│   ├── docker/
-│   │   ├── docker-compose.yml      # Local development services
-│   │   └── Dockerfile.backend      # Core API Docker image
-├── migrations/                     # Database migrations
-├── design/openapi/                 # OpenAPI source files
-│
-├── docs/
-│   ├── GOAL_PROGRESS.md
-│   └── TRANSFER_ENGINE_DEMO.md
-├── README.md                       # Main README
-├── Taskfile.yml                    # Local task shortcuts
-├── go.work
-└── PROJECT_STRUCTURE.md            # This file
-
+```text
+apps/
+  core/        Go API, migrations runner, HTTP server, core-banking module
+  auth/        Local auth/authz scaffolding used by the core API
+design/
+  openapi/     OpenAPI specs used to generate server/model code
+docs/          Current guides, test notes, and historical goal briefs
+infra/
+  docker/      Local Docker Compose services and API Dockerfile
+migrations/    SQL schema changes
+packages/
+  shared/      Shared config, middleware, and utility packages
+scripts/       Bootstrap, UAT, and demo proof scripts
 ```
 
-## Key Components
+## Core API Shape
 
-### Core API (`apps/core/`)
+`apps/core` is the main application.
 
-**Technology Stack:**
-- Go 1.21+
-- sqlx
-- PostgreSQL
-- Chi Router
+```text
+apps/core/
+  main.go                         starts the API
+  cmd/migrate/                    runs SQL migrations
+  server/                         HTTP server, middleware, dependency wiring
+  internal/corebanking/           CBA v0.1 transaction spine
+  internal/institution/           institution OpenAPI module placeholder
+```
 
-**Modules:**
-- `corebanking`: First transaction-spine slice for accounts, ledger postings,
-  mock transfers, idempotency, transaction history, and reversals
-- `ops`: Background jobs, cron scheduler
+The core-banking module is split by responsibility:
 
-### Auth (`apps/auth/`)
+```text
+internal/corebanking/
+  handler*.go                     HTTP boundary and generated strict handlers
+  service*.go                     business rules and orchestration
+  repository.go                   repository interfaces
+  sql_*.go                        Postgres implementations
+  provider*.go, mock_nip_provider.go
+                                  provider adapter boundary and mock provider
+  audit*.go                       audit event contracts and writes
+  *_test.go                       unit, race, and SQL integration coverage
+```
 
-Lightweight auth middleware scaffolding used by the core API.
+The intended request path is:
 
-### Shared Packages (`packages/shared/`)
+```text
+OpenAPI spec -> generated strict handler -> handwritten handler -> service -> repository -> Postgres
+```
 
-- Common data models
-- Validation utilities
-- UUID helpers
-- Shared types/interfaces
+## Important Database Tables
 
-### Infrastructure (`infra/`)
+Tenant-scoped banking tables include:
 
-- **Docker**: Development environment setup
-- **Migrations**: Database schema versioning
-- **Scripts**: Deployment automation
+- `customers`
+- `accounts`
+- `account_balances`
+- `account_holds`
+- `journal_entries`
+- `postings`
+- `transfers`
+- `provider_events`
+- `audit_events`
+- `reconciliation_reviews`
 
-## Database Schema
+The ledger source of truth is `journal_entries` plus `postings`.
+`account_balances` is a cache for fast reads.
 
-Key tables are scoped by `institution_id` where they touch tenant data:
+## Main API Areas
 
-- `institutions` - Tenant banks
-- `branches` - Bank branches
-- `customers` - Bank customers
-- `accounts` - Bank accounts with supplied unique 10-digit test/account
-  numbers; true NUBAN generation/check-digit validation is deferred
-- `journal_entries` - Double-entry ledger entries
-- `postings` - Ledger posting lines
-- `account_balances` - Account balances
-- `transfers` - Money transfers
-- `provider_events` - Mock provider webhook/event dedupe
-- `audit_events` - Audit trail
+All routes are under `/api/v1`.
 
-## API Structure
+Customer and account:
 
-All endpoints under `/api/v1/`:
+- `POST /customers`
+- `GET /customers/{customer_id}`
+- `POST /customers/{customer_id}/accounts`
+- `GET /accounts`
+- `GET /accounts/{account_id}`
+- `GET /accounts/{account_id}/balance`
+- `GET /accounts/{account_id}/transactions`
 
-- `GET /health` - Health check
-- `POST /demo/seed` - Seed demo data
-- `GET /customers/{customer_id}/accounts` - Customer accounts
-- `GET /accounts/{account_id}/balance` - Account balance
-- `GET /accounts/{account_id}/transactions` - Lenz transaction history
-- `POST /transfers/mock/inbound` - Mock transfer-in
-- `POST /transfers/mock/outbound` - Mock transfer-out
-- `GET /transfers/{transfer_id}` - Transfer lookup
-- `POST /transfers/{transfer_id}/reverse` - Reversal
-- `GET /admin/ledger/journal/{journal_entry_id}` - Journal inspection
-- `GET /admin/transfers` - Admin transfer list
+Account controls:
 
-## Development Commands
+- `POST /accounts/{account_id}/freeze`
+- `POST /accounts/{account_id}/unfreeze`
+- `POST /accounts/{account_id}/post-no-debit`
+- `DELETE /accounts/{account_id}/post-no-debit`
+- `POST /accounts/{account_id}/liens`
+- `DELETE /accounts/{account_id}/liens/{lien_id}`
 
-See `Taskfile.yml` or run the commands directly:
+Money movement:
 
-- `docker compose -f infra/docker/docker-compose.yml up -d postgres redis` - Start local services
-- `go run ./apps/core/cmd/migrate` - Run SQL migrations
-- `go run ./apps/core` - Start core API
-- `go test ./apps/core/... ./apps/auth/... ./packages/shared/...` - Run tests
+- `POST /internal/credits`
+- `POST /internal/debits`
+- `POST /internal/transfers`
+- `POST /external/name-enquiry`
+- `POST /external/transfers/outbound`
+- `POST /external/transfers/inbound-events`
+- `POST /external/transfers/{transfer_id}/requery`
 
-## Next Steps
+Admin and reconciliation:
 
-1. Run the documented demo flow against Docker-backed Postgres
-2. Keep expanding SQL repository integration coverage around real CBA slices
-3. Add real auth and institution context middleware
-4. Design production provider integration explicitly before adding NIBSS/NIP
+- `GET /transfers/{transfer_id}`
+- `POST /transfers/{transfer_id}/reverse`
+- `GET /admin/transfers`
+- `GET /admin/ledger/journal/{journal_entry_id}`
+- `GET /admin/reconciliation-items`
+- `GET /admin/reconciliation-items/{transfer_id}`
+- `POST /admin/reconciliation-items/{transfer_id}/mark-reviewed`
 
-## Notes
+Demo-only routes, enabled only with `LENZ_DEMO_MODE=true`:
 
-- `apps/core/internal/corebanking` contains the verified prototype transaction-spine slice
-- SQL migrations for the transfer engine are ready to run
-- Docker Compose setup is complete
-- Tenant scoping is enforced with `institution_id` in SQL queries and tests
+- `POST /demo/seed`
+- `POST /transfers/mock/inbound`
+- `POST /transfers/mock/outbound`
+
+## Common Commands
+
+```sh
+go generate ./apps/core/internal/corebanking
+go generate ./apps/core/internal/institution
+go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
+go build ./apps/core/... ./apps/auth/... ./packages/shared/...
+TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/uat_simple_transaction_cba.sh
+TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/demo_transfer_spine.sh
+```
+
+## Current Boundary
+
+The repository proves the local transaction spine with a mock provider. It does
+not yet include real provider credentials, signed webhooks, production auth,
+maker-checker, limits, KYC/BVN/NIN verification, deployment hardening, or
+regulatory reporting.
