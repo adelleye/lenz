@@ -214,12 +214,23 @@ func TestInternalErrorsAreSanitized(t *testing.T) {
 }
 
 func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
+	newRouter := func(svc *Service) http.Handler {
+		router := chi.NewRouter()
+		NewHandler(svc).Routes(router)
+		return router
+	}
+	newSeededRouter := func(t *testing.T) http.Handler {
+		t.Helper()
+		_, svc, _ := newTestService(t)
+		return newRouter(svc)
+	}
+
 	tests := []struct {
 		name        string
 		requestID   string
 		wantStatus  int
 		wantMessage string
-		wantNoLeak  string
+		mustNotLeak string
 		setup       func(t *testing.T) (http.Handler, *http.Request)
 	}{
 		{
@@ -229,9 +240,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			wantMessage: "invalid_request",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
-				_, svc, _ := newTestService(t)
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newSeededRouter(t)
 				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/not-a-uuid/balance", nil)
 				req = withTestPrincipal(req, DemoInstitutionID)
 				return router, req
@@ -244,9 +253,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			wantMessage: "invalid_request",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
-				_, svc, _ := newTestService(t)
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newSeededRouter(t)
 				body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":0,"currency_id":"NGN","idempotency_key":"request-id-invalid"}`
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
@@ -261,9 +268,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			wantMessage: "unauthorized",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
-				_, svc, _ := newTestService(t)
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newSeededRouter(t)
 				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
 				return router, req
 			},
@@ -275,9 +280,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			wantMessage: "forbidden",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
-				_, svc, _ := newTestService(t)
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newSeededRouter(t)
 				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
 				req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
 				req = withTestPrincipal(req, DemoInstitutionID)
@@ -291,9 +294,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			wantMessage: "not_found",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
-				_, svc, _ := newTestService(t)
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newSeededRouter(t)
 				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/99999999-9999-9999-9999-999999999999/balance", nil)
 				req = withTestPrincipal(req, DemoInstitutionID)
 				return router, req
@@ -306,9 +307,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			wantMessage: "conflict",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
-				_, svc, _ := newTestService(t)
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newSeededRouter(t)
 				body := `{"customer_id":"` + DemoCustomerID + `","account_number":"9990000001","name":"Duplicate Wallet","product_type":"standard_wallet","currency_id":"NGN"}`
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
@@ -323,9 +322,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			wantMessage: "insufficient_funds",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
-				_, svc, _ := newTestService(t)
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newSeededRouter(t)
 				body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"currency_id":"NGN","idempotency_key":"request-id-insufficient"}`
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/debits", strings.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
@@ -338,13 +335,12 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			requestID:   "req-internal-error",
 			wantStatus:  http.StatusInternalServerError,
 			wantMessage: "internal_server_error",
-			wantNoLeak:  "database password=secret",
+			mustNotLeak: "database password=secret",
 			setup: func(t *testing.T) (http.Handler, *http.Request) {
 				t.Helper()
 				store := &failingBalanceStore{memoryStore: newMemoryStore()}
 				svc := NewService(store, NewMockNIPProvider())
-				router := chi.NewRouter()
-				NewHandler(svc).Routes(router)
+				router := newRouter(svc)
 				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
 				req = withTestPrincipal(req, DemoInstitutionID)
 				return router, req
@@ -360,7 +356,7 @@ func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
 			router.ServeHTTP(rec, req)
 
 			assertHTTPErrorResponse(t, rec, tt.wantStatus, tt.wantMessage, tt.requestID)
-			if tt.wantNoLeak != "" && strings.Contains(rec.Body.String(), tt.wantNoLeak) {
+			if tt.mustNotLeak != "" && strings.Contains(rec.Body.String(), tt.mustNotLeak) {
 				t.Fatalf("raw internal error leaked to client: %s", rec.Body.String())
 			}
 		})
