@@ -1,6 +1,7 @@
 package authn
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -17,7 +18,7 @@ const (
 )
 
 const (
-	EnvDevAuthToken     = "LENZ_DEV_AUTH_TOKEN"
+	EnvDevAuthToken     = "LENZ_DEV_AUTH_TOKEN" // #nosec G101 -- environment variable name, not a credential value.
 	EnvDevInstitutionID = "LENZ_DEV_INSTITUTION_ID"
 	EnvDevActorType     = "LENZ_DEV_ACTOR_TYPE"
 	EnvDevActorID       = "LENZ_DEV_ACTOR_ID"
@@ -106,7 +107,10 @@ func productionEnv(value string) bool {
 
 func validDevelopmentToken(token string) bool {
 	expected := strings.TrimSpace(os.Getenv(EnvDevAuthToken))
-	return expected != "" && token == expected
+	token = strings.TrimSpace(token)
+	return expected != "" &&
+		len(token) == len(expected) &&
+		subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
 
 func developmentPrincipal(token string) (Principal, bool) {

@@ -1,12 +1,28 @@
 # Lenz Core
 
-Lenz Core is a Go/Postgres core-banking prototype for Nigerian MFB-style
-accounts. It is ledger-first: posted money movement is recorded as balanced
-journal entries and postings, while account balances are cached views of that
-ledger.
+Lenz Core is a Go/Postgres core-banking prototype for Nigerian MFB-style account
+and transfer operations. The current product slice is transfer-first: a
+BankOne-style replacement path for money in, money out, balances, transfer
+history, and reconciliation.
 
-It is useful for proving the transaction spine. It is not production-ready
+It is ledger-first. Posted money movement is recorded as balanced journal
+entries and postings, while account balances are cached views of that ledger.
+
+This is useful for proving the transaction spine. It is not production-ready
 banking software yet.
+
+## Where We Are
+
+We have a verified local transaction spine running on real Postgres tables. It
+can create customers/accounts, move money internally, simulate external
+inbound/outbound transfers through a mock NIP-shaped provider, keep transfer
+history, hold pending outbound money, and surface reconciliation/manual-review
+cases.
+
+The next useful product step is to turn the mock provider boundary into a real
+provider integration path, while adding the production controls that real money
+requires: auth/RBAC, maker-checker, limits, KYC/BVN/NIN, signed webhooks,
+monitoring, and operating procedures.
 
 ## What We Built
 
@@ -35,10 +51,17 @@ BankOne, Monnify, Interswitch, Providus, or a sponsor bank.
 
 ## What Is Not Built
 
-Before real customer money, the product still needs production auth/RBAC,
-maker-checker, limits, KYC/BVN/NIN verification, real provider adapters, signed
-webhooks, provider settlement files, compliance reporting, monitoring,
-deployment hardening, and operating procedures. Full NUBAN generation/check-digit validation is deferred.
+This is not a full BankOne replacement yet. Before real customer money, the
+product still needs:
+
+- production auth/RBAC and tenant/user role enforcement;
+- maker-checker and limit checks;
+- KYC/BVN/NIN verification;
+- true NUBAN issuance/check-digit validation;
+- real NIBSS/NIP or sponsor-bank provider adapters;
+- signed webhooks and provider credential management;
+- provider settlement files and operations workflows;
+- compliance reporting, monitoring, deployment hardening, and runbooks.
 
 ## Prove It Works
 

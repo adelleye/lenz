@@ -24,7 +24,8 @@ func Recover(handler http.Handler) http.Handler {
 				}
 
 				log.Printf("Recovered from panic: %v\n%s", err, string(debug.Stack()))
-				log.Printf("Request: %s %s\n", r.Method, r.URL.RequestURI())
+				// #nosec G706 -- request fields are sanitized before logging.
+				log.Printf("Request: %s %s", safeLogValue(r.Method), safeLogValue(r.URL.RequestURI()))
 
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -46,4 +47,13 @@ func requestID(r *http.Request) string {
 		return requestID
 	}
 	return "unknown"
+}
+
+func safeLogValue(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
 }

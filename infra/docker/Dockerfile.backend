@@ -30,6 +30,6 @@ WORKDIR /root/
 
 COPY --from=builder /app/bin/server .
 
-EXPOSE 8080
+EXPOSE 3001
 
 CMD ["./server"]

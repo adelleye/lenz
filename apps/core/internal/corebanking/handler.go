@@ -52,7 +52,14 @@ func (h *HTTPServer) Routes(r chi.Router) {
 
 func openAPIRequestError(w http.ResponseWriter, r *http.Request, err error) {
 	requestID := requestID(r)
-	log.Printf("bad_request request_id=%s method=%s path=%s error=%v", requestID, r.Method, r.URL.Path, err)
+	// #nosec G706 -- request fields and error text are sanitized before logging.
+	log.Printf(
+		"bad_request request_id=%s method=%s path=%s error=%s",
+		safeLogValue(requestID),
+		safeLogValue(r.Method),
+		safeLogValue(r.URL.Path),
+		safeErrorLogValue(err),
+	)
 	writeErrorWithRequestID(w, http.StatusBadRequest, "invalid_request", requestID)
 }
 
@@ -1098,11 +1105,34 @@ func writeErrorWithRequestID(w http.ResponseWriter, status int, message, request
 
 func writeInternalError(w http.ResponseWriter, r *http.Request, err error) {
 	requestID := requestID(r)
-	log.Printf("internal_error request_id=%s method=%s path=%s error=%v", requestID, r.Method, r.URL.Path, err)
+	// #nosec G706 -- request fields and error text are sanitized before logging.
+	log.Printf(
+		"internal_error request_id=%s method=%s path=%s error=%s",
+		safeLogValue(requestID),
+		safeLogValue(r.Method),
+		safeLogValue(r.URL.Path),
+		safeErrorLogValue(err),
+	)
 	writeJSON(w, http.StatusInternalServerError, map[string]string{
 		"message":    "internal_server_error",
 		"request_id": requestID,
 	})
+}
+
+func safeLogValue(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
+}
+
+func safeErrorLogValue(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return safeLogValue(err.Error())
 }
 
 func requestID(r *http.Request) string {

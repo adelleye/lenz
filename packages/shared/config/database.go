@@ -45,7 +45,7 @@ func NewDB() (DB, error) {
 
 	dataSourceName := vp.GetString(utils.EnvDatabaseURL)
 	if dataSourceName == "" {
-		dataSourceName = "postgres://lenzcore:lenzcore123@localhost:5432/lenzcore?sslmode=disable"
+		dataSourceName = "postgres://lenzcore:lenzcore123@localhost:5432/lenzcore?sslmode=disable" // #nosec G101 -- local Docker Compose default; production must set DATABASE_URL.
 		log.Printf("DATABASE_URL not set, using local Docker Compose default")
 	}
 
