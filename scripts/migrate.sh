@@ -23,7 +23,7 @@ case "$command_name" in
 esac
 
 DATABASE_URL="$DATABASE_URL" "$GO_BIN" run "$SODA_PACKAGE" \
-  -c migrations/config/database.yml \
+  -c database.yml \
   -p migrations \
   -e "$SODA_ENV" \
   migrate "$command_name" "$@"

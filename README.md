@@ -139,6 +139,20 @@ curl -fsS \
   http://localhost:3001/api/v1/health
 ```
 
+## Database Migrations
+
+Soda/Pop is the migration runner. Run from the repository root:
+
+```sh
+DATABASE_URL='postgres://lenzcore:lenzcore123@localhost:55432/lenzcore?sslmode=disable' \
+  ./scripts/migrate.sh up
+```
+
+`scripts/migrate.sh down` applies one down migration by default. Pass Soda flags
+after the command, for example `scripts/migrate.sh down --step 2`.
+
+Reference: https://gobuffalo.io/documentation/database/soda/
+
 ## How The Code Connects
 
 - `design/openapi/core/corebanking.yaml` is the active OpenAPI source of truth
