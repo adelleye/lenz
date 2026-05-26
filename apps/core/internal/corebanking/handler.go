@@ -411,7 +411,7 @@ func (h *HTTPServer) ListTransfers(ctx context.Context, request ListTransfersReq
 	if err != nil {
 		return nil, err
 	}
-	transfers, err := h.service.ListTransfers(ctx, institutionID)
+	transfers, err := h.service.ListTransfers(ctx, institutionID, listTransfersOptions(request.Params))
 	if err != nil {
 		return nil, err
 	}
@@ -920,6 +920,21 @@ func optionalInt64(value *int64) int64 {
 
 func listTransactionsOptions(params ListAccountTransactionsParams) ListTransactionsOptions {
 	options := ListTransactionsOptions{}
+	if params.Limit != nil {
+		options.Limit = *params.Limit
+	}
+	if params.BeforeCreatedAt != nil {
+		before := *params.BeforeCreatedAt
+		options.BeforeCreatedAt = &before
+	}
+	if params.BeforeTransferId != nil {
+		options.BeforeTransferID = params.BeforeTransferId.String()
+	}
+	return options
+}
+
+func listTransfersOptions(params ListTransfersParams) ListTransfersOptions {
+	options := ListTransfersOptions{}
 	if params.Limit != nil {
 		options.Limit = *params.Limit
 	}

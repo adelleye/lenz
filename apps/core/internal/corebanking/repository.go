@@ -41,7 +41,7 @@ type LedgerRepository interface {
 type TransferRepository interface {
 	GetTransfer(ctx context.Context, institutionID, transferID string) (*Transfer, error)
 	GetTransferByIdempotency(ctx context.Context, institutionID, idempotencyKey string) (*Transfer, error)
-	ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error)
+	ListTransfers(ctx context.Context, institutionID string, options ListTransfersOptions) ([]Transfer, error)
 	RecordTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, error)
 	RecordProviderEventReview(ctx context.Context, input RecordProviderEventReviewInput) (*Transfer, error)
 	BeginExternalOutboundTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, bool, error)
@@ -58,5 +58,5 @@ type ReconciliationRepository interface {
 }
 
 type AuditRepository interface {
-	ListAuditEvents(ctx context.Context, institutionID string) ([]AuditEvent, error)
+	ListAuditEvents(ctx context.Context, institutionID string, options ListAuditEventsOptions) ([]AuditEvent, error)
 }

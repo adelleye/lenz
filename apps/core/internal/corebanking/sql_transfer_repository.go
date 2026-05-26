@@ -31,9 +31,29 @@ func (r *sqlTransferRepository) GetTransferByIdempotency(ctx context.Context, in
 	return &transfer, normalizeSQLError(err)
 }
 
-func (r *sqlTransferRepository) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
-	var transfers []Transfer
-	err := r.db.SelectContext(ctx, &transfers, transferSelectSQL+` WHERE institution_id = $1 ORDER BY created_at DESC LIMIT 100`, institutionID)
+func (r *sqlTransferRepository) ListTransfers(ctx context.Context, institutionID string, options ListTransfersOptions) ([]Transfer, error) {
+	options, err := normalizeListTransfersOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	transfers := []Transfer{}
+	var beforeCreatedAt *time.Time
+	if options.BeforeCreatedAt != nil && !options.BeforeCreatedAt.IsZero() {
+		beforeCreatedAt = options.BeforeCreatedAt
+	}
+	var beforeTransferID *string
+	if options.BeforeTransferID != "" {
+		beforeTransferID = &options.BeforeTransferID
+	}
+	err = r.db.SelectContext(ctx, &transfers, transferSelectSQL+`
+	WHERE institution_id = $1
+	  AND (
+		$2::timestamptz IS NULL OR
+		created_at < $2 OR
+		($3::uuid IS NOT NULL AND created_at = $2 AND id < $3::uuid)
+	  )
+	ORDER BY created_at DESC, id DESC
+	LIMIT $4`, institutionID, beforeCreatedAt, beforeTransferID, options.Limit)
 	return transfers, err
 }
 

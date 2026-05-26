@@ -3,6 +3,7 @@ package corebanking
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -16,16 +17,34 @@ type auditEventRow struct {
 	MetadataJSON []byte `db:"metadata"`
 }
 
-func (r *sqlAuditRepository) ListAuditEvents(ctx context.Context, institutionID string) ([]AuditEvent, error) {
+func (r *sqlAuditRepository) ListAuditEvents(ctx context.Context, institutionID string, options ListAuditEventsOptions) ([]AuditEvent, error) {
+	options, err := normalizeListAuditEventsOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	var beforeCreatedAt *time.Time
+	if options.BeforeCreatedAt != nil && !options.BeforeCreatedAt.IsZero() {
+		beforeCreatedAt = options.BeforeCreatedAt
+	}
+	var beforeAuditEventID *string
+	if options.BeforeAuditEventID != "" {
+		beforeAuditEventID = &options.BeforeAuditEventID
+	}
+
 	rows := []auditEventRow{}
 	if err := r.db.SelectContext(ctx, &rows, `
-SELECT id, institution_id, actor_type, actor_id, request_id, action, entity_type, entity_id,
-       customer_id, account_id, transfer_id, journal_entry_id, idempotency_key, reference,
-       old_status, new_status, metadata, created_at
-FROM audit_events
-WHERE institution_id = $1
-ORDER BY created_at DESC, id DESC
-LIMIT 200`, institutionID); err != nil {
+	SELECT id, institution_id, actor_type, actor_id, request_id, action, entity_type, entity_id,
+	       customer_id, account_id, transfer_id, journal_entry_id, idempotency_key, reference,
+	       old_status, new_status, metadata, created_at
+	FROM audit_events
+	WHERE institution_id = $1
+	  AND (
+		$2::timestamptz IS NULL OR
+		created_at < $2 OR
+		($3::uuid IS NOT NULL AND created_at = $2 AND id < $3::uuid)
+	  )
+	ORDER BY created_at DESC, id DESC
+	LIMIT $4`, institutionID, beforeCreatedAt, beforeAuditEventID, options.Limit); err != nil {
 		return nil, err
 	}
 	events := make([]AuditEvent, 0, len(rows))

@@ -920,6 +920,27 @@ paths:
       tags: [Corebanking]
       parameters:
         - $ref: "#/components/parameters/InstitutionID"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+          description: Maximum number of transfers to return. Non-positive values use the 100 default, and values above 200 are capped.
+        - name: before_created_at
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Return transfers created before this timestamp, ordered newest first.
+        - name: before_transfer_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Optional tie-breaker cursor used with before_created_at for stable newest-first pagination.
       responses:
         "200":
           description: Recent transfers.

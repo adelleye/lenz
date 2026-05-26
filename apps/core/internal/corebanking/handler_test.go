@@ -9,6 +9,7 @@ import (
 	"lenz-core/apps/auth/authn"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +91,53 @@ func TestCoreRoutesDeriveInstitutionFromAuthenticatedPrincipal(t *testing.T) {
 	}
 	if balance.InstitutionID != DemoInstitutionID {
 		t.Fatalf("handler did not use principal institution scope: %+v", balance)
+	}
+}
+
+func TestHTTPAdminTransferListPaginationAndEmptyArray(t *testing.T) {
+	_, svc, store := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	rec := getHTTPAdminTransfers(t, router, "/api/v1/admin/transfers", DemoInstitutionID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected empty transfer list to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "[]\n" {
+		t.Fatalf("expected empty transfer list to serialize as [], got %q", rec.Body.String())
+	}
+
+	base := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	putMemoryTransferForList(t, store, numberedTestUUID("33333333-3333-3333-3333", 1), DemoInstitutionID, base)
+	putMemoryTransferForList(t, store, numberedTestUUID("33333333-3333-3333-3333", 2), DemoInstitutionID, base.Add(time.Minute))
+	putMemoryTransferForList(t, store, numberedTestUUID("33333333-3333-3333-3333", 3), DemoInstitutionID, base.Add(time.Minute))
+	putMemoryTransferForList(t, store, numberedTestUUID("99999999-9999-9999-9999", 3), "99999999-9999-9999-9999-999999999999", base.Add(10*time.Minute))
+
+	rec = getHTTPAdminTransfers(t, router, "/api/v1/admin/transfers?limit=2", DemoInstitutionID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected transfer list page to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	firstPage := decodeHTTPTransfers(t, rec)
+	if len(firstPage) != 2 {
+		t.Fatalf("expected first page of two transfers, got %+v", firstPage)
+	}
+	assertTransfersNewestFirst(t, firstPage)
+	if firstPage[0].ID != numberedTestUUID("33333333-3333-3333-3333", 3) || firstPage[1].ID != numberedTestUUID("33333333-3333-3333-3333", 2) {
+		t.Fatalf("expected HTTP list tie-breaker by transfer id desc, got %+v", firstPage)
+	}
+
+	cursor := url.QueryEscape(firstPage[len(firstPage)-1].CreatedAt.Format(time.RFC3339Nano))
+	rec = getHTTPAdminTransfers(t, router, "/api/v1/admin/transfers?limit=2&before_created_at="+cursor+"&before_transfer_id="+firstPage[len(firstPage)-1].ID, DemoInstitutionID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected second transfer list page to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	secondPage := decodeHTTPTransfers(t, rec)
+	assertNoDuplicateTransfers(t, append(firstPage, secondPage...))
+	assertTransferListMissing(t, append(firstPage, secondPage...), numberedTestUUID("99999999-9999-9999-9999", 3))
+
+	rec = getHTTPAdminTransfers(t, router, "/api/v1/admin/transfers?before_transfer_id="+firstPage[0].ID, DemoInstitutionID)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected cursor without created_at to return 400, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1930,6 +1978,24 @@ func getHTTPTransactions(t *testing.T, router http.Handler, accountID string) []
 		t.Fatal(err)
 	}
 	return history
+}
+
+func getHTTPAdminTransfers(t *testing.T, router http.Handler, path, institutionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req = withTestPrincipal(req, institutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func decodeHTTPTransfers(t *testing.T, rec *httptest.ResponseRecorder) []Transfer {
+	t.Helper()
+	var transfers []Transfer
+	if err := json.Unmarshal(rec.Body.Bytes(), &transfers); err != nil {
+		t.Fatal(err)
+	}
+	return transfers
 }
 
 type failingBalanceStore struct {

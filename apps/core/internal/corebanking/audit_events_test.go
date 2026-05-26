@@ -43,7 +43,7 @@ func TestAuditEventsGoal09MemoryStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := store.ListAuditEvents(ctx, DemoInstitutionID)
+	events, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestAuditEventsGoal09MemoryStore(t *testing.T) {
 	}
 	assertAuditMetadataSafe(t, events)
 
-	otherTenantEvents, err := store.ListAuditEvents(ctx, "99999999-9999-9999-9999-999999999999")
+	otherTenantEvents, err := store.ListAuditEvents(ctx, "99999999-9999-9999-9999-999999999999", ListAuditEventsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,7 +54,7 @@ func TestSQLAuditEventsGoal09(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events, err := svc.repository.ListAuditEvents(ctx, DemoInstitutionID)
+	events, err := svc.repository.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestSQLAuditEventsGoal09(t *testing.T) {
 	}
 	assertAuditMetadataSafe(t, events)
 
-	otherTenantEvents, err := svc.repository.ListAuditEvents(ctx, "99999999-9999-9999-9999-999999999999")
+	otherTenantEvents, err := svc.repository.ListAuditEvents(ctx, "99999999-9999-9999-9999-999999999999", ListAuditEventsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ WHERE id = $1`, inserted.ID); err != nil {
 		t.Fatalf("unsafe metadata persisted in inserted audit row: %+v", metadata)
 	}
 
-	events, err := svc.repository.ListAuditEvents(ctx, DemoInstitutionID)
+	events, err := svc.repository.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -382,12 +382,23 @@ func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID str
 	return s.repository.GetTransfer(ctx, institutionID, transferID)
 }
 
-func (s *Service) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
+func (s *Service) ListTransfers(ctx context.Context, institutionID string, options ListTransfersOptions) ([]Transfer, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
 		return nil, err
 	}
-	return s.repository.ListTransfers(ctx, institutionID)
+	normalized, err := normalizeListTransfersOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	transfers, err := s.repository.ListTransfers(ctx, institutionID, normalized)
+	if err != nil {
+		return nil, err
+	}
+	if transfers == nil {
+		return []Transfer{}, nil
+	}
+	return transfers, nil
 }
 
 func (s *Service) ListReconciliationItems(ctx context.Context, institutionID string, options ListReconciliationItemsOptions) ([]ReconciliationItem, error) {
@@ -882,6 +893,44 @@ func normalizeListTransactionsOptions(options ListTransactionsOptions) ListTrans
 		options.Limit = MaxTransactionHistoryLimit
 	}
 	return options
+}
+
+func normalizeListTransfersOptions(options ListTransfersOptions) (ListTransfersOptions, error) {
+	if options.Limit <= 0 {
+		options.Limit = DefaultTransferListLimit
+	}
+	if options.Limit > MaxTransferListLimit {
+		options.Limit = MaxTransferListLimit
+	}
+	options.BeforeTransferID = strings.TrimSpace(options.BeforeTransferID)
+	if options.BeforeTransferID != "" {
+		if options.BeforeCreatedAt == nil {
+			return ListTransfersOptions{}, ErrInvalidRequest
+		}
+		if _, err := uuid.Parse(options.BeforeTransferID); err != nil {
+			return ListTransfersOptions{}, ErrInvalidRequest
+		}
+	}
+	return options, nil
+}
+
+func normalizeListAuditEventsOptions(options ListAuditEventsOptions) (ListAuditEventsOptions, error) {
+	if options.Limit <= 0 {
+		options.Limit = DefaultAuditEventListLimit
+	}
+	if options.Limit > MaxAuditEventListLimit {
+		options.Limit = MaxAuditEventListLimit
+	}
+	options.BeforeAuditEventID = strings.TrimSpace(options.BeforeAuditEventID)
+	if options.BeforeAuditEventID != "" {
+		if options.BeforeCreatedAt == nil {
+			return ListAuditEventsOptions{}, ErrInvalidRequest
+		}
+		if _, err := uuid.Parse(options.BeforeAuditEventID); err != nil {
+			return ListAuditEventsOptions{}, ErrInvalidRequest
+		}
+	}
+	return options, nil
 }
 
 func normalizeListReconciliationItemsOptions(options ListReconciliationItemsOptions) (ListReconciliationItemsOptions, error) {

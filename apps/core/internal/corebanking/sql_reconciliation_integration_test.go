@@ -141,7 +141,7 @@ func TestSQLMarkReconciliationItemReviewedAuditsAndDoesNotMutateMoney(t *testing
 	if afterJournalCount != beforeJournalCount || afterPostingCount != beforePostingCount {
 		t.Fatalf("mark-reviewed mutated journals/postings: before journals=%d postings=%d after journals=%d postings=%d", beforeJournalCount, beforePostingCount, afterJournalCount, afterPostingCount)
 	}
-	events, err := svc.repository.ListAuditEvents(ctx, DemoInstitutionID)
+	events, err := svc.repository.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

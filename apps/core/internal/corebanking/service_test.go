@@ -537,7 +537,7 @@ func TestInternalDebitRejectsInsufficientFundsWithoutTransfer(t *testing.T) {
 	}
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
 
-	transfers, err := svc.ListTransfers(ctx, DemoInstitutionID)
+	transfers, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -851,7 +851,7 @@ func TestInternalTransferRejectsInsufficientFundsWithoutTransfer(t *testing.T) {
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
 	assertBalance(t, svc, ctx, DemoInstitutionID, destination.ID, 0)
 
-	transfers, err := svc.ListTransfers(ctx, DemoInstitutionID)
+	transfers, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1555,7 +1555,7 @@ func TestProductionReadsRequireInstitutionScope(t *testing.T) {
 	if _, err := svc.GetTransactions(ctx, "", DemoCustomerAccountID, ListTransactionsOptions{}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected missing institution scope to fail for history, got %v", err)
 	}
-	if _, err := svc.ListTransfers(ctx, ""); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := svc.ListTransfers(ctx, "", ListTransfersOptions{}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected missing institution scope to fail for transfer list, got %v", err)
 	}
 }
@@ -1653,6 +1653,157 @@ func TestTransactionHistoryCapsLimitAndPaginatesBeforeCreatedAt(t *testing.T) {
 		}
 	}
 	assertHistoryNewestFirst(t, page)
+}
+
+func TestTransferListDefaultsCapsTenantScopeAndCursorPagination(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	base := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
+	otherTenantID := "99999999-9999-9999-9999-999999999999"
+	for i := 1; i <= 205; i++ {
+		createdAt := base.Add(time.Duration(i) * time.Minute)
+		if i >= 204 {
+			createdAt = base.Add(205 * time.Minute)
+		}
+		putMemoryTransferForList(t, store, numberedTestUUID("11111111-1111-1111-1111", i), DemoInstitutionID, createdAt)
+	}
+	otherTenantTransfer := putMemoryTransferForList(t, store, numberedTestUUID("99999999-9999-9999-9999", 1), otherTenantID, base.Add(300*time.Minute))
+
+	transfers, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transfers) != DefaultTransferListLimit {
+		t.Fatalf("expected default transfer limit %d, got %d", DefaultTransferListLimit, len(transfers))
+	}
+	assertTransfersNewestFirst(t, transfers)
+	assertTransferListMissing(t, transfers, otherTenantTransfer.ID)
+	if transfers[0].ID != numberedTestUUID("11111111-1111-1111-1111", 205) || transfers[1].ID != numberedTestUUID("11111111-1111-1111-1111", 204) {
+		t.Fatalf("expected created_at tie to be ordered by transfer id desc, got first rows %+v", transfers[:2])
+	}
+
+	capped, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{Limit: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != MaxTransferListLimit {
+		t.Fatalf("expected transfer limit capped at %d, got %d", MaxTransferListLimit, len(capped))
+	}
+	assertTransfersNewestFirst(t, capped)
+
+	firstPage, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPage, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{
+		Limit:            2,
+		BeforeCreatedAt:  &firstPage[len(firstPage)-1].CreatedAt,
+		BeforeTransferID: firstPage[len(firstPage)-1].ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoDuplicateTransfers(t, append(firstPage, secondPage...))
+	assertTransfersNewestFirst(t, secondPage)
+
+	otherTenantTransfers, err := svc.ListTransfers(ctx, otherTenantID, ListTransfersOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(otherTenantTransfers) != 1 || otherTenantTransfers[0].ID != otherTenantTransfer.ID {
+		t.Fatalf("expected transfer list to stay tenant scoped, got %+v", otherTenantTransfers)
+	}
+}
+
+func TestTransferListRejectsInvalidCursor(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	now := time.Now().UTC()
+
+	if _, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{BeforeTransferID: DemoCustomerAccountID}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected transfer cursor without created_at to fail, got %v", err)
+	}
+	if _, err := svc.ListTransfers(ctx, DemoInstitutionID, ListTransfersOptions{BeforeCreatedAt: &now, BeforeTransferID: "not-a-uuid"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid transfer cursor id to fail, got %v", err)
+	}
+}
+
+func TestAuditEventListDefaultsCapsTenantScopeAndCursorPagination(t *testing.T) {
+	store := newMemoryStore()
+	ctx := context.Background()
+	base := time.Date(2026, 5, 26, 11, 0, 0, 0, time.UTC)
+	otherTenantID := "99999999-9999-9999-9999-999999999999"
+	for i := 1; i <= 205; i++ {
+		createdAt := base.Add(time.Duration(i) * time.Minute)
+		if i >= 204 {
+			createdAt = base.Add(205 * time.Minute)
+		}
+		putMemoryAuditEventForList(store, numberedTestUUID("22222222-2222-2222-2222", i), DemoInstitutionID, createdAt)
+	}
+	otherTenantEvent := putMemoryAuditEventForList(store, numberedTestUUID("99999999-9999-9999-9999", 2), otherTenantID, base.Add(300*time.Minute))
+
+	events, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != DefaultAuditEventListLimit {
+		t.Fatalf("expected default audit limit %d, got %d", DefaultAuditEventListLimit, len(events))
+	}
+	assertAuditEventsNewestFirst(t, events)
+	assertAuditEventListMissing(t, events, otherTenantEvent.ID)
+	if events[0].ID != numberedTestUUID("22222222-2222-2222-2222", 205) || events[1].ID != numberedTestUUID("22222222-2222-2222-2222", 204) {
+		t.Fatalf("expected created_at tie to be ordered by audit id desc, got first rows %+v", events[:2])
+	}
+
+	capped, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{Limit: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != MaxAuditEventListLimit {
+		t.Fatalf("expected audit limit capped at %d, got %d", MaxAuditEventListLimit, len(capped))
+	}
+
+	firstPage, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPage, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{
+		Limit:              2,
+		BeforeCreatedAt:    &firstPage[len(firstPage)-1].CreatedAt,
+		BeforeAuditEventID: firstPage[len(firstPage)-1].ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoDuplicateAuditEvents(t, append(firstPage, secondPage...))
+	assertAuditEventsNewestFirst(t, secondPage)
+
+	otherTenantEvents, err := store.ListAuditEvents(ctx, otherTenantID, ListAuditEventsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(otherTenantEvents) != 1 || otherTenantEvents[0].ID != otherTenantEvent.ID {
+		t.Fatalf("expected audit list to stay tenant scoped, got %+v", otherTenantEvents)
+	}
+
+	emptyEvents, err := store.ListAuditEvents(ctx, "88888888-8888-8888-8888-888888888888", ListAuditEventsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyEvents == nil || len(emptyEvents) != 0 {
+		t.Fatalf("expected empty audit list to be [], got %+v", emptyEvents)
+	}
+}
+
+func TestAuditEventListRejectsInvalidCursor(t *testing.T) {
+	store := newMemoryStore()
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if _, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{BeforeAuditEventID: DemoCustomerAccountID}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected audit cursor without created_at to fail, got %v", err)
+	}
+	if _, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{BeforeCreatedAt: &now, BeforeAuditEventID: "not-a-uuid"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected invalid audit cursor id to fail, got %v", err)
+	}
 }
 
 func TestMockOutboundCallsProviderAdapter(t *testing.T) {
@@ -2400,7 +2551,7 @@ func TestExternalInboundEventSuccessReplayHistoryAndAudit(t *testing.T) {
 	}
 	assertTransactionPresent(t, history, *first.TransferID, 15000, TransactionDirectionCredit)
 
-	events, err := store.ListAuditEvents(ctx, DemoInstitutionID)
+	events, err := store.ListAuditEvents(ctx, DemoInstitutionID, ListAuditEventsOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2646,6 +2797,10 @@ func uniqueAccountNumber(prefix string) string {
 	return fmt.Sprintf("%s%08d", prefix, atomic.AddUint64(&testAccountNumberSequence, 1))
 }
 
+func numberedTestUUID(prefix string, number int) string {
+	return fmt.Sprintf("%s-%012d", prefix, number)
+}
+
 func mustTransfer(t *testing.T, transfer *Transfer, err error) *Transfer {
 	t.Helper()
 	if err != nil {
@@ -2823,6 +2978,70 @@ func assertHistoryNewestFirst(t *testing.T, history []Transaction) {
 	}
 }
 
+func assertTransfersNewestFirst(t *testing.T, transfers []Transfer) {
+	t.Helper()
+	for i := 1; i < len(transfers); i++ {
+		if transfers[i].CreatedAt.After(transfers[i-1].CreatedAt) {
+			t.Fatalf("transfers are not ordered newest first at %d: %s after %s", i, transfers[i].CreatedAt, transfers[i-1].CreatedAt)
+		}
+		if transfers[i].CreatedAt.Equal(transfers[i-1].CreatedAt) && transfers[i].ID > transfers[i-1].ID {
+			t.Fatalf("transfer tie-breaker is not stable at %d: %s after %s", i, transfers[i].ID, transfers[i-1].ID)
+		}
+	}
+}
+
+func assertAuditEventsNewestFirst(t *testing.T, events []AuditEvent) {
+	t.Helper()
+	for i := 1; i < len(events); i++ {
+		if events[i].CreatedAt.After(events[i-1].CreatedAt) {
+			t.Fatalf("audit events are not ordered newest first at %d: %s after %s", i, events[i].CreatedAt, events[i-1].CreatedAt)
+		}
+		if events[i].CreatedAt.Equal(events[i-1].CreatedAt) && events[i].ID > events[i-1].ID {
+			t.Fatalf("audit event tie-breaker is not stable at %d: %s after %s", i, events[i].ID, events[i-1].ID)
+		}
+	}
+}
+
+func assertNoDuplicateTransfers(t *testing.T, transfers []Transfer) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, transfer := range transfers {
+		if seen[transfer.ID] {
+			t.Fatalf("transfer pagination returned duplicate %s", transfer.ID)
+		}
+		seen[transfer.ID] = true
+	}
+}
+
+func assertNoDuplicateAuditEvents(t *testing.T, events []AuditEvent) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, event := range events {
+		if seen[event.ID] {
+			t.Fatalf("audit pagination returned duplicate %s", event.ID)
+		}
+		seen[event.ID] = true
+	}
+}
+
+func assertTransferListMissing(t *testing.T, transfers []Transfer, transferID string) {
+	t.Helper()
+	for _, transfer := range transfers {
+		if transfer.ID == transferID {
+			t.Fatalf("transfer %s unexpectedly present in list: %+v", transferID, transfers)
+		}
+	}
+}
+
+func assertAuditEventListMissing(t *testing.T, events []AuditEvent, eventID string) {
+	t.Helper()
+	for _, event := range events {
+		if event.ID == eventID {
+			t.Fatalf("audit event %s unexpectedly present in list: %+v", eventID, events)
+		}
+	}
+}
+
 func assertTransactionPresent(t *testing.T, history []Transaction, transferID string, signedMinor int64, direction string) {
 	t.Helper()
 	for _, txn := range history {
@@ -2857,6 +3076,51 @@ func setTransferCreatedAt(t *testing.T, store *memoryStore, transferID string, c
 	transfer := store.transfers[transferID]
 	transfer.CreatedAt = createdAt
 	store.transfers[transferID] = transfer
+}
+
+func putMemoryTransferForList(t *testing.T, store *memoryStore, transferID, institutionID string, createdAt time.Time) Transfer {
+	t.Helper()
+	transfer := Transfer{
+		ID:                   transferID,
+		InstitutionID:        institutionID,
+		AccountID:            DemoCustomerAccountID,
+		Direction:            TransferDirectionInbound,
+		Status:               TransferStatusSucceeded,
+		ProviderStatus:       TransferStatusSucceeded,
+		LedgerStatus:         LedgerStatusPosted,
+		ReconciliationStatus: ReconciliationStatusMatched,
+		AmountMinor:          1000,
+		CurrencyID:           "NGN",
+		IdempotencyKey:       "list-transfer-" + transferID,
+		Provider:             ProviderLedgerInternal,
+		ProviderReference:    "list-transfer-ref-" + transferID,
+		Narration:            "List transfer pagination fixture",
+		CreatedAt:            createdAt,
+		UpdatedAt:            createdAt,
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.transfers[transfer.ID] = transfer
+	return transfer
+}
+
+func putMemoryAuditEventForList(store *memoryStore, eventID, institutionID string, createdAt time.Time) AuditEvent {
+	event := AuditEvent{
+		ID:            eventID,
+		InstitutionID: institutionID,
+		ActorType:     "system",
+		ActorID:       "system",
+		RequestID:     "service",
+		Action:        "audit.list_fixture",
+		EntityType:    "transfer",
+		EntityID:      eventID,
+		Metadata:      map[string]string{},
+		CreatedAt:     createdAt,
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.audits = append(store.audits, event)
+	return event
 }
 
 func setMemoryAccountStatus(store *memoryStore, accountID, status string) {
@@ -3290,14 +3554,27 @@ func (m *memoryStore) createAuditLockedContext(ctx context.Context, input auditE
 	return nil
 }
 
-func (m *memoryStore) ListAuditEvents(ctx context.Context, institutionID string) ([]AuditEvent, error) {
+func (m *memoryStore) ListAuditEvents(ctx context.Context, institutionID string, options ListAuditEventsOptions) ([]AuditEvent, error) {
+	options, err := normalizeListAuditEventsOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	events := []AuditEvent{}
-	for i := len(m.audits) - 1; i >= 0; i-- {
-		if m.audits[i].InstitutionID == institutionID {
-			events = append(events, m.audits[i])
+	for _, event := range m.audits {
+		if event.InstitutionID == institutionID && auditEventBeforeCursor(event, options) {
+			events = append(events, event)
 		}
+	}
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].CreatedAt.Equal(events[j].CreatedAt) {
+			return events[i].ID > events[j].ID
+		}
+		return events[i].CreatedAt.After(events[j].CreatedAt)
+	})
+	if len(events) > options.Limit {
+		events = events[:options.Limit]
 	}
 	return events, nil
 }
@@ -3322,16 +3599,28 @@ func (m *memoryStore) GetTransferByIdempotency(ctx context.Context, institutionI
 	return copyOf(m.transfers[id]), nil
 }
 
-func (m *memoryStore) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
+func (m *memoryStore) ListTransfers(ctx context.Context, institutionID string, options ListTransfersOptions) ([]Transfer, error) {
+	options, err := normalizeListTransfersOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var transfers []Transfer
 	for _, transfer := range m.transfers {
-		if transfer.InstitutionID == institutionID {
+		if transfer.InstitutionID == institutionID && transferBeforeCursor(transfer, options) {
 			transfers = append(transfers, transfer)
 		}
 	}
-	sort.Slice(transfers, func(i, j int) bool { return transfers[i].CreatedAt.After(transfers[j].CreatedAt) })
+	sort.Slice(transfers, func(i, j int) bool {
+		if transfers[i].CreatedAt.Equal(transfers[j].CreatedAt) {
+			return transfers[i].ID > transfers[j].ID
+		}
+		return transfers[i].CreatedAt.After(transfers[j].CreatedAt)
+	})
+	if len(transfers) > options.Limit {
+		transfers = transfers[:options.Limit]
+	}
 	return transfers, nil
 }
 
@@ -3485,13 +3774,25 @@ func reconciliationItemMatchesFilters(item ReconciliationItem, options ListRecon
 }
 
 func reconciliationItemBeforeCursor(item ReconciliationItem, options ListReconciliationItemsOptions) bool {
-	if options.BeforeCreatedAt == nil {
+	return createdBeforeCursor(item.CreatedAt, item.TransferID, options.BeforeCreatedAt, options.BeforeTransferID)
+}
+
+func transferBeforeCursor(transfer Transfer, options ListTransfersOptions) bool {
+	return createdBeforeCursor(transfer.CreatedAt, transfer.ID, options.BeforeCreatedAt, options.BeforeTransferID)
+}
+
+func auditEventBeforeCursor(event AuditEvent, options ListAuditEventsOptions) bool {
+	return createdBeforeCursor(event.CreatedAt, event.ID, options.BeforeCreatedAt, options.BeforeAuditEventID)
+}
+
+func createdBeforeCursor(createdAt time.Time, id string, beforeCreatedAt *time.Time, beforeID string) bool {
+	if beforeCreatedAt == nil {
 		return true
 	}
-	if options.BeforeTransferID != "" {
-		return item.CreatedAt.Before(*options.BeforeCreatedAt) || (item.CreatedAt.Equal(*options.BeforeCreatedAt) && item.TransferID < options.BeforeTransferID)
+	if beforeID != "" {
+		return createdAt.Before(*beforeCreatedAt) || (createdAt.Equal(*beforeCreatedAt) && id < beforeID)
 	}
-	return item.CreatedAt.Before(*options.BeforeCreatedAt)
+	return createdAt.Before(*beforeCreatedAt)
 }
 
 func (m *memoryStore) GetJournal(ctx context.Context, institutionID, journalEntryID string) (*JournalWithPostings, error) {

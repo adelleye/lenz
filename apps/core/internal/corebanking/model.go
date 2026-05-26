@@ -87,6 +87,12 @@ var (
 const (
 	DefaultTransactionHistoryLimit = 100
 	MaxTransactionHistoryLimit     = 200
+
+	DefaultTransferListLimit = DefaultTransactionHistoryLimit
+	MaxTransferListLimit     = MaxTransactionHistoryLimit
+
+	DefaultAuditEventListLimit = MaxTransactionHistoryLimit
+	MaxAuditEventListLimit     = MaxTransactionHistoryLimit
 )
 
 const (
@@ -373,6 +379,18 @@ type ListTransactionsOptions struct {
 	Limit            int
 	BeforeCreatedAt  *time.Time
 	BeforeTransferID string
+}
+
+type ListTransfersOptions struct {
+	Limit            int
+	BeforeCreatedAt  *time.Time
+	BeforeTransferID string
+}
+
+type ListAuditEventsOptions struct {
+	Limit              int
+	BeforeCreatedAt    *time.Time
+	BeforeAuditEventID string
 }
 
 type ReconciliationItem struct {
