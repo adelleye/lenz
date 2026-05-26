@@ -17,12 +17,11 @@ VALUES ($1, $2, $3, $4, $5, $6, 'active', 'pending_outbound_transfer', $7, $8, $
 		uuid.Must(uuid.NewRandom()).String(), transfer.InstitutionID, transfer.AccountID, transfer.ID, transfer.AmountMinor, transfer.CurrencyID, transfer.ProviderReference, now); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `
+	return execOneRow(ctx, tx, "update account balance for hold create", `
 UPDATE account_balances
 SET available_minor = available_minor - $1,
     updated_at = $2
 WHERE institution_id = $3 AND account_id = $4`, transfer.AmountMinor, now, transfer.InstitutionID, transfer.AccountID)
-	return err
 }
 
 func (r *sqlHoldRepository) release(ctx context.Context, tx TxRunner, institutionID, transferID string, now time.Time) error {
@@ -33,7 +32,7 @@ func (r *sqlHoldRepository) release(ctx context.Context, tx TxRunner, institutio
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `
+	if err = execOneRow(ctx, tx, "release transfer hold", `
 UPDATE account_holds
 SET status = 'released',
     updated_at = $1,
@@ -41,12 +40,11 @@ SET status = 'released',
 WHERE institution_id = $2 AND id = $3`, now, institutionID, hold.ID); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
+	return execOneRow(ctx, tx, "update account balance for hold release", `
 UPDATE account_balances
 SET available_minor = available_minor + $1,
     updated_at = $2
 WHERE institution_id = $3 AND account_id = $4`, hold.AmountMinor, now, institutionID, hold.AccountID)
-	return err
 }
 
 func (r *sqlHoldRepository) consume(ctx context.Context, tx TxRunner, institutionID, transferID string, now time.Time) error {
@@ -54,13 +52,12 @@ func (r *sqlHoldRepository) consume(ctx context.Context, tx TxRunner, institutio
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `
+	return execOneRow(ctx, tx, "consume transfer hold", `
 UPDATE account_holds
 SET status = 'consumed',
     updated_at = $1,
     released_at = $1
 WHERE institution_id = $2 AND id = $3`, now, institutionID, hold.ID)
-	return err
 }
 
 func (r *sqlHoldRepository) getActiveForTransfer(ctx context.Context, tx TxRunner, institutionID, transferID string) (*AccountHold, error) {

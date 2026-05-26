@@ -92,7 +92,7 @@ INSERT INTO account_holds (id, institution_id, account_id, transfer_id, amount_m
 VALUES (:id, :institution_id, :account_id, :transfer_id, :amount_minor, :currency_id, :status, :reason, :reference, :created_at, :updated_at, :released_at)`, hold); err != nil {
 			return normalizeSQLError(err)
 		}
-		if _, err = tx.ExecContext(ctx, `
+		if err = execOneRow(ctx, tx, "update account balance for lien place", `
 UPDATE account_balances
 SET available_minor = available_minor - $1,
     updated_at = $2
@@ -131,7 +131,7 @@ func (r *sqlAccountRepository) ReleaseAccountLien(ctx context.Context, input Rel
 			return nil
 		}
 		now := time.Now().UTC()
-		if _, err = tx.ExecContext(ctx, `
+		if err = execOneRow(ctx, tx, "release account lien", `
 UPDATE account_holds
 SET status = 'released',
     updated_at = $1,
@@ -139,7 +139,7 @@ SET status = 'released',
 WHERE institution_id = $2 AND account_id = $3 AND id = $4`, now, input.InstitutionID, input.AccountID, input.LienID); err != nil {
 			return err
 		}
-		if _, err = tx.ExecContext(ctx, `
+		if err = execOneRow(ctx, tx, "update account balance for lien release", `
 UPDATE account_balances
 SET available_minor = available_minor + $1,
     updated_at = $2

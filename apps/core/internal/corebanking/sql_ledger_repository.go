@@ -85,14 +85,13 @@ func (r *sqlLedgerRepository) applyPostingBalance(ctx context.Context, tx TxRunn
 	if !availableDeltaOverride {
 		availableDelta = delta
 	}
-	_, err := tx.ExecContext(ctx, `
+	return execOneRow(ctx, tx, "update account balance for posting", `
 UPDATE account_balances
 SET available_minor = available_minor + $1,
     ledger_minor = ledger_minor + $2,
     last_journal_entry_id = $3,
     updated_at = $4
 WHERE institution_id = $5 AND account_id = $6`, availableDelta, delta, journalID, now, institutionID, accountID)
-	return err
 }
 
 func (r *sqlLedgerRepository) normalBalances(ctx context.Context, tx TxRunner, institutionID, firstAccountID, secondAccountID string) (map[string]string, error) {

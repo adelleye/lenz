@@ -227,7 +227,11 @@ func lockAccountBalance(ctx context.Context, tx TxRunner, institutionID, account
 		return nil, normalizeSQLError(err)
 	}
 	if err := tx.GetContext(ctx, &out.Balance, `SELECT account_id, institution_id, available_minor, ledger_minor, currency_id, last_journal_entry_id, updated_at FROM account_balances WHERE institution_id = $1 AND account_id = $2 FOR UPDATE`, institutionID, accountID); err != nil {
-		return nil, normalizeSQLError(err)
+		err = normalizeSQLError(err)
+		if errors.Is(err, ErrNotFound) {
+			return nil, ErrDataIntegrity
+		}
+		return nil, err
 	}
 	return &out, nil
 }
