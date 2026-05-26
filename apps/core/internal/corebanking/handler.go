@@ -51,8 +51,9 @@ func (h *HTTPServer) Routes(r chi.Router) {
 }
 
 func openAPIRequestError(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("bad_request request_id=%s method=%s path=%s error=%v", requestID(r), r.Method, r.URL.Path, err)
-	writeError(w, http.StatusBadRequest, "invalid_request")
+	requestID := requestID(r)
+	log.Printf("bad_request request_id=%s method=%s path=%s error=%v", requestID, r.Method, r.URL.Path, err)
+	writeErrorWithRequestID(w, http.StatusBadRequest, "invalid_request", requestID)
 }
 
 func openAPIResponseError(w http.ResponseWriter, r *http.Request, err error) {
@@ -1056,19 +1057,19 @@ func respond(w http.ResponseWriter, r *http.Request, v any, err error) {
 	}
 	switch {
 	case errors.Is(err, ErrUnauthorized):
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, r, http.StatusUnauthorized, "unauthorized")
 	case errors.Is(err, ErrForbidden):
-		writeError(w, http.StatusForbidden, "forbidden")
+		writeError(w, r, http.StatusForbidden, "forbidden")
 	case errors.Is(err, ErrNotFound):
-		writeError(w, http.StatusNotFound, "not_found")
+		writeError(w, r, http.StatusNotFound, "not_found")
 	case errors.Is(err, ErrUnsupportedProvider):
-		writeError(w, http.StatusBadRequest, "unsupported_provider")
+		writeError(w, r, http.StatusBadRequest, "unsupported_provider")
 	case errors.Is(err, ErrInvalidRequest):
-		writeError(w, http.StatusBadRequest, "invalid_request")
+		writeError(w, r, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, ErrInsufficient):
-		writeError(w, http.StatusUnprocessableEntity, "insufficient_funds")
+		writeError(w, r, http.StatusUnprocessableEntity, "insufficient_funds")
 	case errors.Is(err, ErrConflict):
-		writeError(w, http.StatusConflict, "conflict")
+		writeError(w, r, http.StatusConflict, "conflict")
 	default:
 		writeInternalError(w, r, err)
 	}
@@ -1084,8 +1085,15 @@ func writeJSONResponse(w http.ResponseWriter, status int, v any) error {
 	return json.NewEncoder(w).Encode(v)
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"message": message})
+func writeError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	writeErrorWithRequestID(w, status, message, requestID(r))
+}
+
+func writeErrorWithRequestID(w http.ResponseWriter, status int, message, requestID string) {
+	writeJSON(w, status, map[string]string{
+		"message":    message,
+		"request_id": requestID,
+	})
 }
 
 func writeInternalError(w http.ResponseWriter, r *http.Request, err error) {

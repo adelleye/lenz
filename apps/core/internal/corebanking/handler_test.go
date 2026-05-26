@@ -213,6 +213,160 @@ func TestInternalErrorsAreSanitized(t *testing.T) {
 	}
 }
 
+func TestCoreBankingErrorResponsesIncludeRequestID(t *testing.T) {
+	tests := []struct {
+		name        string
+		requestID   string
+		wantStatus  int
+		wantMessage string
+		wantNoLeak  string
+		setup       func(t *testing.T) (http.Handler, *http.Request)
+	}{
+		{
+			name:        "openapi request error",
+			requestID:   "req-openapi-request-error",
+			wantStatus:  http.StatusBadRequest,
+			wantMessage: "invalid_request",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				_, svc, _ := newTestService(t)
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/not-a-uuid/balance", nil)
+				req = withTestPrincipal(req, DemoInstitutionID)
+				return router, req
+			},
+		},
+		{
+			name:        "invalid request",
+			requestID:   "req-invalid-request",
+			wantStatus:  http.StatusBadRequest,
+			wantMessage: "invalid_request",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				_, svc, _ := newTestService(t)
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":0,"currency_id":"NGN","idempotency_key":"request-id-invalid"}`
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/credits", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req = withTestPrincipal(req, DemoInstitutionID)
+				return router, req
+			},
+		},
+		{
+			name:        "unauthorized",
+			requestID:   "req-unauthorized",
+			wantStatus:  http.StatusUnauthorized,
+			wantMessage: "unauthorized",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				_, svc, _ := newTestService(t)
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+				return router, req
+			},
+		},
+		{
+			name:        "forbidden tenant mismatch",
+			requestID:   "req-forbidden-tenant-mismatch",
+			wantStatus:  http.StatusForbidden,
+			wantMessage: "forbidden",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				_, svc, _ := newTestService(t)
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+				req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+				req = withTestPrincipal(req, DemoInstitutionID)
+				return router, req
+			},
+		},
+		{
+			name:        "not found",
+			requestID:   "req-not-found",
+			wantStatus:  http.StatusNotFound,
+			wantMessage: "not_found",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				_, svc, _ := newTestService(t)
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/99999999-9999-9999-9999-999999999999/balance", nil)
+				req = withTestPrincipal(req, DemoInstitutionID)
+				return router, req
+			},
+		},
+		{
+			name:        "conflict",
+			requestID:   "req-conflict",
+			wantStatus:  http.StatusConflict,
+			wantMessage: "conflict",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				_, svc, _ := newTestService(t)
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				body := `{"customer_id":"` + DemoCustomerID + `","account_number":"9990000001","name":"Duplicate Wallet","product_type":"standard_wallet","currency_id":"NGN"}`
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req = withTestPrincipal(req, DemoInstitutionID)
+				return router, req
+			},
+		},
+		{
+			name:        "insufficient funds",
+			requestID:   "req-insufficient-funds",
+			wantStatus:  http.StatusUnprocessableEntity,
+			wantMessage: "insufficient_funds",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				_, svc, _ := newTestService(t)
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"currency_id":"NGN","idempotency_key":"request-id-insufficient"}`
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/debits", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req = withTestPrincipal(req, DemoInstitutionID)
+				return router, req
+			},
+		},
+		{
+			name:        "internal error",
+			requestID:   "req-internal-error",
+			wantStatus:  http.StatusInternalServerError,
+			wantMessage: "internal_server_error",
+			wantNoLeak:  "database password=secret",
+			setup: func(t *testing.T) (http.Handler, *http.Request) {
+				t.Helper()
+				store := &failingBalanceStore{memoryStore: newMemoryStore()}
+				svc := NewService(store, NewMockNIPProvider())
+				router := chi.NewRouter()
+				NewHandler(svc).Routes(router)
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/"+DemoCustomerAccountID+"/balance", nil)
+				req = withTestPrincipal(req, DemoInstitutionID)
+				return router, req
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router, req := tt.setup(t)
+			req.Header.Set("X-Request-ID", tt.requestID)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			assertHTTPErrorResponse(t, rec, tt.wantStatus, tt.wantMessage, tt.requestID)
+			if tt.wantNoLeak != "" && strings.Contains(rec.Body.String(), tt.wantNoLeak) {
+				t.Fatalf("raw internal error leaked to client: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestCreateCustomerRouteCreatesAndGetsCustomer(t *testing.T) {
 	_, svc, _ := newTestService(t)
 	router := chi.NewRouter()
@@ -1996,6 +2150,29 @@ func decodeHTTPTransfers(t *testing.T, rec *httptest.ResponseRecorder) []Transfe
 		t.Fatal(err)
 	}
 	return transfers
+}
+
+func assertHTTPErrorResponse(t *testing.T, rec *httptest.ResponseRecorder, wantStatus int, wantMessage, wantRequestID string) {
+	t.Helper()
+	if rec.Code != wantStatus {
+		t.Fatalf("expected status %d, got %d body=%s", wantStatus, rec.Code, rec.Body.String())
+	}
+	if contentType := rec.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("expected JSON error response content type, got %q", contentType)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["message"] != wantMessage {
+		t.Fatalf("expected error message %q, got body=%+v", wantMessage, body)
+	}
+	if body["request_id"] != wantRequestID {
+		t.Fatalf("expected request_id %q, got body=%+v", wantRequestID, body)
+	}
+	if len(body) != 2 {
+		t.Fatalf("expected only message and request_id in error body, got %+v", body)
+	}
 }
 
 type failingBalanceStore struct {
