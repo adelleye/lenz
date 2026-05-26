@@ -64,6 +64,9 @@ coverage/
 tmp/
 temp/
 
+# Internal planning docs
+docs/cba-goals/
+
 # Secrets (never commit)
 secrets/
 *.pem
