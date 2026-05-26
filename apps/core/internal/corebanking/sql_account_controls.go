@@ -56,20 +56,32 @@ RETURNING id, institution_id, customer_id, account_number, name, kind, product_t
 func (r *sqlAccountRepository) PlaceAccountLien(ctx context.Context, input AccountLienInput) (*AccountHold, error) {
 	var hold *AccountHold
 	err := WithTx(ctx, r.db, func(tx TxRunner) error {
+		if err := lockReplayKey(ctx, tx, "account_lien_reference", input.InstitutionID, input.Reference); err != nil {
+			return err
+		}
 		account, err := lockAccountBalance(ctx, tx, input.InstitutionID, input.AccountID)
 		if err != nil {
 			return err
 		}
-		if account.CurrencyID != input.CurrencyID || account.Kind != AccountKindCustomer || account.Status == AccountStatusClosed {
+		if account.Kind != AccountKindCustomer || account.Status == AccountStatusClosed {
 			return ErrInvalidRequest
 		}
 		existing, err := getActiveLienByReference(ctx, tx, input.InstitutionID, input.AccountID, input.Reference)
 		if err == nil {
+			if !accountLienReplayMatches(input, existing) {
+				return ErrConflict
+			}
 			hold = existing
 			return nil
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return err
+		}
+		if err = ensureNoOtherActiveLienByReference(ctx, tx, input.InstitutionID, input.AccountID, input.Reference); err != nil {
+			return err
+		}
+		if account.CurrencyID != input.CurrencyID {
+			return ErrInvalidRequest
 		}
 		if account.Balance.AvailableMinor < input.AmountMinor {
 			return ErrInsufficient
@@ -198,6 +210,29 @@ FOR UPDATE`, institutionID, accountID, reference)
 	return &hold, normalizeSQLError(err)
 }
 
+func ensureNoOtherActiveLienByReference(ctx context.Context, tx TxRunner, institutionID, accountID, reference string) error {
+	var id string
+	err := tx.GetContext(ctx, &id, `
+SELECT id
+FROM account_holds
+WHERE institution_id = $1
+  AND account_id <> $2
+  AND reference = $3
+  AND transfer_id IS NULL
+  AND status = 'active'
+ORDER BY created_at, id
+LIMIT 1
+FOR UPDATE`, institutionID, accountID, reference)
+	err = normalizeSQLError(err)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return ErrConflict
+}
+
 func getLienForUpdate(ctx context.Context, tx TxRunner, institutionID, accountID, lienID string) (*AccountHold, error) {
 	var hold AccountHold
 	err := tx.GetContext(ctx, &hold, `
@@ -209,4 +244,12 @@ WHERE institution_id = $1
   AND transfer_id IS NULL
 FOR UPDATE`, institutionID, accountID, lienID)
 	return &hold, normalizeSQLError(err)
+}
+
+func accountLienReplayMatches(input AccountLienInput, hold *AccountHold) bool {
+	return hold.InstitutionID == input.InstitutionID &&
+		hold.AccountID == input.AccountID &&
+		hold.Reference == input.Reference &&
+		hold.AmountMinor == input.AmountMinor &&
+		hold.CurrencyID == input.CurrencyID
 }

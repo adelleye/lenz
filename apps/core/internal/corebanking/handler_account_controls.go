@@ -118,7 +118,7 @@ func (req *AccountLienRequest) Bind(r *http.Request) error {
 }
 
 func validateAccountLienRequest(req *AccountLienRequest) error {
-	if req == nil || req.AmountMinor <= 0 || string(req.CurrencyId) != "NGN" || strings.TrimSpace(req.Reference) == "" || strings.TrimSpace(req.Reason) == "" {
+	if req == nil || req.AmountMinor <= 0 || strings.TrimSpace(string(req.CurrencyId)) == "" || strings.TrimSpace(req.Reference) == "" || strings.TrimSpace(req.Reason) == "" {
 		return ErrInvalidRequest
 	}
 	return nil

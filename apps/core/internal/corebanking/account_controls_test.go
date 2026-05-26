@@ -1,6 +1,7 @@
 package corebanking
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -182,6 +183,60 @@ func TestAccountLienReducesAvailableAndReleaseRestores(t *testing.T) {
 	mustInternalDebit(t, svc, ctx, InternalDebitInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, AmountMinor: 20000, CurrencyID: "NGN", IdempotencyKey: "post-lien-debit"})
 }
 
+func TestAccountLienReplayRequiresSamePayload(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	account := createMemoryCustomerAccount(t, svc, ctx, "LienReplay", "Holder", "lien.replay@example.com", uniqueAccountNumber("87"))
+	otherAccount := createMemoryCustomerAccount(t, svc, ctx, "LienReplay", "Other", "lien.replay.other@example.com", uniqueAccountNumber("88"))
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, AmountMinor: 40000, CurrencyID: "NGN", IdempotencyKey: "lien-replay-funding"})
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: otherAccount.ID, AmountMinor: 25000, CurrencyID: "NGN", IdempotencyKey: "lien-replay-other-funding"})
+
+	input := AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, AmountMinor: 12000, CurrencyID: "NGN", Reference: "lien-replay-ref", Reason: "ops lien"}
+	lien, err := svc.PlaceAccountLien(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := svc.PlaceAccountLien(ctx, AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, AmountMinor: 12000, CurrencyID: "NGN", Reference: "lien-replay-ref", Reason: "ops lien replay"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.ID != lien.ID {
+		t.Fatalf("expected same-payload replay to return lien %s, got %s", lien.ID, replay.ID)
+	}
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, account.ID, 28000, 40000)
+	assertBalancePair(t, svc, ctx, DemoInstitutionID, otherAccount.ID, 25000, 25000)
+	assertMemoryActiveLienReferenceCount(t, store, "lien-replay-ref", 1)
+	assertMemoryLienAuditReferenceCount(t, store, "lien-replay-ref", 1)
+
+	conflicts := []struct {
+		name  string
+		input AccountLienInput
+	}{
+		{
+			name:  "different_amount",
+			input: AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, AmountMinor: 13000, CurrencyID: "NGN", Reference: "lien-replay-ref", Reason: "changed amount"},
+		},
+		{
+			name:  "different_currency",
+			input: AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: account.ID, AmountMinor: 12000, CurrencyID: "USD", Reference: "lien-replay-ref", Reason: "changed currency"},
+		},
+		{
+			name:  "different_account",
+			input: AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: otherAccount.ID, AmountMinor: 12000, CurrencyID: "NGN", Reference: "lien-replay-ref", Reason: "changed account"},
+		},
+	}
+	for _, tt := range conflicts {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := svc.PlaceAccountLien(ctx, tt.input); !errors.Is(err, ErrConflict) {
+				t.Fatalf("expected replay mismatch to fail with conflict, got %v", err)
+			}
+			assertBalancePair(t, svc, ctx, DemoInstitutionID, account.ID, 28000, 40000)
+			assertBalancePair(t, svc, ctx, DemoInstitutionID, otherAccount.ID, 25000, 25000)
+			assertMemoryActiveLienReferenceCount(t, store, "lien-replay-ref", 1)
+			assertMemoryLienAuditReferenceCount(t, store, "lien-replay-ref", 1)
+		})
+	}
+}
+
 func TestAccountControlsRejectInvalidAndCrossTenantInputs(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: DemoInstitutionID, AccountID: DemoCustomerAccountID, Reason: "missing reference"}); !errors.Is(err, ErrInvalidRequest) {
@@ -195,5 +250,35 @@ func TestAccountControlsRejectInvalidAndCrossTenantInputs(t *testing.T) {
 	}
 	if _, err := svc.FreezeAccount(ctx, AccountControlInput{InstitutionID: "99999999-9999-9999-9999-999999999999", AccountID: DemoCustomerAccountID, Reference: "cross-freeze", Reason: "cross"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected cross-tenant freeze to fail, got %v", err)
+	}
+}
+
+func assertMemoryActiveLienReferenceCount(t *testing.T, store *memoryStore, reference string, want int) {
+	t.Helper()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	count := 0
+	for _, hold := range store.holds {
+		if hold.InstitutionID == DemoInstitutionID && hold.Reference == reference && hold.TransferID == nil && hold.Status == HoldStatusActive {
+			count++
+		}
+	}
+	if count != want {
+		t.Fatalf("active lien count for reference %q = %d, want %d", reference, count, want)
+	}
+}
+
+func assertMemoryLienAuditReferenceCount(t *testing.T, store *memoryStore, reference string, want int) {
+	t.Helper()
+	events, err := store.ListAuditEvents(context.Background(), DemoInstitutionID, ListAuditEventsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := countAuditEvents(events, AuditActionLienPlaced, func(event AuditEvent) bool {
+		return event.Reference != nil && *event.Reference == reference
+	})
+	if count != want {
+		t.Fatalf("lien audit count for reference %q = %d, want %d", reference, count, want)
 	}
 }

@@ -80,7 +80,7 @@ func (s *Service) PlaceAccountLien(ctx context.Context, input AccountLienInput) 
 	if _, err := uuid.Parse(input.AccountID); err != nil {
 		return nil, ErrInvalidRequest
 	}
-	if input.AmountMinor <= 0 || input.CurrencyID != "NGN" || input.Reference == "" || input.Reason == "" {
+	if input.AmountMinor <= 0 || input.CurrencyID == "" || input.Reference == "" || input.Reason == "" {
 		return nil, ErrInvalidRequest
 	}
 	return s.repository.PlaceAccountLien(ctx, input)

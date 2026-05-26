@@ -16,10 +16,48 @@ func TestSQLAccountControlsGoal08(t *testing.T) {
 	svc := seededSQLService(t, db, ctx)
 
 	lienAccount := createSQLCustomerAccount(t, svc, ctx, "SQL", "Lien", "sql.lien@example.com", "8234567890", "SQL Lien")
+	otherLienAccount := createSQLCustomerAccount(t, svc, ctx, "SQL", "OtherLien", "sql.other.lien@example.com", "8234567897", "SQL Other Lien")
 	mustInternalCredit(t, svc, ctx, InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: lienAccount.ID, AmountMinor: 50000, CurrencyID: "NGN", IdempotencyKey: "sql-control-lien-funding"})
-	lien := mustPlaceSQLLien(t, svc, ctx, AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: lienAccount.ID, AmountMinor: 15000, CurrencyID: "NGN", Reference: "sql-lien-ref", Reason: "ops lien"})
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{InstitutionID: DemoInstitutionID, AccountID: otherLienAccount.ID, AmountMinor: 25000, CurrencyID: "NGN", IdempotencyKey: "sql-control-other-lien-funding"})
+	lienInput := AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: lienAccount.ID, AmountMinor: 15000, CurrencyID: "NGN", Reference: "sql-lien-ref", Reason: "ops lien"}
+	lien := mustPlaceSQLLien(t, svc, ctx, lienInput)
+	replayedLien := mustPlaceSQLLien(t, svc, ctx, AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: lienAccount.ID, AmountMinor: 15000, CurrencyID: "NGN", Reference: "sql-lien-ref", Reason: "ops lien replay"})
+	if replayedLien.ID != lien.ID {
+		t.Fatalf("expected SQL lien replay to return lien %s, got %s", lien.ID, replayedLien.ID)
+	}
 	assertSQLBalanceForAccount(t, svc, ctx, lienAccount.ID, 35000, 50000)
+	assertSQLBalanceForAccount(t, svc, ctx, otherLienAccount.ID, 25000, 25000)
 	assertSQLLienRow(t, ctx, db, lien.ID, HoldStatusActive, "sql-lien-ref")
+	assertSQLActiveLienReferenceCount(t, ctx, db, "sql-lien-ref", 1)
+	assertSQLAuditReferenceCount(t, ctx, db, AuditActionLienPlaced, "sql-lien-ref", 1)
+	lienConflicts := []struct {
+		name  string
+		input AccountLienInput
+	}{
+		{
+			name:  "different_amount",
+			input: AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: lienAccount.ID, AmountMinor: 16000, CurrencyID: "NGN", Reference: "sql-lien-ref", Reason: "changed amount"},
+		},
+		{
+			name:  "different_currency",
+			input: AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: lienAccount.ID, AmountMinor: 15000, CurrencyID: "USD", Reference: "sql-lien-ref", Reason: "changed currency"},
+		},
+		{
+			name:  "different_account",
+			input: AccountLienInput{InstitutionID: DemoInstitutionID, AccountID: otherLienAccount.ID, AmountMinor: 15000, CurrencyID: "NGN", Reference: "sql-lien-ref", Reason: "changed account"},
+		},
+	}
+	for _, tt := range lienConflicts {
+		t.Run("lien_replay_"+tt.name, func(t *testing.T) {
+			if _, err := svc.PlaceAccountLien(ctx, tt.input); !errors.Is(err, ErrConflict) {
+				t.Fatalf("expected SQL lien replay mismatch to fail with conflict, got %v", err)
+			}
+			assertSQLBalanceForAccount(t, svc, ctx, lienAccount.ID, 35000, 50000)
+			assertSQLBalanceForAccount(t, svc, ctx, otherLienAccount.ID, 25000, 25000)
+			assertSQLActiveLienReferenceCount(t, ctx, db, "sql-lien-ref", 1)
+			assertSQLAuditReferenceCount(t, ctx, db, AuditActionLienPlaced, "sql-lien-ref", 1)
+		})
+	}
 	if _, err := svc.InternalDebit(ctx, InternalDebitInput{InstitutionID: DemoInstitutionID, AccountID: lienAccount.ID, AmountMinor: 40000, CurrencyID: "NGN", IdempotencyKey: "sql-over-lien-debit"}); !errors.Is(err, ErrInsufficient) {
 		t.Fatalf("expected lien to reduce spendable balance, got %v", err)
 	}
@@ -183,5 +221,38 @@ func assertSQLLienRow(t *testing.T, ctx context.Context, db *sqlx.DB, lienID, wa
 	}
 	if row.Status != wantStatus || row.Reference != wantReference || row.Transfer != nil {
 		t.Fatalf("SQL lien row mismatch: %+v", row)
+	}
+}
+
+func assertSQLActiveLienReferenceCount(t *testing.T, ctx context.Context, db *sqlx.DB, reference string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM account_holds
+WHERE institution_id = $1
+  AND reference = $2
+  AND transfer_id IS NULL
+  AND status = 'active'`, DemoInstitutionID, reference); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("SQL active lien count for reference %q = %d, want %d", reference, count, want)
+	}
+}
+
+func assertSQLAuditReferenceCount(t *testing.T, ctx context.Context, db *sqlx.DB, action, reference string, want int) {
+	t.Helper()
+	var count int
+	if err := db.GetContext(ctx, &count, `
+SELECT COUNT(*)
+FROM audit_events
+WHERE institution_id = $1
+  AND action = $2
+  AND reference = $3`, DemoInstitutionID, action, reference); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("SQL audit count for action %q reference %q = %d, want %d", action, reference, count, want)
 	}
 }

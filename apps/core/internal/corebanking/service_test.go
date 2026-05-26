@@ -3472,13 +3472,24 @@ func (m *memoryStore) PlaceAccountLien(ctx context.Context, input AccountLienInp
 	if !ok || balance.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
 	}
-	if account.Kind != AccountKindCustomer || account.CurrencyID != input.CurrencyID || account.Status == AccountStatusClosed {
+	if account.Kind != AccountKindCustomer || account.Status == AccountStatusClosed {
 		return nil, ErrInvalidRequest
 	}
 	for _, hold := range m.holds {
 		if hold.InstitutionID == input.InstitutionID && hold.AccountID == input.AccountID && hold.TransferID == nil && hold.Status == HoldStatusActive && hold.Reference == input.Reference {
+			if !accountLienReplayMatches(input, &hold) {
+				return nil, ErrConflict
+			}
 			return copyOf(hold), nil
 		}
+	}
+	for _, hold := range m.holds {
+		if hold.InstitutionID == input.InstitutionID && hold.AccountID != input.AccountID && hold.TransferID == nil && hold.Status == HoldStatusActive && hold.Reference == input.Reference {
+			return nil, ErrConflict
+		}
+	}
+	if account.CurrencyID != input.CurrencyID {
+		return nil, ErrInvalidRequest
 	}
 	if balance.AvailableMinor < input.AmountMinor {
 		return nil, ErrInsufficient

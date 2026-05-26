@@ -75,6 +75,26 @@ func TestHTTPAccountControlsEndpoints(t *testing.T) {
 	if balance.AvailableMinor != 17000 || balance.LedgerMinor != 22000 {
 		t.Fatalf("expected lien to reduce available only, got %+v", balance)
 	}
+	replayedLien := postHTTPAccountLien(t, router, account.ID, `{"amount_minor":5000,"currency_id":"NGN","reference":"lien-http","reason":"ops lien replay"}`)
+	if replayedLien.ID != lien.ID {
+		t.Fatalf("expected HTTP lien replay to return lien %s, got %s", lien.ID, replayedLien.ID)
+	}
+	balance = getHTTPBalance(t, router, account.ID)
+	if balance.AvailableMinor != 17000 || balance.LedgerMinor != 22000 {
+		t.Fatalf("expected same-payload lien replay to leave balance unchanged, got %+v", balance)
+	}
+	rec = postHTTPAccountLienRequest(t, router, account.ID, `{"amount_minor":6000,"currency_id":"NGN","reference":"lien-http","reason":"changed amount"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected changed-amount lien replay to return 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = postHTTPAccountLienRequest(t, router, account.ID, `{"amount_minor":5000,"currency_id":"USD","reference":"lien-http","reason":"changed currency"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected changed-currency lien replay to return 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	balance = getHTTPBalance(t, router, account.ID)
+	if balance.AvailableMinor != 17000 || balance.LedgerMinor != 22000 {
+		t.Fatalf("expected conflicting lien replays to leave balance unchanged, got %+v", balance)
+	}
 	released := deleteHTTPAccountLien(t, router, account.ID, lien.ID, `{"reference":"lien-release-http"}`)
 	if released.Status != HoldStatusReleased {
 		t.Fatalf("expected released lien, got %+v", released)
@@ -157,11 +177,7 @@ func deleteHTTPAccount(t *testing.T, router http.Handler, accountID, suffix, bod
 
 func postHTTPAccountLien(t *testing.T, router http.Handler, accountID, body string) AccountHold {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts/"+accountID+"/liens", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = withTestPrincipal(req, DemoInstitutionID)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	rec := postHTTPAccountLienRequest(t, router, accountID, body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected lien placement to return 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
@@ -170,6 +186,16 @@ func postHTTPAccountLien(t *testing.T, router http.Handler, accountID, body stri
 		t.Fatal(err)
 	}
 	return hold
+}
+
+func postHTTPAccountLienRequest(t *testing.T, router http.Handler, accountID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts/"+accountID+"/liens", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
 }
 
 func deleteHTTPAccountLien(t *testing.T, router http.Handler, accountID, lienID, body string) AccountHold {
