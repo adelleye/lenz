@@ -26,7 +26,6 @@ scripts/       Bootstrap, UAT, and demo proof scripts
 ```text
 apps/core/
   main.go                         starts the API
-  cmd/migrate/                    runs SQL migrations
   server/                         HTTP server, middleware, dependency wiring
   internal/corebanking/           CBA v0.1 transaction spine
   internal/institution/           no-route OpenAPI module placeholder
@@ -138,6 +137,7 @@ go generate ./apps/core/internal/corebanking
 go generate ./apps/core/internal/institution
 go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
 go build ./apps/core/... ./apps/auth/... ./packages/shared/...
+./scripts/migrate.sh up
 TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/uat_simple_transaction_cba.sh
 TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/demo_transfer_spine.sh
 ```

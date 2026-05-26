@@ -77,7 +77,7 @@ fi
 
 if [[ "$RUN_MIGRATIONS" == "true" ]]; then
   require_cmd "$GO_BIN"
-  DATABASE_URL="$DATABASE_URL" "$GO_BIN" run ./apps/core/cmd/migrate
+  DATABASE_URL="$DATABASE_URL" GO_BIN="$GO_BIN" ./scripts/migrate.sh up
 fi
 
 run_psql <<'SQL'

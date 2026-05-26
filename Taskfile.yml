@@ -25,11 +25,11 @@ tasks:
   
   migration_run_up:
     cmds:
-      - go run ./apps/core/cmd/migrate
+      - ./scripts/migrate.sh up
   
   migration_run_down:
     cmds:
-      - echo "Down migrations are manual for now; see migrations/*.down.sql"
+      - ./scripts/migrate.sh down
 
   test:
     deps: [generate]

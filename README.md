@@ -57,7 +57,7 @@ product still needs:
 - production auth/RBAC and tenant/user role enforcement;
 - maker-checker and limit checks;
 - KYC/BVN/NIN verification;
-- true NUBAN issuance/check-digit validation;
+- full NUBAN generation/check-digit validation, which is deferred;
 - real NIBSS/NIP or sponsor-bank provider adapters;
 - signed webhooks and provider credential management;
 - provider settlement files and operations workflows;
@@ -153,7 +153,8 @@ curl -fsS \
   account policy, holds, ledger posting, provider status, reconciliation, and
   audit.
 - `apps/core/internal/corebanking/sql_*.go` owns Postgres reads and writes.
-- `migrations/` defines the database schema.
+- `migrations/` defines the database schema and is applied through Soda/Pop via
+  `scripts/migrate.sh`.
 - `scripts/` contains the repeatable local proof flows.
 
 See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for a folder-by-folder map and

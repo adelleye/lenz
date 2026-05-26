@@ -180,7 +180,7 @@ wait_container_healthy lenzcore-redis
 pass "Docker Compose started healthy Postgres and Redis"
 
 echo "Running migrations..."
-DATABASE_URL="$DATABASE_URL" "$GO_BIN" run ./apps/core/cmd/migrate >/tmp/lenz-core-demo-migrate.log
+DATABASE_URL="$DATABASE_URL" GO_BIN="$GO_BIN" ./scripts/migrate.sh up >/tmp/lenz-core-demo-migrate.log
 cat /tmp/lenz-core-demo-migrate.log
 pass "migrations applied"
 
