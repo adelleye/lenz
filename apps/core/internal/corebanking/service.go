@@ -3,7 +3,6 @@ package corebanking
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/mail"
 	"strings"
 
@@ -468,24 +467,56 @@ func (s *Service) MockInbound(ctx context.Context, req TransferRequest) (*Transf
 }
 
 func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Transfer, error) {
+	explicitStatus := strings.TrimSpace(req.Status) != ""
 	if err := normalizeTransferRequest(&req); err != nil {
 		return nil, err
 	}
 	requestFingerprint := mockTransferRequestFingerprint(TransferDirectionOutbound, req)
-	existing, err := s.repository.GetTransferByIdempotency(ctx, req.InstitutionID, req.IdempotencyKey)
-	if err == nil {
-		if !transferRequestFingerprintMatches(existing, requestFingerprint) {
-			return nil, ErrConflict
-		}
-		return existing, nil
-	}
-	if !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
 	provider, err := s.provider(ProviderMockNIP)
 	if err != nil {
 		return nil, err
 	}
+	if explicitStatus && req.Status != TransferStatusPending && req.ProviderReference != "" {
+		return s.recordProviderTransfer(ctx, TransferDirectionOutbound, req, ProviderTransferResult{
+			Provider:          provider.Name(),
+			ProviderReference: req.ProviderReference,
+			ProviderEventID:   req.ProviderEventID,
+			Status:            req.Status,
+			ProviderStatus:    req.Status,
+			Narration:         req.Narration,
+		}, requestFingerprint)
+	}
+	clearing, err := s.repository.GetDefaultInternalSettlementAccount(ctx, req.InstitutionID, req.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+
+	intentInput := RecordTransferInput{
+		InstitutionID:      req.InstitutionID,
+		AccountID:          req.AccountID,
+		ClearingAccountID:  clearing.ID,
+		Direction:          TransferDirectionOutbound,
+		Status:             TransferStatusPending,
+		AmountMinor:        req.AmountMinor,
+		CurrencyID:         req.CurrencyID,
+		IdempotencyKey:     req.IdempotencyKey,
+		Provider:           ProviderMockNIP,
+		ProviderReference:  req.ProviderReference,
+		ProviderStatus:     TransferStatusPending,
+		RequestFingerprint: requestFingerprint,
+		Narration:          req.Narration,
+	}
+	intent, created, err := s.repository.BeginExternalOutboundTransfer(ctx, intentInput)
+	if err != nil {
+		return nil, err
+	}
+	if !created {
+		return intent, nil
+	}
+	if intent.Status != TransferStatusPending {
+		return intent, nil
+	}
+
 	providerRequest := ProviderTransferRequest{
 		InstitutionID:     req.InstitutionID,
 		AccountID:         req.AccountID,
@@ -501,12 +532,16 @@ func (s *Service) MockOutbound(ctx context.Context, req TransferRequest) (*Trans
 	}
 	result, err := provider.InitiateTransfer(ctx, providerRequest)
 	if err != nil {
-		if !providerTransferStatusUnknown(err) {
-			return nil, err
+		if providerTransferStatusUnknown(err) {
+			result = providerUnknownTransferResult(provider, providerRequest)
+		} else {
+			result = failedProviderTransferResult(provider, providerRequest)
 		}
-		result = providerUnknownTransferResult(provider, providerRequest)
 	}
-	return s.recordProviderTransfer(ctx, TransferDirectionOutbound, req, *result, requestFingerprint)
+	if result == nil {
+		result = failedProviderTransferResult(provider, providerRequest)
+	}
+	return s.repository.CompleteExternalOutboundTransfer(ctx, intent.ID, externalOutboundCompletionInput(intentInput, *result))
 }
 
 func (s *Service) MockProviderWebhook(ctx context.Context, providerName string, payload []byte, headers map[string]string) (*Transfer, error) {

@@ -1764,6 +1764,74 @@ func TestMockOutboundIdempotencyPreventsDuplicateProviderInitiation(t *testing.T
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000)
 }
 
+func TestMockOutboundExplicitFinalStatusSettlesPendingWithoutProviderInitiation(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{
+		initiateResult: ProviderTransferResult{
+			Provider:          ProviderMockNIP,
+			ProviderReference: "scripted-settlement-ref",
+			Status:            TransferStatusPending,
+			Narration:         "scripted pending outbound",
+		},
+	}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:     DemoInstitutionID,
+		AccountID:         DemoCustomerAccountID,
+		ClearingAccountID: DemoClearingAccountID,
+		Direction:         TransferDirectionInbound,
+		Status:            TransferStatusSucceeded,
+		AmountMinor:       50000,
+		CurrencyID:        "NGN",
+		IdempotencyKey:    "scripted-settlement-fund",
+		Provider:          "test_setup",
+		ProviderReference: "scripted-settlement-fund-ref",
+		ProviderEventID:   "scripted-settlement-fund-event",
+		Narration:         "fund scripted settlement account",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := svc.MockOutbound(ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       10000,
+		IdempotencyKey:    "scripted-settlement-pending",
+		ProviderReference: "scripted-settlement-ref",
+		Status:            TransferStatusPending,
+		Narration:         "scripted pending outbound",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled, err := svc.MockOutbound(ctx, TransferRequest{
+		AccountID:         DemoCustomerAccountID,
+		AmountMinor:       10000,
+		IdempotencyKey:    "scripted-settlement-success",
+		ProviderReference: "scripted-settlement-ref",
+		ProviderEventID:   "scripted-settlement-event",
+		Status:            TransferStatusSucceeded,
+		Narration:         "scripted settlement success",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if settled.ID != pending.ID {
+		t.Fatalf("scripted settlement should update pending transfer: pending=%s settled=%s", pending.ID, settled.ID)
+	}
+	if provider.initiateCalls != 1 {
+		t.Fatalf("expected only initial pending provider initiation, got %d calls", provider.initiateCalls)
+	}
+	assertStatus(t, settled, TransferStatusSucceeded)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000)
+	assertMemoryTransferHold(t, store, pending.ID, HoldStatusConsumed)
+	assertJournalBalanced(t, store, settled)
+}
+
 func TestMockOutboundIdempotencyRejectsChangedRequest(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
@@ -4142,6 +4210,8 @@ func (m *memoryStore) consumeHoldLocked(transferID string, now time.Time) {
 }
 
 type spyTransferProvider struct {
+	mu sync.Mutex
+
 	nameEnquiryCalls int
 	initiateCalls    int
 	requeryCalls     int
@@ -4156,6 +4226,7 @@ type spyTransferProvider struct {
 	nameEnquiryErr    error
 	initiateResult    ProviderTransferResult
 	initiateErr       error
+	initiateDelay     time.Duration
 	requeryResult     ProviderTransferResult
 	requeryErr        error
 	webhookEvent      ProviderWebhookEvent
@@ -4166,6 +4237,8 @@ func (s *spyTransferProvider) Name() string {
 }
 
 func (s *spyTransferProvider) NameEnquiry(ctx context.Context, request NameEnquiryRequest) (*NameEnquiryResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.nameEnquiryCalls++
 	s.lastNameEnquiry = request
 	if s.nameEnquiryErr != nil {
@@ -4175,15 +4248,29 @@ func (s *spyTransferProvider) NameEnquiry(ctx context.Context, request NameEnqui
 }
 
 func (s *spyTransferProvider) InitiateTransfer(ctx context.Context, request ProviderTransferRequest) (*ProviderTransferResult, error) {
+	s.mu.Lock()
 	s.initiateCalls++
 	s.lastInitiate = request
-	if s.initiateErr != nil {
-		return nil, s.initiateErr
+	err := s.initiateErr
+	result := copyOf(s.initiateResult)
+	delay := s.initiateDelay
+	s.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
 	}
-	return copyOf(s.initiateResult), nil
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *spyTransferProvider) RequeryTransfer(ctx context.Context, providerReference string) (*ProviderTransferResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.requeryCalls++
 	s.lastRequery = providerReference
 	if s.requeryErr != nil {
@@ -4193,6 +4280,8 @@ func (s *spyTransferProvider) RequeryTransfer(ctx context.Context, providerRefer
 }
 
 func (s *spyTransferProvider) ParseWebhook(ctx context.Context, payload []byte, headers map[string]string) (*ProviderWebhookEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.parseCalls++
 	s.lastHeaders = map[string]string{}
 	for key, value := range headers {

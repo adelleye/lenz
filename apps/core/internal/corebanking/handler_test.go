@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers/gorillamux"
@@ -1118,6 +1120,86 @@ func TestGeneratedMockOutboundRouteCallsService(t *testing.T) {
 	}
 }
 
+func TestMockOutboundRouteConcurrentSameKeyCallsProviderOnce(t *testing.T) {
+	ctx := context.Background()
+	store := newMemoryStore()
+	provider := &spyTransferProvider{
+		initiateResult: ProviderTransferResult{
+			Provider:          ProviderMockNIP,
+			ProviderReference: "concurrent-route-out-ref",
+			Status:            TransferStatusSucceeded,
+			Narration:         "concurrent route outbound",
+		},
+		initiateDelay: 50 * time.Millisecond,
+	}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "concurrent-route-fund",
+	})
+	journalCountBefore := len(store.journals)
+
+	router := chi.NewRouter()
+	NewHandler(svc, WithDemoRoutes(true)).Routes(router)
+
+	const calls = 10
+	var wg sync.WaitGroup
+	statuses := make([]int, calls)
+	transferIDs := make([]string, calls)
+	for i := range calls {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			body := `{"account_id":"` + DemoCustomerAccountID + `","amount_minor":10000,"narration":"concurrent generated route"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/transfers/mock/outbound", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Idempotency-Key", "concurrent-route-out")
+			req = withTestPrincipal(req, DemoInstitutionID)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			statuses[index] = rec.Code
+			if rec.Code == http.StatusOK {
+				var transfer Transfer
+				if err := json.Unmarshal(rec.Body.Bytes(), &transfer); err == nil {
+					transferIDs[index] = transfer.ID
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for index, status := range statuses {
+		if status != http.StatusOK {
+			t.Fatalf("concurrent mock outbound call %d returned %d, statuses=%v", index, status, statuses)
+		}
+	}
+	firstID := transferIDs[0]
+	if firstID == "" {
+		t.Fatalf("first concurrent response did not include a transfer id: %+v", transferIDs)
+	}
+	for index, id := range transferIDs {
+		if id != firstID {
+			t.Fatalf("concurrent call %d returned transfer %q, want %q; all=%+v", index, id, firstID, transferIDs)
+		}
+	}
+	if provider.initiateCalls != 1 {
+		t.Fatalf("expected one provider InitiateTransfer call, got %d", provider.initiateCalls)
+	}
+	if len(store.journals) != journalCountBefore+1 {
+		t.Fatalf("expected one outbound journal effect, before=%d after=%d", journalCountBefore, len(store.journals))
+	}
+	if countTransfersByIdempotency(store, DemoInstitutionID, "concurrent-route-out") != 1 {
+		t.Fatalf("expected one transfer for concurrent idempotency key")
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 40000)
+}
+
 func TestInvalidMockOutboundRequestRejectsBeforeServiceExecution(t *testing.T) {
 	store := newMemoryStore()
 	provider := &spyTransferProvider{}
@@ -1761,6 +1843,18 @@ func postExternalRequeryNoBody(t *testing.T, router http.Handler, transferID, in
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
+}
+
+func countTransfersByIdempotency(store *memoryStore, institutionID, idempotencyKey string) int {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	count := 0
+	for _, transfer := range store.transfers {
+		if transfer.InstitutionID == institutionID && transfer.IdempotencyKey == idempotencyKey {
+			count++
+		}
+	}
+	return count
 }
 
 func withTestPrincipal(req *http.Request, institutionID string) *http.Request {
