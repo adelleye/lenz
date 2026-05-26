@@ -71,6 +71,21 @@ func externalOutboundTransferRequestFingerprint(input ExternalOutboundTransferIn
 	)
 }
 
+func externalInboundEventFingerprint(event ProviderWebhookEvent, accountID string) string {
+	return fingerprintValues(
+		"external_inbound_event",
+		event.Provider,
+		event.ProviderEventID,
+		event.ProviderReference,
+		accountID,
+		event.DestinationAccountNumber,
+		strconv.FormatInt(event.AmountMinor, 10),
+		event.CurrencyID,
+		event.Status,
+		TransferDirectionInbound,
+	)
+}
+
 func providerWebhookRequestFingerprint(event ProviderWebhookEvent, originalProviderReference string, delaySeconds int64) string {
 	return fingerprintValues(
 		"provider_webhook",

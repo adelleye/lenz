@@ -2,8 +2,10 @@ package corebanking
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -2066,6 +2068,197 @@ func TestExternalOutboundIdempotencyReplayAndConflict(t *testing.T) {
 	}
 }
 
+func TestExternalInboundEventSuccessReplayHistoryAndAudit(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	payload := externalInboundPayload("external-in-success-event", "external-in-success-ref", TransferStatusSucceeded, 15000)
+	journalCountBefore := len(store.journals)
+
+	first := externalInbound(t, svc, ctx, payload)
+	second := externalInbound(t, svc, ctx, payload)
+
+	if first.TransferID == nil || second.TransferID == nil || *first.TransferID != *second.TransferID {
+		t.Fatalf("duplicate event did not replay first transfer: first=%+v second=%+v", first, second)
+	}
+	if first.Status != TransferStatusSucceeded ||
+		first.ProviderStatus != TransferStatusSucceeded ||
+		first.LedgerStatus != LedgerStatusPosted ||
+		first.ReconciliationStatus != ReconciliationStatusMatched ||
+		first.JournalEntryID == nil {
+		t.Fatalf("external inbound success mismatch: %+v", first)
+	}
+	if len(store.journals) != journalCountBefore+1 {
+		t.Fatalf("success replay created unexpected journals: before=%d after=%d", journalCountBefore, len(store.journals))
+	}
+	transfer, err := svc.GetTransfer(ctx, DemoInstitutionID, *first.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJournalBalanced(t, store, transfer)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 15000)
+
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTransactionPresent(t, history, *first.TransferID, 15000, TransactionDirectionCredit)
+
+	events, err := store.ListAuditEvents(ctx, DemoInstitutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countAuditEvents(events, AuditActionExternalInboundSucceeded, func(event AuditEvent) bool {
+		return auditString(event.TransferID) == *first.TransferID
+	}) != 1 {
+		t.Fatalf("expected one external inbound success audit event, got %+v", events)
+	}
+}
+
+func TestExternalInboundEventMismatchCreatesManualReviewWithoutPosting(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	other := createMemoryCustomerAccount(t, svc, ctx, "Inbound", "Other", "inbound.other@example.com", uniqueAccountNumber("74"))
+
+	original := externalInbound(t, svc, ctx, externalInboundPayload("external-in-conflict-event", "external-in-conflict-ref", TransferStatusSucceeded, 10000))
+	journalCountAfterOriginal := len(store.journals)
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 10000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, other.ID, 0)
+
+	amountChanged := externalInboundPayload("external-in-conflict-event", "external-in-conflict-ref", TransferStatusSucceeded, 20000)
+	amountReview := externalInbound(t, svc, ctx, amountChanged)
+	if amountReview.HTTPStatus != http.StatusConflict ||
+		amountReview.TransferID == nil ||
+		amountReview.Status != TransferStatusFailed ||
+		amountReview.ProviderStatus != TransferStatusSucceeded ||
+		amountReview.LedgerStatus != LedgerStatusNoPosting ||
+		amountReview.ReconciliationStatus != ReconciliationStatusManualReview ||
+		amountReview.JournalEntryID != nil ||
+		amountReview.Message != "provider_event_payload_conflict" {
+		t.Fatalf("amount mismatch review mismatch: %+v", amountReview)
+	}
+
+	destinationChanged := externalInboundPayload("external-in-conflict-event", "external-in-conflict-ref", TransferStatusSucceeded, 10000)
+	destinationChanged["destination_account_number"] = other.AccountNumber
+	destinationReview := externalInbound(t, svc, ctx, destinationChanged)
+	if destinationReview.HTTPStatus != http.StatusConflict ||
+		destinationReview.TransferID == nil ||
+		destinationReview.JournalEntryID != nil ||
+		destinationReview.LedgerStatus != LedgerStatusNoPosting ||
+		destinationReview.ReconciliationStatus != ReconciliationStatusManualReview {
+		t.Fatalf("destination mismatch review mismatch: %+v", destinationReview)
+	}
+
+	duplicateReview := externalInbound(t, svc, ctx, amountChanged)
+	if duplicateReview.TransferID == nil || *duplicateReview.TransferID != *amountReview.TransferID {
+		t.Fatalf("same mismatch payload did not replay review: first=%+v second=%+v", amountReview, duplicateReview)
+	}
+	if original.TransferID == nil || *original.TransferID == *amountReview.TransferID {
+		t.Fatalf("manual review reused original successful transfer: original=%+v review=%+v", original, amountReview)
+	}
+	if len(store.journals) != journalCountAfterOriginal {
+		t.Fatalf("mismatch created a fake journal: before=%d after=%d", journalCountAfterOriginal, len(store.journals))
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 10000)
+	assertBalance(t, svc, ctx, DemoInstitutionID, other.ID, 0)
+
+	items, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: TransferStatusSucceeded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationItem(t, items, *amountReview.TransferID, "provider_succeeded_ledger_not_posted", ReconciliationActionInspectJournal)
+	assertReconciliationItem(t, items, *destinationReview.TransferID, "provider_succeeded_ledger_not_posted", ReconciliationActionInspectJournal)
+}
+
+func TestExternalInboundEventPendingAndFailedDoNotPost(t *testing.T) {
+	tests := []struct {
+		name             string
+		status           string
+		wantLedgerStatus string
+		wantReconStatus  string
+	}{
+		{name: "pending", status: TransferStatusPending, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusPending},
+		{name: "failed", status: TransferStatusFailed, wantLedgerStatus: LedgerStatusNoPosting, wantReconStatus: ReconciliationStatusNoAction},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, svc, store := newTestService(t)
+			journalCountBefore := len(store.journals)
+
+			result := externalInbound(t, svc, ctx, externalInboundPayload("external-in-"+tt.name+"-event", "external-in-"+tt.name+"-ref", tt.status, 12000))
+
+			if result.TransferID == nil ||
+				result.Status != tt.status ||
+				result.ProviderStatus != tt.status ||
+				result.LedgerStatus != tt.wantLedgerStatus ||
+				result.ReconciliationStatus != tt.wantReconStatus ||
+				result.JournalEntryID != nil {
+				t.Fatalf("external inbound %s mismatch: %+v", tt.name, result)
+			}
+			if len(store.journals) != journalCountBefore {
+				t.Fatalf("%s event created a fake journal: before=%d after=%d", tt.name, journalCountBefore, len(store.journals))
+			}
+			assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
+			history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertTransactionPresent(t, history, *result.TransferID, 0, TransactionDirectionCredit)
+		})
+	}
+}
+
+func TestExternalInboundEventUnknownDestinationManualReviewNoCredit(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	payload := externalInboundPayload("external-in-unknown-event", "external-in-unknown-ref", TransferStatusSucceeded, 13000)
+	payload["destination_account_number"] = "0000000007"
+	journalCountBefore := len(store.journals)
+
+	result := externalInbound(t, svc, ctx, payload)
+
+	if result.TransferID == nil ||
+		result.Status != TransferStatusFailed ||
+		result.ProviderStatus != TransferStatusSucceeded ||
+		result.LedgerStatus != LedgerStatusNoPosting ||
+		result.ReconciliationStatus != ReconciliationStatusManualReview ||
+		result.JournalEntryID != nil ||
+		result.Message != "unknown_destination" {
+		t.Fatalf("unknown destination review mismatch: %+v", result)
+	}
+	if len(store.journals) != journalCountBefore {
+		t.Fatalf("unknown destination created a fake journal: before=%d after=%d", journalCountBefore, len(store.journals))
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("unknown destination appeared in customer history: %+v", history)
+	}
+	items, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: TransferStatusSucceeded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationItem(t, items, *result.TransferID, "provider_succeeded_ledger_not_posted", ReconciliationActionInspectJournal)
+}
+
+func TestExternalInboundEventFrozenDestinationAndUnsupportedProvider(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	setMemoryAccountStatus(store, DemoCustomerAccountID, AccountStatusFrozen)
+	if _, err := svc.ExternalInboundEvent(ctx, externalInboundInput(t, externalInboundPayload("external-in-frozen-event", "external-in-frozen-ref", TransferStatusSucceeded, 10000))); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("expected frozen destination to reject inbound posting, got %v", err)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
+	if len(store.journals) != 0 {
+		t.Fatalf("frozen destination created a journal: %+v", store.journals)
+	}
+
+	payload := externalInboundPayload("external-in-provider-event", "external-in-provider-ref", TransferStatusSucceeded, 10000)
+	payload["provider"] = "real_nibss"
+	if _, err := svc.ExternalInboundEvent(ctx, externalInboundInput(t, payload)); !errors.Is(err, ErrUnsupportedProvider) {
+		t.Fatalf("expected unsupported provider, got %v", err)
+	}
+}
+
 func TestMockInboundCallsProviderAdapter(t *testing.T) {
 	ctx := context.Background()
 	store := newMemoryStore()
@@ -2200,6 +2393,45 @@ func externalOutboundTestInput(idempotencyKey string, amountMinor int64, scenari
 	}
 }
 
+func externalInbound(t *testing.T, svc *Service, ctx context.Context, payload map[string]any) *ExternalInboundEventResult {
+	t.Helper()
+	result, err := svc.ExternalInboundEvent(ctx, externalInboundInput(t, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func externalInboundInput(t *testing.T, payload map[string]any) ExternalInboundEventInput {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, _ := payload["provider"].(string)
+	return ExternalInboundEventInput{
+		InstitutionID: DemoInstitutionID,
+		Provider:      provider,
+		Payload:       body,
+		Headers:       map[string]string{"X-Institution-ID": DemoInstitutionID},
+	}
+}
+
+func externalInboundPayload(eventID, reference, status string, amountMinor int64) map[string]any {
+	return map[string]any{
+		"provider_event_id":          eventID,
+		"provider_reference":         reference,
+		"destination_account_number": mockNIPDemoAccountNumber,
+		"amount_minor":               amountMinor,
+		"currency_id":                "NGN",
+		"status":                     status,
+		"sender_name":                "External Sender",
+		"sender_account_number":      "1234567890",
+		"sender_institution_code":    "999044",
+		"narration":                  "External inbound test",
+	}
+}
+
 func assertMemoryTransferHold(t *testing.T, store *memoryStore, transferID, status string) {
 	t.Helper()
 	hold, ok := store.holds[transferID]
@@ -2282,6 +2514,20 @@ func assertHistoryNewestFirst(t *testing.T, history []Transaction) {
 			t.Fatalf("history tie-breaker is not stable at %d: %s after %s", i, history[i].TransferID, history[i-1].TransferID)
 		}
 	}
+}
+
+func assertTransactionPresent(t *testing.T, history []Transaction, transferID string, signedMinor int64, direction string) {
+	t.Helper()
+	for _, txn := range history {
+		if txn.TransferID != transferID {
+			continue
+		}
+		if txn.SignedAmountMinor != signedMinor || txn.Direction != direction {
+			t.Fatalf("transaction mismatch for transfer %s: got %+v want signed=%d direction=%s", transferID, txn, signedMinor, direction)
+		}
+		return
+	}
+	t.Fatalf("transfer %s not found in history: %+v", transferID, history)
 }
 
 func transactionDirectionFromSigned(signedMinor int64, fallback string) string {
@@ -2566,6 +2812,17 @@ func (m *memoryStore) GetAccount(ctx context.Context, institutionID, accountID s
 		return nil, ErrNotFound
 	}
 	return copyOf(account), nil
+}
+
+func (m *memoryStore) GetAccountByNumber(ctx context.Context, institutionID, accountNumber string) (*Account, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, account := range m.accounts {
+		if account.InstitutionID == institutionID && account.AccountNumber == accountNumber {
+			return copyOf(account), nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
 func (m *memoryStore) GetDefaultInternalSettlementAccount(ctx context.Context, institutionID, currencyID string) (*Account, error) {
@@ -3023,6 +3280,81 @@ func (m *memoryStore) RecordTransfer(ctx context.Context, input RecordTransferIn
 	return m.recordTransferLocked(input)
 }
 
+func (m *memoryStore) RecordProviderEventReview(ctx context.Context, input RecordProviderEventReviewInput) (*Transfer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	normalized, err := normalizeProviderEventReviewInput(input)
+	if err != nil {
+		return nil, err
+	}
+	input = normalized
+
+	if input.ReserveProviderEvent {
+		key := input.InstitutionID + "|" + input.Provider + "|" + input.ProviderEventID
+		if id := m.providerEvents[key]; id != "" {
+			if !m.providerEventPayloadMatchesLocked(key, input.RequestFingerprint) {
+				return nil, ErrConflict
+			}
+			return copyOf(m.transfers[id]), nil
+		}
+	}
+	if id := m.idempotency[input.InstitutionID+"|"+input.IdempotencyKey]; id != "" {
+		transfer := m.transfers[id]
+		if !transferRequestFingerprintMatches(&transfer, input.RequestFingerprint) {
+			return nil, ErrConflict
+		}
+		return copyOf(transfer), nil
+	}
+
+	account, ok := m.accounts[input.AccountID]
+	if !ok || account.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	transfer := Transfer{
+		ID:                   uuid.Must(uuid.NewRandom()).String(),
+		InstitutionID:        input.InstitutionID,
+		AccountID:            input.AccountID,
+		Direction:            input.Direction,
+		Status:               input.Status,
+		ProviderStatus:       input.ProviderStatus,
+		LedgerStatus:         LedgerStatusNoPosting,
+		ReconciliationStatus: ReconciliationStatusManualReview,
+		AmountMinor:          input.AmountMinor,
+		CurrencyID:           input.CurrencyID,
+		IdempotencyKey:       input.IdempotencyKey,
+		Provider:             input.Provider,
+		ProviderReference:    input.ProviderReference,
+		ProviderEventID:      &input.ProviderEventID,
+		RequestFingerprint:   input.RequestFingerprint,
+		Narration:            input.Narration,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	if input.FailureReason != "" {
+		transfer.FailureReason = &input.FailureReason
+	}
+	m.transfers[transfer.ID] = transfer
+	m.idempotency[input.InstitutionID+"|"+input.IdempotencyKey] = transfer.ID
+	if input.ReserveProviderEvent {
+		key := input.InstitutionID + "|" + input.Provider + "|" + input.ProviderEventID
+		m.providerEvents[key] = transfer.ID
+		m.providerEventFingerprints[key] = input.RequestFingerprint
+	}
+	auditInput, ok := externalInboundTransferAuditInput(transfer, account, input.FailureReason)
+	if ok {
+		auditInput.Action = AuditActionExternalInboundReview
+		if input.FailureReason != "" {
+			auditInput.Metadata["review_reason"] = input.FailureReason
+		}
+		if err := m.createAuditLockedContext(ctx, auditInput); err != nil {
+			return nil, err
+		}
+	}
+	return copyOf(transfer), nil
+}
+
 func (m *memoryStore) BeginExternalOutboundTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -3295,6 +3627,9 @@ func (m *memoryStore) recordTransferLocked(input RecordTransferInput) (*Transfer
 	if err := m.auditPostedInternalTransferLocked(input, transfer, account, clearing); err != nil {
 		return nil, err
 	}
+	if err := m.auditExternalInboundTransferLocked(input, transfer, account); err != nil {
+		return nil, err
+	}
 	return copyOf(transfer), nil
 }
 
@@ -3393,11 +3728,22 @@ func (m *memoryStore) settlePendingTransferLocked(pending Transfer, input Record
 	if err := m.auditPostedInternalTransferLocked(input, pending, account, clearing); err != nil {
 		return nil, err
 	}
+	if err := m.auditExternalInboundTransferLocked(input, pending, account); err != nil {
+		return nil, err
+	}
 	return copyOf(pending), nil
 }
 
 func (m *memoryStore) auditPostedInternalTransferLocked(input RecordTransferInput, transfer Transfer, account, clearing Account) error {
 	auditInput, ok := postedInternalTransferAuditInput(input, transfer, account, clearing)
+	if !ok {
+		return nil
+	}
+	return m.createAuditLocked(auditInput)
+}
+
+func (m *memoryStore) auditExternalInboundTransferLocked(input RecordTransferInput, transfer Transfer, account Account) error {
+	auditInput, ok := externalInboundTransferAuditInput(transfer, account, input.FailureReason)
 	if !ok {
 		return nil
 	}

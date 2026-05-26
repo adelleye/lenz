@@ -149,7 +149,7 @@ assert_reconciliation_item() {
   local review_reason="$2"
   local action="$3"
   local body
-  body="$(request "${BASE_URL}/api/v1/admin/reconciliation-items?provider_status=provider_unknown")"
+  body="$(request "${BASE_URL}/api/v1/admin/reconciliation-items?limit=100")"
   assert_json "$body" "[.[] | select(.transfer_id == \"${transfer_id}\" and .review_reason == \"${review_reason}\" and .recommended_next_action == \"${action}\")] | length == 1" "missing reconciliation item ${transfer_id}"
 }
 
@@ -376,11 +376,73 @@ assert_reconciliation_item "$external_unknown_id" "provider_unknown" "requery_pr
 assert_history_state "$account_a_id" "$external_unknown_id" "pending" "provider_unknown" "pending" "manual_review" 0 "== null"
 pass "external provider_unknown kept hold, avoided fallback, and entered reconciliation"
 
+external_inbound_success="$(request -X POST "${BASE_URL}/api/v1/external/transfers/inbound-events" \
+  -H "Content-Type: application/json" \
+  -d "{\"provider_event_id\":\"uat-external-in-success-event\",\"provider_reference\":\"uat-external-in-success-ref\",\"destination_account_number\":\"2234567890\",\"amount_minor\":18000,\"currency_id\":\"NGN\",\"status\":\"succeeded\",\"sender_name\":\"UAT Sender\",\"sender_account_number\":\"1234567890\",\"sender_institution_code\":\"999044\",\"narration\":\"UAT external inbound success\"}")"
+external_inbound_success_id="$(json_get '.transfer_id' "$external_inbound_success")"
+external_inbound_success_journal_id="$(json_get '.journal_entry_id' "$external_inbound_success")"
+assert_json "$external_inbound_success" '.status == "succeeded" and .provider_status == "succeeded" and .ledger_status == "posted" and .reconciliation_status == "matched" and .journal_entry_id != null' "external inbound success mismatch"
+assert_balance "$account_b_id" 318000 318000
+assert_journal_balanced "$external_inbound_success_journal_id" 18000
+assert_history_state "$account_b_id" "$external_inbound_success_id" "succeeded" "succeeded" "posted" "matched" 18000 "!= null"
+pass "external inbound success credited destination once through a balanced journal"
+
+external_inbound_duplicate="$(request -X POST "${BASE_URL}/api/v1/external/transfers/inbound-events" \
+  -H "Content-Type: application/json" \
+  -d "{\"provider_event_id\":\"uat-external-in-success-event\",\"provider_reference\":\"uat-external-in-success-ref\",\"destination_account_number\":\"2234567890\",\"amount_minor\":18000,\"currency_id\":\"NGN\",\"status\":\"succeeded\",\"sender_name\":\"UAT Sender\",\"sender_account_number\":\"1234567890\",\"sender_institution_code\":\"999044\",\"narration\":\"UAT external inbound success\"}")"
+assert_json "$external_inbound_duplicate" ".transfer_id == \"${external_inbound_success_id}\"" "external inbound duplicate returned a different transfer"
+assert_balance "$account_b_id" 318000 318000
+assert_transfer_journal_count "$external_inbound_success_id" 1
+pass "external inbound duplicate provider event replayed without double-crediting"
+
+external_inbound_conflict_path="${TMP_DIR}/external-inbound-conflict.json"
+external_inbound_conflict_code="$(request_status "$external_inbound_conflict_path" -X POST "${BASE_URL}/api/v1/external/transfers/inbound-events" \
+  -H "Content-Type: application/json" \
+  -d "{\"provider_event_id\":\"uat-external-in-success-event\",\"provider_reference\":\"uat-external-in-success-ref\",\"destination_account_number\":\"2234567890\",\"amount_minor\":19000,\"currency_id\":\"NGN\",\"status\":\"succeeded\",\"sender_name\":\"UAT Sender\",\"sender_account_number\":\"1234567890\",\"sender_institution_code\":\"999044\",\"narration\":\"UAT external inbound conflict\"}")"
+[[ "$external_inbound_conflict_code" == "409" ]] || fail "external inbound mismatch expected HTTP 409, got ${external_inbound_conflict_code} body=$(cat "$external_inbound_conflict_path")"
+external_inbound_conflict="$(cat "$external_inbound_conflict_path")"
+external_inbound_conflict_id="$(json_get '.transfer_id' "$external_inbound_conflict")"
+assert_json "$external_inbound_conflict" '.status == "failed" and .provider_status == "succeeded" and .ledger_status == "no_posting" and .reconciliation_status == "manual_review" and .journal_entry_id == null and .message == "provider_event_payload_conflict"' "external inbound mismatch review response mismatch"
+assert_transfer_journal_count "$external_inbound_conflict_id" 0
+assert_balance "$account_b_id" 318000 318000
+assert_reconciliation_item "$external_inbound_conflict_id" "provider_succeeded_ledger_not_posted" "inspect_journal"
+pass "external inbound provider-event mismatch created review signal without posting money"
+
+external_inbound_pending="$(request -X POST "${BASE_URL}/api/v1/external/transfers/inbound-events" \
+  -H "Content-Type: application/json" \
+  -d "{\"provider_event_id\":\"uat-external-in-pending-event\",\"provider_reference\":\"uat-external-in-pending-ref\",\"destination_account_number\":\"2234567890\",\"amount_minor\":7000,\"currency_id\":\"NGN\",\"status\":\"pending\",\"narration\":\"UAT external inbound pending\"}")"
+external_inbound_pending_id="$(json_get '.transfer_id' "$external_inbound_pending")"
+assert_json "$external_inbound_pending" '.status == "pending" and .provider_status == "pending" and .ledger_status == "pending" and .reconciliation_status == "pending" and .journal_entry_id == null' "external inbound pending mismatch"
+assert_transfer_journal_count "$external_inbound_pending_id" 0
+assert_balance "$account_b_id" 318000 318000
+assert_history_state "$account_b_id" "$external_inbound_pending_id" "pending" "pending" "pending" "pending" 0 "== null"
+pass "external inbound pending recorded history without changing balances"
+
+external_inbound_failed="$(request -X POST "${BASE_URL}/api/v1/external/transfers/inbound-events" \
+  -H "Content-Type: application/json" \
+  -d "{\"provider_event_id\":\"uat-external-in-failed-event\",\"provider_reference\":\"uat-external-in-failed-ref\",\"destination_account_number\":\"2234567890\",\"amount_minor\":8000,\"currency_id\":\"NGN\",\"status\":\"failed\",\"narration\":\"UAT external inbound failed\"}")"
+external_inbound_failed_id="$(json_get '.transfer_id' "$external_inbound_failed")"
+assert_json "$external_inbound_failed" '.status == "failed" and .provider_status == "failed" and .ledger_status == "no_posting" and .reconciliation_status == "no_action" and .journal_entry_id == null' "external inbound failed mismatch"
+assert_transfer_journal_count "$external_inbound_failed_id" 0
+assert_balance "$account_b_id" 318000 318000
+assert_history_state "$account_b_id" "$external_inbound_failed_id" "failed" "failed" "no_posting" "no_action" 0 "== null"
+pass "external inbound failure recorded no-posting without changing balances"
+
+external_inbound_unknown="$(request -X POST "${BASE_URL}/api/v1/external/transfers/inbound-events" \
+  -H "Content-Type: application/json" \
+  -d "{\"provider_event_id\":\"uat-external-in-unknown-event\",\"provider_reference\":\"uat-external-in-unknown-ref\",\"destination_account_number\":\"0000000023\",\"amount_minor\":9000,\"currency_id\":\"NGN\",\"status\":\"succeeded\",\"narration\":\"UAT external inbound unknown destination\"}")"
+external_inbound_unknown_id="$(json_get '.transfer_id' "$external_inbound_unknown")"
+assert_json "$external_inbound_unknown" '.status == "failed" and .provider_status == "succeeded" and .ledger_status == "no_posting" and .reconciliation_status == "manual_review" and .journal_entry_id == null and .message == "unknown_destination"' "external inbound unknown destination mismatch"
+assert_transfer_journal_count "$external_inbound_unknown_id" 0
+assert_balance "$account_b_id" 318000 318000
+assert_reconciliation_item "$external_inbound_unknown_id" "provider_succeeded_ledger_not_posted" "inspect_journal"
+pass "external inbound unknown destination avoided crediting money and entered reconciliation"
+
 lien="$(request -X POST "${BASE_URL}/api/v1/accounts/${account_b_id}/liens" \
   -H "Content-Type: application/json" \
   -d '{"amount_minor":100000,"currency_id":"NGN","reference":"uat-lien-001","reason":"UAT ops hold"}')"
 assert_json "$lien" '.status == "active" and .amount_minor == 100000 and .transfer_id == null and .reference == "uat-lien-001"' "lien placement mismatch"
-assert_balance "$account_b_id" 200000 300000
+assert_balance "$account_b_id" 218000 318000
 pass "lien reduced available balance only"
 
 pnd="$(request -X POST "${BASE_URL}/api/v1/accounts/${account_b_id}/post-no-debit" \
@@ -402,7 +464,7 @@ pnd_transfer_in="$(request -X POST "${BASE_URL}/api/v1/internal/transfers" \
   -d "{\"source_account_id\":\"${account_a_id}\",\"destination_account_id\":\"${account_b_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-pnd-transfer-in-001\",\"narration\":\"UAT PND transfer in\",\"reference\":\"uat-pnd-transfer-in-ref-001\"}")"
 assert_json "$pnd_transfer_in" '.status == "succeeded" and .journal_entry_id != null' "PND transfer-in should succeed"
 assert_balance "$account_a_id" 406000 424000
-assert_balance "$account_b_id" 202000 302000
+assert_balance "$account_b_id" 220000 320000
 pass "PND blocked outflows and allowed inflows"
 
 assert_blocked_money_request "PND freeze should fail" -X POST "${BASE_URL}/api/v1/accounts/${account_b_id}/freeze" \
@@ -432,7 +494,7 @@ assert_blocked_money_request "frozen transfer out should fail" -X POST "${BASE_U
   -d "{\"source_account_id\":\"${account_b_id}\",\"destination_account_id\":\"${account_a_id}\",\"amount_minor\":1000,\"currency_id\":\"NGN\",\"idempotency_key\":\"uat-freeze-transfer-out-blocked\",\"narration\":\"blocked\",\"reference\":\"uat-freeze-transfer-out-blocked\"}"
 assert_no_transfers_for_keys "'uat-pnd-debit-blocked','uat-pnd-transfer-out-blocked','uat-freeze-credit-blocked','uat-freeze-debit-blocked','uat-freeze-transfer-in-blocked','uat-freeze-transfer-out-blocked'"
 assert_balance "$account_a_id" 406000 424000
-assert_balance "$account_b_id" 202000 302000
+assert_balance "$account_b_id" 220000 320000
 pass "freeze blocked all money movement"
 
 echo "Latest audit events:"
@@ -446,6 +508,10 @@ assert_audit_action_count "external_outbound.succeeded" 1
 assert_audit_action_count "external_outbound.failed" 1
 assert_audit_action_count "external_outbound.pending" 1
 assert_audit_action_count "external_outbound.provider_unknown" 1
+assert_audit_action_count "external_inbound.succeeded" 1
+assert_audit_action_count "external_inbound.failed" 1
+assert_audit_action_count "external_inbound.pending" 1
+assert_audit_action_count "external_inbound.manual_review" 2
 assert_audit_action_count "account.lien_placed" 1
 assert_audit_action_count "account.pnd_activated" 1
 assert_audit_action_count "account.pnd_deactivated" 1

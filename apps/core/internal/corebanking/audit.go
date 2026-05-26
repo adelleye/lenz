@@ -29,6 +29,10 @@ const (
 	AuditActionExternalOutboundFailed    = "external_outbound.failed"
 	AuditActionExternalOutboundPending   = "external_outbound.pending"
 	AuditActionExternalOutboundUnknown   = "external_outbound.provider_unknown"
+	AuditActionExternalInboundSucceeded  = "external_inbound.succeeded"
+	AuditActionExternalInboundFailed     = "external_inbound.failed"
+	AuditActionExternalInboundPending    = "external_inbound.pending"
+	AuditActionExternalInboundReview     = "external_inbound.manual_review"
 )
 
 type auditEventInput struct {

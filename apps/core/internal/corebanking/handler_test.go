@@ -1400,6 +1400,123 @@ func TestExternalOutboundTransferRouteWorksForCreatedAccount(t *testing.T) {
 	}
 }
 
+func TestExternalInboundEventRouteSucceedsReplaysAndMatchesSchema(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"provider_event_id":"http-external-in-event","provider_reference":"http-external-in-ref","destination_account_number":"` + mockNIPDemoAccountNumber + `","amount_minor":12000,"currency_id":"NGN","status":"succeeded","sender_name":"HTTP Sender"}`
+	first := postExternalInboundEvent(t, router, body, DemoInstitutionID)
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected external inbound to return 200, got %d body=%s", first.Code, first.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/inbound-events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	assertResponseMatchesOpenAPISchema(t, req, first)
+
+	var firstResult ExternalInboundEventResult
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResult); err != nil {
+		t.Fatal(err)
+	}
+	if firstResult.TransferID == nil ||
+		firstResult.Status != TransferStatusSucceeded ||
+		firstResult.ProviderStatus != TransferStatusSucceeded ||
+		firstResult.LedgerStatus != LedgerStatusPosted ||
+		firstResult.ReconciliationStatus != ReconciliationStatusMatched ||
+		firstResult.JournalEntryID == nil {
+		t.Fatalf("external inbound route response mismatch: %+v", firstResult)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 12000)
+
+	second := postExternalInboundEvent(t, router, body, DemoInstitutionID)
+	if second.Code != http.StatusOK {
+		t.Fatalf("expected external inbound replay to return 200, got %d body=%s", second.Code, second.Body.String())
+	}
+	var secondResult ExternalInboundEventResult
+	if err := json.Unmarshal(second.Body.Bytes(), &secondResult); err != nil {
+		t.Fatal(err)
+	}
+	if secondResult.TransferID == nil || *secondResult.TransferID != *firstResult.TransferID {
+		t.Fatalf("external inbound replay returned different transfer: first=%+v second=%+v", firstResult, secondResult)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 12000)
+}
+
+func TestExternalInboundEventRouteConflictReturnsReviewResult(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	firstBody := `{"provider_event_id":"http-external-in-conflict-event","provider_reference":"http-external-in-conflict-ref","destination_account_number":"` + mockNIPDemoAccountNumber + `","amount_minor":12000,"status":"succeeded"}`
+	first := postExternalInboundEvent(t, router, firstBody, DemoInstitutionID)
+	if first.Code != http.StatusOK {
+		t.Fatalf("expected external inbound setup to return 200, got %d body=%s", first.Code, first.Body.String())
+	}
+
+	conflictBody := `{"provider_event_id":"http-external-in-conflict-event","provider_reference":"http-external-in-conflict-ref","destination_account_number":"` + mockNIPDemoAccountNumber + `","amount_minor":13000,"status":"succeeded"}`
+	rec := postExternalInboundEvent(t, router, conflictBody, DemoInstitutionID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected external inbound conflict to return 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/inbound-events", strings.NewReader(conflictBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	assertResponseMatchesOpenAPISchema(t, req, rec)
+
+	var result ExternalInboundEventResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.TransferID == nil ||
+		result.Message != "provider_event_payload_conflict" ||
+		result.LedgerStatus != LedgerStatusNoPosting ||
+		result.ReconciliationStatus != ReconciliationStatusManualReview ||
+		result.JournalEntryID != nil {
+		t.Fatalf("external inbound conflict response mismatch: %+v", result)
+	}
+}
+
+func TestExternalInboundEventRouteRequiresAuthAndTenantScope(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	body := `{"provider_event_id":"http-external-in-auth-event","provider_reference":"http-external-in-auth-ref","destination_account_number":"` + mockNIPDemoAccountNumber + `","amount_minor":1000,"status":"succeeded"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/inbound-events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/inbound-events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched tenant to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExternalInboundEventRouteRejectsInvalidBody(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"provider_event_id":"http-external-in-invalid-event","provider_reference":"http-external-in-invalid-ref","destination_account_number":"12345","amount_minor":1000,"status":"succeeded"}`
+	rec := postExternalInboundEvent(t, router, body, DemoInstitutionID)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid body to return 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestExternalOutboundTransferRouteRequiresAuthAndTenantScope(t *testing.T) {
 	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
 	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
@@ -1426,6 +1543,16 @@ func TestExternalOutboundTransferRouteRequiresAuthAndTenantScope(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected mismatched tenant to return 403, got %d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func postExternalInboundEvent(t *testing.T, router http.Handler, body, institutionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/inbound-events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, institutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
 }
 
 func withTestPrincipal(req *http.Request, institutionID string) *http.Request {

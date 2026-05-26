@@ -39,6 +39,13 @@ type ExternalOutboundTransferInput struct {
 	Scenario                   string
 }
 
+type ExternalInboundEventInput struct {
+	InstitutionID string
+	Provider      string
+	Payload       []byte
+	Headers       map[string]string
+}
+
 type ExternalNameEnquiryResult struct {
 	Provider                   string    `json:"provider"`
 	DestinationInstitutionCode string    `json:"destination_institution_code"`
@@ -64,6 +71,19 @@ type ExternalOutboundTransferResult struct {
 	JournalEntryID       *string   `json:"journal_entry_id"`
 	HoldID               *string   `json:"hold_id"`
 	CreatedAt            time.Time `json:"created_at"`
+}
+
+type ExternalInboundEventResult struct {
+	TransferID           *string `json:"transfer_id"`
+	ProviderEventID      string  `json:"provider_event_id"`
+	ProviderReference    string  `json:"provider_reference"`
+	ProviderStatus       string  `json:"provider_status"`
+	LedgerStatus         string  `json:"ledger_status"`
+	ReconciliationStatus string  `json:"reconciliation_status"`
+	Status               string  `json:"status"`
+	JournalEntryID       *string `json:"journal_entry_id"`
+	Message              string  `json:"message"`
+	HTTPStatus           int     `json:"-"`
 }
 
 func (s *Service) ExternalNameEnquiry(ctx context.Context, input ExternalNameEnquiryInput) (*ExternalNameEnquiryResult, error) {
@@ -188,6 +208,53 @@ func (s *Service) ExternalOutboundTransfer(ctx context.Context, input ExternalOu
 	return s.externalOutboundTransferResult(ctx, *completed)
 }
 
+func (s *Service) ExternalInboundEvent(ctx context.Context, input ExternalInboundEventInput) (*ExternalInboundEventResult, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	providerName := strings.TrimSpace(input.Provider)
+	if providerName == "" {
+		providerName = ProviderMockNIP
+	}
+	provider, err := s.provider(providerName)
+	if err != nil {
+		return nil, err
+	}
+
+	headers := inboundEventHeaders(input.Headers, institutionID)
+	event, err := provider.ParseWebhook(ctx, input.Payload, headers)
+	if err != nil {
+		return nil, err
+	}
+	if event == nil {
+		return nil, ErrInvalidRequest
+	}
+	if err := normalizeExternalInboundWebhookEvent(event, institutionID, providerName); err != nil {
+		return nil, err
+	}
+
+	account, err := s.externalInboundDestinationAccount(ctx, *event)
+	if errors.Is(err, ErrNotFound) {
+		event.RequestFingerprint = externalInboundEventFingerprint(*event, "")
+		return s.recordExternalInboundReview(ctx, *event, "", "unknown_destination", true)
+	}
+	if err != nil {
+		return nil, err
+	}
+	event.AccountID = account.ID
+	event.RequestFingerprint = externalInboundEventFingerprint(*event, account.ID)
+
+	transfer, err := s.recordExternalInboundTransfer(ctx, *event, account.ID)
+	if errors.Is(err, ErrConflict) {
+		return s.recordExternalInboundReview(ctx, *event, account.ID, "provider_event_payload_conflict", false)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return externalInboundEventResultFromTransfer(*transfer, "event_recorded", 0), nil
+}
+
 func externalNameEnquiryErrorResult(providerName, destinationInstitutionCode, accountNumber string, err error) *ExternalNameEnquiryResult {
 	if errors.Is(err, ErrNotFound) {
 		return externalNameEnquiryResult(providerName, destinationInstitutionCode, accountNumber, "", nil, NameEnquiryStatusNotFound, "account_not_found")
@@ -205,6 +272,164 @@ func externalNameEnquiryResult(providerName, destinationInstitutionCode, account
 		Status:                     status,
 		Message:                    message,
 		CreatedAt:                  time.Now().UTC(),
+	}
+}
+
+func inboundEventHeaders(headers map[string]string, institutionID string) map[string]string {
+	out := map[string]string{}
+	for key, value := range headers {
+		out[key] = value
+	}
+	out["X-Institution-ID"] = institutionID
+	return out
+}
+
+func normalizeExternalInboundWebhookEvent(event *ProviderWebhookEvent, institutionID, providerName string) error {
+	event.Provider = strings.TrimSpace(event.Provider)
+	if event.Provider == "" {
+		event.Provider = providerName
+	}
+	if event.Provider != providerName {
+		return ErrUnsupportedProvider
+	}
+	if event.InstitutionID = strings.TrimSpace(event.InstitutionID); event.InstitutionID != "" && event.InstitutionID != institutionID {
+		return ErrForbidden
+	}
+	event.InstitutionID = institutionID
+	event.Direction = strings.ToLower(strings.TrimSpace(event.Direction))
+	if event.Direction == "" {
+		event.Direction = TransferDirectionInbound
+	}
+	if event.Direction != TransferDirectionInbound {
+		return ErrInvalidRequest
+	}
+	event.Status = strings.ToLower(strings.TrimSpace(event.Status))
+	event.CurrencyID = strings.ToUpper(strings.TrimSpace(event.CurrencyID))
+	event.ProviderEventID = strings.TrimSpace(event.ProviderEventID)
+	event.ProviderReference = strings.TrimSpace(event.ProviderReference)
+	event.AccountID = strings.TrimSpace(event.AccountID)
+	event.DestinationAccountNumber = strings.TrimSpace(event.DestinationAccountNumber)
+	event.FailureReason = strings.TrimSpace(event.FailureReason)
+	event.Narration = strings.TrimSpace(event.Narration)
+	if event.CurrencyID == "" {
+		event.CurrencyID = "NGN"
+	}
+	if event.Narration == "" {
+		event.Narration = "External inbound transfer"
+	}
+	if event.ProviderEventID == "" || event.ProviderReference == "" || event.AmountMinor <= 0 || event.CurrencyID != "NGN" || !validTransferStatus(event.Status) {
+		return ErrInvalidRequest
+	}
+	if event.AccountID == "" && event.DestinationAccountNumber == "" {
+		return ErrInvalidRequest
+	}
+	if event.AccountID != "" {
+		if _, err := uuid.Parse(event.AccountID); err != nil {
+			return ErrInvalidRequest
+		}
+	}
+	if event.DestinationAccountNumber != "" && !isTenDigitAccountNumber(event.DestinationAccountNumber) {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
+func (s *Service) externalInboundDestinationAccount(ctx context.Context, event ProviderWebhookEvent) (*Account, error) {
+	if event.AccountID != "" {
+		return s.repository.GetAccount(ctx, event.InstitutionID, event.AccountID)
+	}
+	return s.repository.GetAccountByNumber(ctx, event.InstitutionID, event.DestinationAccountNumber)
+}
+
+func (s *Service) recordExternalInboundTransfer(ctx context.Context, event ProviderWebhookEvent, accountID string) (*Transfer, error) {
+	clearing, err := s.repository.GetDefaultInternalSettlementAccount(ctx, event.InstitutionID, event.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+	return s.repository.RecordTransfer(ctx, RecordTransferInput{
+		InstitutionID:      event.InstitutionID,
+		AccountID:          accountID,
+		ClearingAccountID:  clearing.ID,
+		Direction:          TransferDirectionInbound,
+		Status:             event.Status,
+		AmountMinor:        event.AmountMinor,
+		CurrencyID:         event.CurrencyID,
+		IdempotencyKey:     externalInboundEventIdempotencyKey(event),
+		Provider:           event.Provider,
+		ProviderReference:  event.ProviderReference,
+		ProviderEventID:    event.ProviderEventID,
+		ProviderStatus:     event.Status,
+		RequestFingerprint: event.RequestFingerprint,
+		FailureReason:      event.FailureReason,
+		Narration:          event.Narration,
+	})
+}
+
+func (s *Service) recordExternalInboundReview(ctx context.Context, event ProviderWebhookEvent, accountID, reason string, reserveProviderEvent bool) (*ExternalInboundEventResult, error) {
+	reviewAccountID := strings.TrimSpace(accountID)
+	if reviewAccountID == "" {
+		clearing, err := s.repository.GetDefaultInternalSettlementAccount(ctx, event.InstitutionID, event.CurrencyID)
+		if err != nil {
+			return nil, err
+		}
+		reviewAccountID = clearing.ID
+	}
+	reviewStatus := TransferStatusFailed
+	if event.Status == TransferStatusPending {
+		reviewStatus = TransferStatusPending
+	}
+	transfer, err := s.repository.RecordProviderEventReview(ctx, RecordProviderEventReviewInput{
+		InstitutionID:        event.InstitutionID,
+		AccountID:            reviewAccountID,
+		Direction:            TransferDirectionInbound,
+		Status:               reviewStatus,
+		ProviderStatus:       event.Status,
+		AmountMinor:          event.AmountMinor,
+		CurrencyID:           event.CurrencyID,
+		IdempotencyKey:       externalInboundReviewIdempotencyKey(event),
+		Provider:             event.Provider,
+		ProviderReference:    event.ProviderReference,
+		ProviderEventID:      event.ProviderEventID,
+		RequestFingerprint:   event.RequestFingerprint,
+		FailureReason:        reason,
+		Narration:            firstNonBlank(event.Narration, "External inbound event manual review"),
+		ReserveProviderEvent: reserveProviderEvent,
+	})
+	if err != nil {
+		return nil, err
+	}
+	statusCode := 0
+	if reason == "provider_event_payload_conflict" {
+		statusCode = 409
+	}
+	return externalInboundEventResultFromTransfer(*transfer, reason, statusCode), nil
+}
+
+func externalInboundEventIdempotencyKey(event ProviderWebhookEvent) string {
+	return "external-inbound:" + event.Provider + ":" + event.ProviderEventID
+}
+
+func externalInboundReviewIdempotencyKey(event ProviderWebhookEvent) string {
+	return "external-inbound-review:" + event.Provider + ":" + event.ProviderEventID + ":" + event.RequestFingerprint
+}
+
+func externalInboundEventResultFromTransfer(transfer Transfer, message string, statusCode int) *ExternalInboundEventResult {
+	transferID := transfer.ID
+	providerEventID := ""
+	if transfer.ProviderEventID != nil {
+		providerEventID = *transfer.ProviderEventID
+	}
+	return &ExternalInboundEventResult{
+		TransferID:           &transferID,
+		ProviderEventID:      providerEventID,
+		ProviderReference:    transfer.ProviderReference,
+		ProviderStatus:       transfer.ProviderStatus,
+		LedgerStatus:         transfer.LedgerStatus,
+		ReconciliationStatus: transfer.ReconciliationStatus,
+		Status:               transfer.Status,
+		JournalEntryID:       transfer.JournalEntryID,
+		Message:              message,
+		HTTPStatus:           statusCode,
 	}
 }
 

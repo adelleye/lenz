@@ -4,6 +4,7 @@ package corebanking
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -286,6 +287,96 @@ func TestSQLExternalOutboundTransferLifecycleIntegration(t *testing.T) {
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected cross-tenant external outbound to fail, got %v", err)
 	}
+
+	if err := assertAllSQLJournalsBalanced(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertSQLBalancesMatchPostings(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLExternalInboundEventLifecycleIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+	svc := seededSQLService(t, db, ctx)
+
+	successPayload := externalInboundPayload("sql-external-inbound-success-event", "sql-external-inbound-success-ref", TransferStatusSucceeded, 11000)
+	success := externalInbound(t, svc, ctx, successPayload)
+	if success.TransferID == nil || success.JournalEntryID == nil {
+		t.Fatalf("successful inbound should return transfer and journal: %+v", success)
+	}
+	successTransfer := mustGetSQLTransfer(t, svc, ctx, *success.TransferID)
+	assertStatus(t, successTransfer, TransferStatusSucceeded)
+	assertSQLBalance(t, svc, ctx, 11000)
+	assertSQLJournalBalanced(t, svc, ctx, successTransfer, 11000)
+	assertSQLJournalCountByTransfer(t, ctx, db, successTransfer.ID, 1)
+
+	duplicate := externalInbound(t, svc, ctx, successPayload)
+	if duplicate.TransferID == nil || *duplicate.TransferID != successTransfer.ID {
+		t.Fatalf("duplicate inbound event should replay first transfer: first=%+v duplicate=%+v", success, duplicate)
+	}
+	assertSQLBalance(t, svc, ctx, 11000)
+	assertSQLJournalCountByTransfer(t, ctx, db, successTransfer.ID, 1)
+
+	mismatchPayload := externalInboundPayload("sql-external-inbound-success-event", "sql-external-inbound-success-ref", TransferStatusSucceeded, 12000)
+	mismatch := externalInbound(t, svc, ctx, mismatchPayload)
+	if mismatch.HTTPStatus != 409 || mismatch.TransferID == nil || mismatch.JournalEntryID != nil || mismatch.LedgerStatus != LedgerStatusNoPosting || mismatch.ReconciliationStatus != ReconciliationStatusManualReview {
+		t.Fatalf("mismatched inbound event should return manual review conflict: %+v", mismatch)
+	}
+	mismatchTransfer := mustGetSQLTransfer(t, svc, ctx, *mismatch.TransferID)
+	assertSQLBalance(t, svc, ctx, 11000)
+	assertSQLJournalCountByTransfer(t, ctx, db, mismatchTransfer.ID, 0)
+	reviewItems, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: TransferStatusSucceeded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationItem(t, reviewItems, mismatchTransfer.ID, "provider_succeeded_ledger_not_posted", ReconciliationActionInspectJournal)
+
+	pending := externalInbound(t, svc, ctx, externalInboundPayload("sql-external-inbound-pending-event", "sql-external-inbound-pending-ref", TransferStatusPending, 7000))
+	if pending.TransferID == nil || pending.JournalEntryID != nil || pending.LedgerStatus != LedgerStatusPending || pending.ReconciliationStatus != ReconciliationStatusPending {
+		t.Fatalf("pending inbound should record without journal: %+v", pending)
+	}
+	pendingTransfer := mustGetSQLTransfer(t, svc, ctx, *pending.TransferID)
+	assertSQLBalance(t, svc, ctx, 11000)
+	assertSQLJournalCountByTransfer(t, ctx, db, pendingTransfer.ID, 0)
+
+	failed := externalInbound(t, svc, ctx, externalInboundPayload("sql-external-inbound-failed-event", "sql-external-inbound-failed-ref", TransferStatusFailed, 8000))
+	if failed.TransferID == nil || failed.JournalEntryID != nil || failed.LedgerStatus != LedgerStatusNoPosting || failed.ReconciliationStatus != ReconciliationStatusNoAction {
+		t.Fatalf("failed inbound should record without journal: %+v", failed)
+	}
+	failedTransfer := mustGetSQLTransfer(t, svc, ctx, *failed.TransferID)
+	assertSQLBalance(t, svc, ctx, 11000)
+	assertSQLJournalCountByTransfer(t, ctx, db, failedTransfer.ID, 0)
+
+	unknownPayload := externalInboundPayload("sql-external-inbound-unknown-event", "sql-external-inbound-unknown-ref", TransferStatusSucceeded, 9000)
+	unknownPayload["destination_account_number"] = "0000000017"
+	unknown := externalInbound(t, svc, ctx, unknownPayload)
+	if unknown.TransferID == nil || unknown.JournalEntryID != nil || unknown.Message != "unknown_destination" || unknown.LedgerStatus != LedgerStatusNoPosting || unknown.ReconciliationStatus != ReconciliationStatusManualReview {
+		t.Fatalf("unknown destination inbound should return review result: %+v", unknown)
+	}
+	unknownTransfer := mustGetSQLTransfer(t, svc, ctx, *unknown.TransferID)
+	assertSQLBalance(t, svc, ctx, 11000)
+	assertSQLJournalCountByTransfer(t, ctx, db, unknownTransfer.ID, 0)
+	reviewItems, err = svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: TransferStatusSucceeded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationItem(t, reviewItems, unknownTransfer.ID, "provider_succeeded_ledger_not_posted", ReconciliationActionInspectJournal)
+
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSQLHistoryRow(t, history, successTransfer.ID, TransferStatusSucceeded, 11000, true)
+	assertSQLHistoryRow(t, history, pendingTransfer.ID, TransferStatusPending, 0, false)
+	assertSQLHistoryRow(t, history, failedTransfer.ID, TransferStatusFailed, 0, false)
+
+	crossTenantPayload := externalInboundPayload("sql-external-inbound-cross-tenant-event", "sql-external-inbound-cross-tenant-ref", TransferStatusSucceeded, 6000)
+	if _, err := svc.ExternalInboundEvent(ctx, externalInboundSQLInput(t, "99999999-9999-9999-9999-999999999999", crossTenantPayload)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected cross-tenant inbound event not to credit demo account, got %v", err)
+	}
+	assertSQLBalance(t, svc, ctx, 11000)
 
 	if err := assertAllSQLJournalsBalanced(ctx, db); err != nil {
 		t.Fatal(err)
@@ -1708,6 +1799,21 @@ func seededSQLService(t *testing.T, db *sqlx.DB, ctx context.Context) *Service {
 		t.Fatal(err)
 	}
 	return svc
+}
+
+func externalInboundSQLInput(t *testing.T, institutionID string, payload map[string]any) ExternalInboundEventInput {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, _ := payload["provider"].(string)
+	return ExternalInboundEventInput{
+		InstitutionID: institutionID,
+		Provider:      provider,
+		Payload:       body,
+		Headers:       map[string]string{"X-Institution-ID": institutionID},
+	}
 }
 
 func createSQLCustomerAccount(t *testing.T, svc *Service, ctx context.Context, firstName, lastName, email, accountNumber, accountName string) *Account {

@@ -1,5 +1,105 @@
 # Lenz Core Transaction Spine Test Results
 
+## Goal 13 - Mock External Inbound Event Lifecycle
+
+Run window: `2026-05-26 07:12-07:19 WAT +0100`
+
+Commit under test: `875c185af8862cb43787d1f3a7809c961494e95a`
+
+Branch: `goal/cba-v0.1-13-mock-external-inbound`
+
+Worktree note: this run intentionally includes uncommitted Goal 13 changes for
+the mock external inbound event lifecycle. Generated OpenAPI files were
+regenerated locally and confirmed ignored.
+
+Simplify pass note: after the first green run, a behavior-preserving cleanup
+centralized provider-event review input normalization so the SQL repository and
+memory test double use the same validation/defaulting helper. The verification
+commands below were rerun after that cleanup.
+
+Public context checked:
+
+- NIBSS Instant Payment: account-based, real-time electronic funds transfer,
+  instant beneficiary value, and deferred net settlement context.
+- BankOne Transfer and Transactions docs: authenticated transfer calls, success
+  versus failed outcomes, pending/no-response requiring transaction-status
+  query, and explicit status handling.
+
+### Issues Found And Resolved
+
+1. External inbound provider events had no production-shaped public route.
+   Resolved with `POST /api/v1/external/transfers/inbound-events` through the
+   strict OpenAPI handler.
+2. Duplicate provider-event mismatch could stop as a conflict without a durable
+   operations signal. Resolved by recording no-posting manual-review transfers
+   for mismatched material payloads.
+3. Unknown destination events cannot belong to a customer account. Resolved by
+   reserving the provider event and creating a no-posting manual-review transfer
+   against the internal settlement account, so no customer balance is credited
+   and reconciliation can surface the item.
+
+### Command Evidence
+
+| Command | Result | Evidence |
+|---|---:|---|
+| `git diff --check` | PASS | exit 0 |
+| `TMPDIR=$PWD/tmp go generate ./apps/core/internal/corebanking ./apps/core/internal/institution` | PASS | exit 0 |
+| `git check-ignore -v apps/core/internal/corebanking/corebanking.gen.go apps/core/internal/institution/institution.gen.go` | PASS | `.gitignore:13`, `.gitignore:14` |
+| `TMPDIR=$PWD/tmp go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...` | PASS | corebanking, server, authn passed |
+| `TMPDIR=$PWD/tmp go test -race -count=1 ./apps/core/internal/corebanking ./apps/core/server ./apps/auth/authn` | PASS | corebanking race test passed in `3.885s` |
+| `TMPDIR=$PWD/tmp go build ./apps/core ./apps/core/cmd/migrate` | PASS | exit 0 |
+| `TMPDIR=$PWD/tmp go test -count=1 -tags=integration ./apps/core/internal/corebanking -run 'TestSQL'` | PASS | SQL integration suite passed |
+| `TMPDIR=$PWD/tmp POSTGRES_PORT=55432 API_PORT=3001 ./scripts/demo_transfer_spine.sh` | PASS | ended with `DEMO TRANSFER SPINE: PASS` |
+| `TMPDIR=$PWD/tmp POSTGRES_PORT=55432 API_PORT=3001 ./scripts/uat_simple_transaction_cba.sh` | PASS | ended with `UAT simple transaction CBA passed.` |
+
+Command-shape note: root-level `go test ./...` is not valid in this checkout
+because `go.work` lists module directories only. The Go tool returned:
+`pattern ./...: directory prefix . does not contain modules listed in go.work`.
+The module-scoped command above is the repo-compatible full test command used
+by the existing demo script.
+
+### Key Goal 13 Evidence
+
+Focused service, HTTP, and SQL tests now cover:
+
+- inbound success credits destination once through a balanced journal;
+- duplicate same provider event replays without double-crediting;
+- same provider event with different amount or destination returns
+  conflict/manual-review and does not post again;
+- pending and failed events record transfer/history state without postings;
+- unknown destination does not credit money and appears in reconciliation;
+- frozen destination follows account-control rejection policy;
+- unsupported provider is rejected;
+- auth and tenant checks hold at the HTTP boundary.
+
+UAT HTTP/Postgres evidence:
+
+```text
+PASS: external inbound success credited destination once through a balanced journal
+PASS: external inbound duplicate provider event replayed without double-crediting
+PASS: external inbound provider-event mismatch created review signal without posting money
+PASS: external inbound pending recorded history without changing balances
+PASS: external inbound failure recorded no-posting without changing balances
+PASS: external inbound unknown destination avoided crediting money and entered reconciliation
+PASS: audit query contains expected UAT actions
+PASS: journal totals and account ledgers reconcile to postings
+```
+
+Audit evidence from the UAT run included:
+
+```text
+external_inbound.succeeded
+external_inbound.pending
+external_inbound.failed
+external_inbound.manual_review
+```
+
+Residual scope note: this is mock-only inbound event ingestion. It does not add
+real NIBSS/BankOne signed webhook verification, real provider credentials, fees,
+settlement files, or UI.
+
+---
+
 Run window: `2026-05-18 08:57:08-09:16 WAT +0100`
 
 Commit under test: `3991e3f0dd6899ab64ba269337184c24f7d207b1`

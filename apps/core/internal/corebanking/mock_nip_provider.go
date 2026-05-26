@@ -164,19 +164,23 @@ func (p *MockNIPProvider) ParseWebhook(ctx context.Context, payload []byte, head
 	}
 
 	event := ProviderWebhookEvent{
-		Provider:             p.Name(),
-		InstitutionID:        firstNonBlank(request.InstitutionID, headerValue(headers, "X-Institution-ID"), DemoInstitutionID),
-		AccountID:            strings.TrimSpace(request.AccountID),
-		Direction:            strings.ToLower(strings.TrimSpace(request.Direction)),
-		AmountMinor:          request.AmountMinor,
-		CurrencyID:           strings.ToUpper(strings.TrimSpace(request.CurrencyID)),
-		IdempotencyKey:       firstNonBlank(request.IdempotencyKey, headerValue(headers, "Idempotency-Key")),
-		ProviderReference:    p.providerReference("mock-nip-in", request.ProviderReference),
-		ProviderEventID:      strings.TrimSpace(request.ProviderEventID),
-		ReversalOfTransferID: strings.TrimSpace(request.ReversalOfTransferID),
-		FailureReason:        strings.TrimSpace(request.FailureReason),
-		Narration:            strings.TrimSpace(request.Narration),
-		Scenario:             strings.ToLower(strings.TrimSpace(request.Scenario)),
+		Provider:                 firstNonBlank(request.Provider, p.Name()),
+		InstitutionID:            firstNonBlank(request.InstitutionID, headerValue(headers, "X-Institution-ID"), DemoInstitutionID),
+		AccountID:                strings.TrimSpace(request.AccountID),
+		DestinationAccountNumber: strings.TrimSpace(request.DestinationAccountNumber),
+		Direction:                strings.ToLower(strings.TrimSpace(request.Direction)),
+		AmountMinor:              request.AmountMinor,
+		CurrencyID:               strings.ToUpper(strings.TrimSpace(request.CurrencyID)),
+		IdempotencyKey:           firstNonBlank(request.IdempotencyKey, headerValue(headers, "Idempotency-Key")),
+		ProviderReference:        p.providerReference("mock-nip-in", request.ProviderReference),
+		ProviderEventID:          strings.TrimSpace(request.ProviderEventID),
+		ReversalOfTransferID:     strings.TrimSpace(request.ReversalOfTransferID),
+		SenderName:               strings.TrimSpace(request.SenderName),
+		SenderAccountNumber:      strings.TrimSpace(request.SenderAccountNumber),
+		SenderInstitutionCode:    strings.TrimSpace(request.SenderInstitutionCode),
+		FailureReason:            strings.TrimSpace(request.FailureReason),
+		Narration:                strings.TrimSpace(request.Narration),
+		Scenario:                 strings.ToLower(strings.TrimSpace(request.Scenario)),
 	}
 	if event.Direction == "" {
 		event.Direction = TransferDirectionInbound
@@ -187,10 +191,16 @@ func (p *MockNIPProvider) ParseWebhook(ctx context.Context, payload []byte, head
 	if event.CurrencyID == "" {
 		event.CurrencyID = "NGN"
 	}
-	if event.ProviderEventID == "" || event.IdempotencyKey == "" {
+	if event.ProviderEventID == "" {
 		return nil, ErrInvalidRequest
 	}
-	if event.Direction != TransferDirectionReversal && (event.AccountID == "" || event.AmountMinor <= 0) {
+	if event.Direction != TransferDirectionReversal && event.AccountID == "" && event.DestinationAccountNumber == "" {
+		return nil, ErrInvalidRequest
+	}
+	if event.Direction != TransferDirectionReversal && event.DestinationAccountNumber != "" && !isTenDigitAccountNumber(event.DestinationAccountNumber) {
+		return nil, ErrInvalidRequest
+	}
+	if event.Direction != TransferDirectionReversal && event.AmountMinor <= 0 {
 		return nil, ErrInvalidRequest
 	}
 	if event.Direction == TransferDirectionReversal && event.ReversalOfTransferID == "" {
@@ -216,20 +226,25 @@ func (p *MockNIPProvider) ParseWebhook(ctx context.Context, payload []byte, head
 }
 
 type mockWebhookPayload struct {
-	InstitutionID        string `json:"institution_id"`
-	AccountID            string `json:"account_id"`
-	Direction            string `json:"direction"`
-	Status               string `json:"status"`
-	AmountMinor          int64  `json:"amount_minor"`
-	CurrencyID           string `json:"currency_id"`
-	IdempotencyKey       string `json:"idempotency_key"`
-	ProviderReference    string `json:"provider_reference"`
-	ProviderEventID      string `json:"provider_event_id"`
-	ReversalOfTransferID string `json:"reversal_of_transfer_id"`
-	FailureReason        string `json:"failure_reason"`
-	Narration            string `json:"narration"`
-	Scenario             string `json:"scenario"`
-	DelaySeconds         int64  `json:"delay_seconds"`
+	InstitutionID            string `json:"institution_id"`
+	Provider                 string `json:"provider"`
+	AccountID                string `json:"account_id"`
+	DestinationAccountNumber string `json:"destination_account_number"`
+	Direction                string `json:"direction"`
+	Status                   string `json:"status"`
+	AmountMinor              int64  `json:"amount_minor"`
+	CurrencyID               string `json:"currency_id"`
+	IdempotencyKey           string `json:"idempotency_key"`
+	ProviderReference        string `json:"provider_reference"`
+	ProviderEventID          string `json:"provider_event_id"`
+	ReversalOfTransferID     string `json:"reversal_of_transfer_id"`
+	SenderName               string `json:"sender_name"`
+	SenderAccountNumber      string `json:"sender_account_number"`
+	SenderInstitutionCode    string `json:"sender_institution_code"`
+	FailureReason            string `json:"failure_reason"`
+	Narration                string `json:"narration"`
+	Scenario                 string `json:"scenario"`
+	DelaySeconds             int64  `json:"delay_seconds"`
 }
 
 func (p *MockNIPProvider) resolveScenario(requestedStatus, requestedFailureReason, scenario string) (string, string, bool, error) {

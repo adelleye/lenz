@@ -666,6 +666,45 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/external/transfers/inbound-events:
+    post:
+      operationId: externalInboundEvent
+      summary: Ingest a mock external inbound provider event
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalInboundEventRequest"
+      responses:
+        "200":
+          description: External inbound event lifecycle result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIExternalInboundEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Provider event payload conflict accepted for manual review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIExternalInboundEvent"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/transfers/mock/inbound:
     post:
       operationId: mockInboundTransfer
@@ -1361,6 +1400,96 @@ components:
         created_at:
           type: string
           format: date-time
+
+    ExternalInboundEventRequest:
+      type: object
+      required:
+        - provider_event_id
+        - provider_reference
+        - amount_minor
+        - status
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          default: mock_nip
+        provider_event_id:
+          type: string
+          minLength: 1
+        provider_reference:
+          type: string
+          minLength: 1
+        account_id:
+          type: string
+          format: uuid
+        destination_account_number:
+          type: string
+          pattern: "^[0-9]{10}$"
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+          default: NGN
+        status:
+          type: string
+          enum: [succeeded, pending, failed]
+        sender_name:
+          type: string
+        sender_account_number:
+          type: string
+        sender_institution_code:
+          type: string
+        narration:
+          type: string
+        scenario:
+          type: string
+          enum: [success, pending, failed]
+          description: Mock-only field for MockNIPProvider inbound event outcomes.
+
+    APIExternalInboundEvent:
+      type: object
+      required:
+        - transfer_id
+        - provider_event_id
+        - provider_reference
+        - provider_status
+        - ledger_status
+        - reconciliation_status
+        - status
+        - journal_entry_id
+        - message
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+          nullable: true
+        provider_event_id:
+          type: string
+          minLength: 1
+        provider_reference:
+          type: string
+        provider_status:
+          type: string
+          enum: [pending, succeeded, failed, provider_unknown]
+        ledger_status:
+          type: string
+          enum: [pending, posted, no_posting, reversal_deficit]
+        reconciliation_status:
+          type: string
+          enum: [pending, matched, no_action, manual_review]
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        journal_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+        message:
+          type: string
+          minLength: 1
 
     AccountControlRequest:
       type: object

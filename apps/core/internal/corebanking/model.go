@@ -454,6 +454,24 @@ type RecordTransferInput struct {
 	RequireAvailable     bool
 }
 
+type RecordProviderEventReviewInput struct {
+	InstitutionID        string
+	AccountID            string
+	Direction            string
+	Status               string
+	ProviderStatus       string
+	AmountMinor          int64
+	CurrencyID           string
+	IdempotencyKey       string
+	Provider             string
+	ProviderReference    string
+	ProviderEventID      string
+	RequestFingerprint   string
+	FailureReason        string
+	Narration            string
+	ReserveProviderEvent bool
+}
+
 type ReverseTransferInput struct {
 	InstitutionID     string
 	TransferID        string

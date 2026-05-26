@@ -71,23 +71,27 @@ type ProviderTransferResult struct {
 }
 
 type ProviderWebhookEvent struct {
-	Provider             string
-	InstitutionID        string
-	AccountID            string
-	Direction            string
-	Status               string
-	AmountMinor          int64
-	CurrencyID           string
-	IdempotencyKey       string
-	ProviderReference    string
-	ProviderEventID      string
-	ReversalOfTransferID string
-	FailureReason        string
-	Narration            string
-	Scenario             string
-	RequestFingerprint   string
-	Delayed              bool
-	DelayedUntil         *time.Time
+	Provider                 string
+	InstitutionID            string
+	AccountID                string
+	DestinationAccountNumber string
+	Direction                string
+	Status                   string
+	AmountMinor              int64
+	CurrencyID               string
+	IdempotencyKey           string
+	ProviderReference        string
+	ProviderEventID          string
+	ReversalOfTransferID     string
+	SenderName               string
+	SenderAccountNumber      string
+	SenderInstitutionCode    string
+	FailureReason            string
+	Narration                string
+	Scenario                 string
+	RequestFingerprint       string
+	Delayed                  bool
+	DelayedUntil             *time.Time
 }
 
 func providerUnknownTransferResult(provider TransferProvider, request ProviderTransferRequest) *ProviderTransferResult {

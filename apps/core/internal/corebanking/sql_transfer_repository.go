@@ -47,6 +47,16 @@ func (r *sqlTransferRepository) RecordTransfer(ctx context.Context, input Record
 	return transfer, err
 }
 
+func (r *sqlTransferRepository) RecordProviderEventReview(ctx context.Context, input RecordProviderEventReviewInput) (*Transfer, error) {
+	var transfer *Transfer
+	err := WithTx(ctx, r.db, func(tx TxRunner) error {
+		var err error
+		transfer, err = r.recordProviderEventReview(ctx, tx, input)
+		return err
+	})
+	return transfer, err
+}
+
 func (r *sqlTransferRepository) BeginExternalOutboundTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, bool, error) {
 	var transfer *Transfer
 	created := false
@@ -346,7 +356,165 @@ VALUES (:id, :institution_id, :account_id, :direction, :status, :provider_status
 	if err = auditPostedInternalTransfer(ctx, tx, input, transfer, account.Account, clearing.Account); err != nil {
 		return nil, false, err
 	}
+	if err = auditExternalInboundTransfer(ctx, tx, input, transfer, account.Account); err != nil {
+		return nil, false, err
+	}
 	return &transfer, true, nil
+}
+
+func (r *sqlTransferRepository) recordProviderEventReview(ctx context.Context, tx TxRunner, input RecordProviderEventReviewInput) (*Transfer, error) {
+	normalized, err := normalizeProviderEventReviewInput(input)
+	if err != nil {
+		return nil, err
+	}
+	input = normalized
+
+	if err := lockReplayKey(ctx, tx, "idempotency", input.InstitutionID, input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+	if input.ReserveProviderEvent {
+		if err := lockReplayKey(ctx, tx, "provider_event", input.InstitutionID, input.Provider, input.ProviderEventID); err != nil {
+			return nil, err
+		}
+	}
+
+	if input.ReserveProviderEvent {
+		eventInput := providerReviewRecordTransferInput(input)
+		if existing, err := r.providerEvents.getTransfer(ctx, tx, input.InstitutionID, input.Provider, input.ProviderEventID); err == nil {
+			ok, err := r.providerEvents.payloadMatches(ctx, tx, eventInput, input.RequestFingerprint)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, ErrConflict
+			}
+			return existing, nil
+		} else if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+	}
+
+	if existing, err := r.getTransferByIdempotency(ctx, tx, input.InstitutionID, input.IdempotencyKey); err == nil {
+		if !transferRequestFingerprintMatches(existing, input.RequestFingerprint) {
+			return nil, ErrConflict
+		}
+		return existing, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+
+	account, err := lockAccountBalance(ctx, tx, input.InstitutionID, input.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if input.ReserveProviderEvent {
+		eventInput := providerReviewRecordTransferInput(input)
+		inserted, err := r.providerEvents.reserve(ctx, tx, eventInput, "", now)
+		if err != nil {
+			return nil, err
+		}
+		if !inserted {
+			return existingProviderEventTransfer(ctx, tx, r.providerEvents, eventInput, input.RequestFingerprint)
+		}
+	}
+
+	providerEventID := &input.ProviderEventID
+	var failure *string
+	if input.FailureReason != "" {
+		failure = &input.FailureReason
+	}
+	transfer := Transfer{
+		ID:                   uuid.Must(uuid.NewRandom()).String(),
+		InstitutionID:        input.InstitutionID,
+		AccountID:            input.AccountID,
+		Direction:            input.Direction,
+		Status:               input.Status,
+		ProviderStatus:       input.ProviderStatus,
+		LedgerStatus:         LedgerStatusNoPosting,
+		ReconciliationStatus: ReconciliationStatusManualReview,
+		AmountMinor:          input.AmountMinor,
+		CurrencyID:           input.CurrencyID,
+		IdempotencyKey:       input.IdempotencyKey,
+		Provider:             input.Provider,
+		ProviderReference:    input.ProviderReference,
+		ProviderEventID:      providerEventID,
+		RequestFingerprint:   input.RequestFingerprint,
+		FailureReason:        failure,
+		Narration:            input.Narration,
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	if _, err = tx.NamedExecContext(ctx, `
+	INSERT INTO transfers (id, institution_id, account_id, direction, status, provider_status, ledger_status, reconciliation_status, amount_minor, currency_id, idempotency_key, provider, provider_reference, provider_event_id, journal_entry_id, reversal_of_transfer_id, request_fingerprint, failure_reason, narration, created_at, updated_at)
+	VALUES (:id, :institution_id, :account_id, :direction, :status, :provider_status, :ledger_status, :reconciliation_status, :amount_minor, :currency_id, :idempotency_key, :provider, :provider_reference, :provider_event_id, :journal_entry_id, :reversal_of_transfer_id, :request_fingerprint, :failure_reason, :narration, :created_at, :updated_at)`, transfer); err != nil {
+		return nil, err
+	}
+	if input.ReserveProviderEvent {
+		if err = r.providerEvents.linkTransfer(ctx, tx, transfer.ID, input.InstitutionID, input.Provider, input.ProviderEventID); err != nil {
+			return nil, err
+		}
+	}
+	if err = auditExternalInboundReview(ctx, tx, input, transfer, account.Account); err != nil {
+		return nil, err
+	}
+	return &transfer, nil
+}
+
+func normalizeProviderEventReviewInput(input RecordProviderEventReviewInput) (RecordProviderEventReviewInput, error) {
+	input.InstitutionID = strings.TrimSpace(input.InstitutionID)
+	input.AccountID = strings.TrimSpace(input.AccountID)
+	input.Direction = strings.ToLower(strings.TrimSpace(input.Direction))
+	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+	input.ProviderStatus = strings.ToLower(strings.TrimSpace(input.ProviderStatus))
+	input.CurrencyID = strings.ToUpper(strings.TrimSpace(input.CurrencyID))
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.ProviderReference = strings.TrimSpace(input.ProviderReference)
+	input.ProviderEventID = strings.TrimSpace(input.ProviderEventID)
+	input.RequestFingerprint = strings.TrimSpace(input.RequestFingerprint)
+	input.FailureReason = strings.TrimSpace(input.FailureReason)
+	input.Narration = strings.TrimSpace(input.Narration)
+	if input.ProviderStatus == "" {
+		input.ProviderStatus = input.Status
+	}
+	if input.InstitutionID == "" ||
+		input.AccountID == "" ||
+		input.Direction == "" ||
+		input.AmountMinor <= 0 ||
+		input.CurrencyID != "NGN" ||
+		input.IdempotencyKey == "" ||
+		input.Provider == "" ||
+		input.ProviderEventID == "" ||
+		input.ProviderReference == "" ||
+		input.RequestFingerprint == "" ||
+		!validTransferStatus(input.Status) ||
+		!validProviderStatus(input.ProviderStatus) {
+		return RecordProviderEventReviewInput{}, ErrInvalidRequest
+	}
+	if input.Narration == "" {
+		input.Narration = "Provider event manual review"
+	}
+	return input, nil
+}
+
+func providerReviewRecordTransferInput(input RecordProviderEventReviewInput) RecordTransferInput {
+	return RecordTransferInput{
+		InstitutionID:      input.InstitutionID,
+		AccountID:          input.AccountID,
+		Direction:          input.Direction,
+		Status:             input.Status,
+		AmountMinor:        input.AmountMinor,
+		CurrencyID:         input.CurrencyID,
+		IdempotencyKey:     input.IdempotencyKey,
+		Provider:           input.Provider,
+		ProviderReference:  input.ProviderReference,
+		ProviderEventID:    input.ProviderEventID,
+		ProviderStatus:     input.ProviderStatus,
+		RequestFingerprint: input.RequestFingerprint,
+		FailureReason:      input.FailureReason,
+		Narration:          input.Narration,
+	}
 }
 
 func (r *sqlTransferRepository) settlePendingTransfer(ctx context.Context, tx TxRunner, pending Transfer, input RecordTransferInput) (*Transfer, error) {
@@ -457,6 +625,9 @@ WHERE institution_id = $10 AND id = $11`,
 		return nil, err
 	}
 	if err = auditPostedInternalTransfer(ctx, tx, input, *updated, account.Account, clearing.Account); err != nil {
+		return nil, err
+	}
+	if err = auditExternalInboundTransfer(ctx, tx, input, *updated, account.Account); err != nil {
 		return nil, err
 	}
 	return updated, nil
@@ -638,6 +809,28 @@ func auditExternalOutboundTransfer(ctx context.Context, tx TxRunner, input Recor
 	return err
 }
 
+func auditExternalInboundTransfer(ctx context.Context, tx TxRunner, input RecordTransferInput, transfer Transfer, account Account) error {
+	auditInput, ok := externalInboundTransferAuditInput(transfer, account, input.FailureReason)
+	if !ok {
+		return nil
+	}
+	_, err := insertAuditEvent(ctx, tx, auditInput)
+	return err
+}
+
+func auditExternalInboundReview(ctx context.Context, tx TxRunner, input RecordProviderEventReviewInput, transfer Transfer, account Account) error {
+	auditInput, ok := externalInboundTransferAuditInput(transfer, account, input.FailureReason)
+	if !ok {
+		return nil
+	}
+	auditInput.Action = AuditActionExternalInboundReview
+	if input.FailureReason != "" {
+		auditInput.Metadata["review_reason"] = input.FailureReason
+	}
+	_, err := insertAuditEvent(ctx, tx, auditInput)
+	return err
+}
+
 func postedInternalTransferAuditInput(input RecordTransferInput, transfer Transfer, account, clearing Account) (auditEventInput, bool) {
 	if transfer.Status != TransferStatusSucceeded || input.Provider != ProviderLedgerInternal || input.ReversalOfTransferID != "" {
 		return auditEventInput{}, false
@@ -668,6 +861,50 @@ func postedInternalTransferAuditInput(input RecordTransferInput, transfer Transf
 		Reference:      input.ProviderReference,
 		Metadata:       metadata,
 		CreatedAt:      transfer.CreatedAt,
+	}, true
+}
+
+func externalInboundTransferAuditInput(transfer Transfer, account Account, failureReason string) (auditEventInput, bool) {
+	if transfer.Direction != TransferDirectionInbound || transfer.Provider == ProviderLedgerInternal || transfer.ReversalOfTransferID != nil {
+		return auditEventInput{}, false
+	}
+	action := AuditActionExternalInboundPending
+	switch {
+	case transfer.ReconciliationStatus == ReconciliationStatusManualReview:
+		action = AuditActionExternalInboundReview
+	case transfer.Status == TransferStatusSucceeded:
+		action = AuditActionExternalInboundSucceeded
+	case transfer.Status == TransferStatusFailed:
+		action = AuditActionExternalInboundFailed
+	}
+	metadata := map[string]string{
+		"amount_minor":          formatAuditInt(transfer.AmountMinor),
+		"currency_id":           transfer.CurrencyID,
+		"provider":              transfer.Provider,
+		"provider_status":       transfer.ProviderStatus,
+		"ledger_status":         transfer.LedgerStatus,
+		"reconciliation_status": transfer.ReconciliationStatus,
+		"account_status":        account.Status,
+	}
+	if failureReason == "" && transfer.FailureReason != nil {
+		failureReason = *transfer.FailureReason
+	}
+	if failureReason != "" {
+		metadata["failure_reason"] = failureReason
+	}
+	return auditEventInput{
+		InstitutionID:  transfer.InstitutionID,
+		Action:         action,
+		EntityType:     "transfer",
+		EntityID:       transfer.ID,
+		AccountID:      account.ID,
+		TransferID:     transfer.ID,
+		JournalEntryID: optionalAuditValue(transfer.JournalEntryID),
+		IdempotencyKey: transfer.IdempotencyKey,
+		Reference:      transfer.ProviderReference,
+		NewStatus:      transfer.Status,
+		Metadata:       metadata,
+		CreatedAt:      transfer.UpdatedAt,
 	}, true
 }
 
