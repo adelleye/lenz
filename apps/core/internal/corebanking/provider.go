@@ -9,6 +9,7 @@ import (
 
 var (
 	ErrProviderStatusUnknown = errors.New("provider transfer status unknown")
+	ErrProviderUnavailable   = errors.New("provider unavailable")
 )
 
 const providerUnknownFailureReason = "provider_status_unknown"

@@ -80,6 +80,8 @@ var (
 	ErrForbidden      = errors.New("forbidden")
 	ErrConflict       = errors.New("conflict")
 	ErrDataIntegrity  = errors.New("data integrity error")
+
+	ErrUnsupportedProvider = errors.Join(ErrInvalidRequest, errors.New("unsupported provider"))
 )
 
 const (

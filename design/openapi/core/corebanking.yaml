@@ -602,6 +602,35 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/external/name-enquiry:
+    post:
+      operationId: externalNameEnquiry
+      summary: Validate an external beneficiary account through the configured mock provider
+      tags: [Corebanking]
+      parameters:
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalNameEnquiryRequest"
+      responses:
+        "200":
+          description: Provider-shaped name enquiry result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIExternalNameEnquiry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/transfers/mock/inbound:
     post:
       operationId: mockInboundTransfer
@@ -1138,6 +1167,59 @@ components:
           type: string
         reference:
           type: string
+
+    ExternalNameEnquiryRequest:
+      type: object
+      required: [destination_institution_code, account_number]
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          default: mock_nip
+        destination_institution_code:
+          type: string
+          minLength: 1
+        account_number:
+          type: string
+          pattern: "^[0-9]{10}$"
+        currency_id:
+          type: string
+          enum: [NGN]
+          default: NGN
+
+    APIExternalNameEnquiry:
+      type: object
+      required:
+        - provider
+        - destination_institution_code
+        - account_number
+        - account_name
+        - status
+        - message
+        - created_at
+      properties:
+        provider:
+          type: string
+          minLength: 1
+        destination_institution_code:
+          type: string
+          minLength: 1
+        account_number:
+          type: string
+          pattern: "^[0-9]{10}$"
+        account_name:
+          type: string
+        provider_reference:
+          type: string
+        status:
+          type: string
+          enum: [found, not_found, provider_unavailable]
+        message:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
 
     AccountControlRequest:
       type: object

@@ -1145,6 +1145,196 @@ func TestInvalidMockOutboundRequestRejectsBeforeServiceExecution(t *testing.T) {
 	}
 }
 
+func TestExternalNameEnquiryRouteSucceedsAndMatchesSchema(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"destination_institution_code":"` + mockNIPDemoBankCode + `","account_number":"` + mockNIPDemoAccountNumber + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/name-enquiry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected name enquiry to return 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	assertResponseMatchesOpenAPISchema(t, req, rec)
+	var result ExternalNameEnquiryResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Provider != ProviderMockNIP ||
+		result.DestinationInstitutionCode != mockNIPDemoBankCode ||
+		result.AccountNumber != mockNIPDemoAccountNumber ||
+		result.AccountName != mockNIPDemoAccountName ||
+		result.Status != NameEnquiryStatusFound ||
+		result.Message != "account_found" {
+		t.Fatalf("name enquiry response mismatch: %+v", result)
+	}
+}
+
+func TestExternalNameEnquiryRouteReturnsControlledStatuses(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	tests := []struct {
+		name                       string
+		destinationInstitutionCode string
+		accountNumber              string
+		wantStatus                 string
+		wantMessage                string
+	}{
+		{
+			name:                       "not found",
+			destinationInstitutionCode: mockNIPDemoBankCode,
+			accountNumber:              "9990000002",
+			wantStatus:                 NameEnquiryStatusNotFound,
+			wantMessage:                "account_not_found",
+		},
+		{
+			name:                       "provider unavailable",
+			destinationInstitutionCode: mockNIPUnavailableBankCode,
+			accountNumber:              mockNIPDemoAccountNumber,
+			wantStatus:                 NameEnquiryStatusProviderUnavailable,
+			wantMessage:                "provider_unavailable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"destination_institution_code":"` + tt.destinationInstitutionCode + `","account_number":"` + tt.accountNumber + `"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/external/name-enquiry", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = withTestPrincipal(req, DemoInstitutionID)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected name enquiry to return 200, got %d body=%s", rec.Code, rec.Body.String())
+			}
+			var result ExternalNameEnquiryResult
+			if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != tt.wantStatus || result.Message != tt.wantMessage || result.AccountName != "" {
+				t.Fatalf("unexpected controlled name enquiry response: %+v", result)
+			}
+		})
+	}
+}
+
+func TestExternalNameEnquiryRouteSanitizesProviderErrors(t *testing.T) {
+	store := newMemoryStore()
+	provider := &spyTransferProvider{nameEnquiryErr: errors.New("provider password=secret connection failed")}
+	svc := NewService(store, provider)
+	if _, err := svc.SeedDemo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"destination_institution_code":"` + mockNIPDemoBankCode + `","account_number":"` + mockNIPDemoAccountNumber + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/name-enquiry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected provider failure to return controlled 200 response, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "password=secret") {
+		t.Fatalf("raw provider error leaked to client: %s", rec.Body.String())
+	}
+	var result ExternalNameEnquiryResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != NameEnquiryStatusProviderUnavailable || result.Message != "provider_unavailable" {
+		t.Fatalf("unexpected provider failure response: %+v", result)
+	}
+}
+
+func TestExternalNameEnquiryRouteRejectsUnsupportedProvider(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"provider":"unsupported_provider","destination_institution_code":"` + mockNIPDemoBankCode + `","account_number":"` + mockNIPDemoAccountNumber + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/name-enquiry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected unsupported provider to return 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["message"] != "unsupported_provider" {
+		t.Fatalf("unexpected unsupported provider response: %+v", response)
+	}
+}
+
+func TestExternalNameEnquiryRouteRequiresAuth(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	body := `{"destination_institution_code":"` + mockNIPDemoBankCode + `","account_number":"` + mockNIPDemoAccountNumber + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/name-enquiry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExternalNameEnquiryRouteRejectsMismatchedInstitutionHeader(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"destination_institution_code":"` + mockNIPDemoBankCode + `","account_number":"` + mockNIPDemoAccountNumber + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/name-enquiry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched X-Institution-ID to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExternalNameEnquiryRouteRejectsInvalidBody(t *testing.T) {
+	_, svc, _ := newTestService(t)
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	body := `{"destination_institution_code":"` + mockNIPDemoBankCode + `","account_number":"12345"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/name-enquiry", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid body to return 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func withTestPrincipal(req *http.Request, institutionID string) *http.Request {
 	return authn.RequestWithPrincipal(req, authn.Principal{
 		InstitutionID: institutionID,

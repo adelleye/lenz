@@ -559,7 +559,7 @@ func (s *Service) provider(name string) (TransferProvider, error) {
 	}
 	provider, ok := s.providers[name]
 	if !ok {
-		return nil, ErrInvalidRequest
+		return nil, ErrUnsupportedProvider
 	}
 	return provider, nil
 }

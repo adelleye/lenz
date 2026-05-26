@@ -200,6 +200,22 @@ func (h *HTTPServer) CreateInternalTransfer(ctx context.Context, request CreateI
 	return okResponse(transfer), nil
 }
 
+func (h *HTTPServer) ExternalNameEnquiry(ctx context.Context, request ExternalNameEnquiryRequestObject) (ExternalNameEnquiryResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input, err := bindExternalNameEnquiryRequest(institutionID, request.Body)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.service.ExternalNameEnquiry(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(result), nil
+}
+
 func (h *HTTPServer) ListAccountTransactions(ctx context.Context, request ListAccountTransactionsRequestObject) (ListAccountTransactionsResponseObject, error) {
 	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
@@ -365,6 +381,23 @@ func validateInternalTransferRequest(req *InternalTransferRequest) error {
 	return nil
 }
 
+func (req *ExternalNameEnquiryRequest) Bind(r *http.Request) error {
+	return validateExternalNameEnquiryRequest(req)
+}
+
+func validateExternalNameEnquiryRequest(req *ExternalNameEnquiryRequest) error {
+	if req == nil {
+		return ErrInvalidRequest
+	}
+	if strings.TrimSpace(req.DestinationInstitutionCode) == "" || !isTenDigitAccountNumber(strings.TrimSpace(req.AccountNumber)) {
+		return ErrInvalidRequest
+	}
+	if req.CurrencyId != nil && string(*req.CurrencyId) != "NGN" {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
 func (req *MockTransferRequest) Bind(r *http.Request) error {
 	return validateMockTransferRequest(req)
 }
@@ -513,6 +546,19 @@ func bindInternalTransferRequest(institutionID string, body *InternalTransferReq
 	}, nil
 }
 
+func bindExternalNameEnquiryRequest(institutionID string, body *ExternalNameEnquiryRequest) (ExternalNameEnquiryInput, error) {
+	if err := validateExternalNameEnquiryRequest(body); err != nil {
+		return ExternalNameEnquiryInput{}, ErrInvalidRequest
+	}
+	return ExternalNameEnquiryInput{
+		InstitutionID:              institutionID,
+		Provider:                   optionalString(body.Provider),
+		DestinationInstitutionCode: body.DestinationInstitutionCode,
+		AccountNumber:              body.AccountNumber,
+		CurrencyID:                 optionalEnumString(body.CurrencyId),
+	}, nil
+}
+
 func applyRequestScope(ctx context.Context, headerInstitutionID *InstitutionID, headerIdempotencyKey string, req *TransferRequest) error {
 	institutionID, err := institutionScope(ctx, headerInstitutionID)
 	if err != nil {
@@ -658,6 +704,10 @@ func (response strictJSONResponse) VisitCreateInternalTransferResponse(w http.Re
 	return response.write(w)
 }
 
+func (response strictJSONResponse) VisitExternalNameEnquiryResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
 func (response strictJSONResponse) VisitListAccountTransactionsResponse(w http.ResponseWriter) error {
 	return response.write(w)
 }
@@ -706,6 +756,8 @@ func respond(w http.ResponseWriter, r *http.Request, v any, err error) {
 		writeError(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, ErrUnsupportedProvider):
+		writeError(w, http.StatusBadRequest, "unsupported_provider")
 	case errors.Is(err, ErrInvalidRequest):
 		writeError(w, http.StatusBadRequest, "invalid_request")
 	case errors.Is(err, ErrInsufficient):

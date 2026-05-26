@@ -10,15 +10,32 @@ func TestMockNIPProviderNameEnquiry(t *testing.T) {
 	provider := NewMockNIPProvider()
 
 	result, err := provider.NameEnquiry(context.Background(), NameEnquiryRequest{
-		BankCode:      "999001",
-		AccountNumber: "9990000001",
+		BankCode:      mockNIPDemoBankCode,
+		AccountNumber: mockNIPDemoAccountNumber,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if result.Provider != ProviderMockNIP || result.AccountName != "Ada Demo Wallet" || result.ProviderReference == "" {
+	if result.Provider != ProviderMockNIP || result.AccountName != mockNIPDemoAccountName || result.ProviderReference == "" {
 		t.Fatalf("name enquiry mismatch: %+v", result)
+	}
+}
+
+func TestMockNIPProviderNameEnquiryScenarios(t *testing.T) {
+	provider := NewMockNIPProvider()
+
+	if _, err := provider.NameEnquiry(context.Background(), NameEnquiryRequest{
+		BankCode:      mockNIPDemoBankCode,
+		AccountNumber: "9990000002",
+	}); err != ErrNotFound {
+		t.Fatalf("expected unknown mock account to return not found, got %v", err)
+	}
+	if _, err := provider.NameEnquiry(context.Background(), NameEnquiryRequest{
+		BankCode:      mockNIPUnavailableBankCode,
+		AccountNumber: mockNIPDemoAccountNumber,
+	}); err != ErrProviderUnavailable {
+		t.Fatalf("expected unavailable mock bank to return provider unavailable, got %v", err)
 	}
 }
 

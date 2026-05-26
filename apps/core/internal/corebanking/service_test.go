@@ -1275,6 +1275,107 @@ func TestUnsupportedProviderWebhookRejectedBeforeMoneyMovement(t *testing.T) {
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
 }
 
+func TestExternalNameEnquiryReturnsFoundAndDoesNotMoveMoney(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	beforeRows := memoryMoneyRowCounts(store)
+	beforeBalance := mustBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID)
+
+	result, err := svc.ExternalNameEnquiry(ctx, ExternalNameEnquiryInput{
+		InstitutionID:              DemoInstitutionID,
+		DestinationInstitutionCode: mockNIPDemoBankCode,
+		AccountNumber:              mockNIPDemoAccountNumber,
+		CurrencyID:                 "NGN",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Provider != ProviderMockNIP ||
+		result.DestinationInstitutionCode != mockNIPDemoBankCode ||
+		result.AccountNumber != mockNIPDemoAccountNumber ||
+		result.AccountName != mockNIPDemoAccountName ||
+		result.ProviderReference == nil ||
+		result.Status != NameEnquiryStatusFound ||
+		result.Message != "account_found" ||
+		result.CreatedAt.IsZero() {
+		t.Fatalf("name enquiry result mismatch: %+v", result)
+	}
+
+	afterRows := memoryMoneyRowCounts(store)
+	if afterRows != beforeRows {
+		t.Fatalf("name enquiry created money rows: before=%+v after=%+v", beforeRows, afterRows)
+	}
+	afterBalance := mustBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID)
+	assertNameEnquiryBalanceUnchanged(t, beforeBalance, afterBalance)
+	history, err := svc.GetTransactions(ctx, DemoInstitutionID, DemoCustomerAccountID, ListTransactionsOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("name enquiry should not create transaction history, got %+v", history)
+	}
+}
+
+func TestExternalNameEnquiryReturnsControlledProviderStatuses(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+
+	tests := []struct {
+		name                       string
+		destinationInstitutionCode string
+		accountNumber              string
+		wantStatus                 string
+		wantMessage                string
+	}{
+		{
+			name:                       "unknown account",
+			destinationInstitutionCode: mockNIPDemoBankCode,
+			accountNumber:              "9990000002",
+			wantStatus:                 NameEnquiryStatusNotFound,
+			wantMessage:                "account_not_found",
+		},
+		{
+			name:                       "provider unavailable",
+			destinationInstitutionCode: mockNIPUnavailableBankCode,
+			accountNumber:              mockNIPDemoAccountNumber,
+			wantStatus:                 NameEnquiryStatusProviderUnavailable,
+			wantMessage:                "provider_unavailable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := svc.ExternalNameEnquiry(ctx, ExternalNameEnquiryInput{
+				InstitutionID:              DemoInstitutionID,
+				DestinationInstitutionCode: tt.destinationInstitutionCode,
+				AccountNumber:              tt.accountNumber,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != tt.wantStatus || result.Message != tt.wantMessage || result.AccountName != "" || result.ProviderReference != nil {
+				t.Fatalf("unexpected controlled name enquiry result: %+v", result)
+			}
+		})
+	}
+}
+
+func TestExternalNameEnquiryRejectsUnsupportedProviderWithoutMoneyMovement(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	beforeRows := memoryMoneyRowCounts(store)
+
+	_, err := svc.ExternalNameEnquiry(ctx, ExternalNameEnquiryInput{
+		InstitutionID:              DemoInstitutionID,
+		Provider:                   "unsupported_provider",
+		DestinationInstitutionCode: mockNIPDemoBankCode,
+		AccountNumber:              mockNIPDemoAccountNumber,
+	})
+	if !errors.Is(err, ErrUnsupportedProvider) {
+		t.Fatalf("expected unsupported provider error, got %v", err)
+	}
+	afterRows := memoryMoneyRowCounts(store)
+	if afterRows != beforeRows {
+		t.Fatalf("unsupported provider should not create money rows: before=%+v after=%+v", beforeRows, afterRows)
+	}
+}
+
 func TestPendingTransferAppearsInHistory(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	transfer := mockInbound(t, svc, ctx, TransferRequest{
@@ -1971,6 +2072,43 @@ func setMemoryAccountCurrency(store *memoryStore, accountID, currencyID string) 
 	balance := store.balances[accountID]
 	balance.CurrencyID = currencyID
 	store.balances[accountID] = balance
+}
+
+type memoryMoneyRows struct {
+	balances  int
+	transfers int
+	journals  int
+	postings  int
+	holds     int
+}
+
+func memoryMoneyRowCounts(store *memoryStore) memoryMoneyRows {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	postingCount := 0
+	for _, postings := range store.postings {
+		postingCount += len(postings)
+	}
+	return memoryMoneyRows{
+		balances:  len(store.balances),
+		transfers: len(store.transfers),
+		journals:  len(store.journals),
+		postings:  postingCount,
+		holds:     len(store.holds),
+	}
+}
+
+func assertNameEnquiryBalanceUnchanged(t *testing.T, before, after *AccountBalance) {
+	t.Helper()
+	if before.AccountID != after.AccountID ||
+		before.InstitutionID != after.InstitutionID ||
+		before.AvailableMinor != after.AvailableMinor ||
+		before.LedgerMinor != after.LedgerMinor ||
+		before.CurrencyID != after.CurrencyID ||
+		optionalAuditValue(before.LastJournalEntryID) != optionalAuditValue(after.LastJournalEntryID) {
+		t.Fatalf("name enquiry mutated balance: before=%+v after=%+v", before, after)
+	}
 }
 
 type memoryStore struct {
@@ -2987,15 +3125,19 @@ func (m *memoryStore) consumeHoldLocked(transferID string, now time.Time) {
 }
 
 type spyTransferProvider struct {
-	initiateCalls int
-	parseCalls    int
+	nameEnquiryCalls int
+	initiateCalls    int
+	parseCalls       int
 
-	lastInitiate ProviderTransferRequest
-	lastHeaders  map[string]string
+	lastNameEnquiry NameEnquiryRequest
+	lastInitiate    ProviderTransferRequest
+	lastHeaders     map[string]string
 
-	initiateResult ProviderTransferResult
-	initiateErr    error
-	webhookEvent   ProviderWebhookEvent
+	nameEnquiryResult NameEnquiryResult
+	nameEnquiryErr    error
+	initiateResult    ProviderTransferResult
+	initiateErr       error
+	webhookEvent      ProviderWebhookEvent
 }
 
 func (s *spyTransferProvider) Name() string {
@@ -3003,7 +3145,12 @@ func (s *spyTransferProvider) Name() string {
 }
 
 func (s *spyTransferProvider) NameEnquiry(ctx context.Context, request NameEnquiryRequest) (*NameEnquiryResult, error) {
-	return nil, ErrInvalidRequest
+	s.nameEnquiryCalls++
+	s.lastNameEnquiry = request
+	if s.nameEnquiryErr != nil {
+		return nil, s.nameEnquiryErr
+	}
+	return copyOf(s.nameEnquiryResult), nil
 }
 
 func (s *spyTransferProvider) InitiateTransfer(ctx context.Context, request ProviderTransferRequest) (*ProviderTransferResult, error) {

@@ -20,6 +20,13 @@ const (
 	MockProviderScenarioReversal  = "reversal"
 )
 
+const (
+	mockNIPDemoBankCode        = "999001"
+	mockNIPUnavailableBankCode = "999998"
+	mockNIPDemoAccountNumber   = "9990000001"
+	mockNIPDemoAccountName     = "Ada Demo Wallet"
+)
+
 type MockNIPProvider struct {
 	mu        sync.Mutex
 	clock     func() time.Time
@@ -63,16 +70,17 @@ func (p *MockNIPProvider) NameEnquiry(ctx context.Context, request NameEnquiryRe
 	if bankCode == "" || accountNumber == "" {
 		return nil, ErrInvalidRequest
 	}
-
-	accountName := "Mock NIP Account " + accountNumber
-	if accountNumber == "9990000001" {
-		accountName = "Ada Demo Wallet"
+	if bankCode == mockNIPUnavailableBankCode {
+		return nil, ErrProviderUnavailable
+	}
+	if bankCode != mockNIPDemoBankCode || accountNumber != mockNIPDemoAccountNumber {
+		return nil, ErrNotFound
 	}
 
 	return &NameEnquiryResult{
 		Provider:          p.Name(),
 		ProviderReference: p.providerReference("mock-nip-ne", ""),
-		AccountName:       accountName,
+		AccountName:       mockNIPDemoAccountName,
 		BankCode:          bankCode,
 		AccountNumber:     accountNumber,
 	}, nil

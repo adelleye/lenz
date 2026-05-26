@@ -2,9 +2,12 @@ package corebanking
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"lenz-core/apps/auth/authn"
@@ -138,6 +141,36 @@ func TestHTTPReconciliationAuthTenantAndValidation(t *testing.T) {
 	}
 }
 
+func TestHTTPReconciliationInternalErrorsAreSanitized(t *testing.T) {
+	store := &failingReconciliationListStore{memoryStore: newMemoryStore()}
+	svc := NewService(store, NewMockNIPProvider())
+	if _, err := svc.SeedDemo(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/reconciliation-items", nil)
+	req.Header.Set("X-Request-ID", "req-recon-500")
+	req = withTestPrincipal(req, DemoInstitutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "password=secret") {
+		t.Fatalf("raw reconciliation error leaked to client: %s", rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["message"] != "internal_server_error" || response["request_id"] != "req-recon-500" {
+		t.Fatalf("unexpected sanitized error body: %+v", response)
+	}
+}
+
 func getHTTPReconciliation(t *testing.T, router http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -145,6 +178,14 @@ func getHTTPReconciliation(t *testing.T, router http.Handler, path string) *http
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	return rec
+}
+
+type failingReconciliationListStore struct {
+	*memoryStore
+}
+
+func (s *failingReconciliationListStore) ListReconciliationItems(ctx context.Context, institutionID string, options ListReconciliationItemsOptions) ([]ReconciliationItem, error) {
+	return nil, errors.New("database password=secret connection failed")
 }
 
 func postHTTPReconciliation(t *testing.T, router http.Handler, path, body, institutionID string) *httptest.ResponseRecorder {
