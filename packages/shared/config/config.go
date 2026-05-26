@@ -6,8 +6,11 @@ type Config struct {
 
 type Option func()
 
-func New() *Config {
-	db := NewDB()
+func New() (*Config, error) {
+	db, err := NewDB()
+	if err != nil {
+		return nil, err
+	}
 
-	return &Config{DB: db}
+	return &Config{DB: db}, nil
 }

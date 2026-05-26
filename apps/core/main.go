@@ -15,7 +15,10 @@ func main() {
 		_ = godotenv.Load("apps/core/.env")
 	}
 
-	s := server.NewServer(server.WithAuthn(authn.AuthRequiredScope), server.WithRouter(routes))
+	s, err := server.NewServer(server.WithAuthn(authn.AuthRequiredScope), server.WithRouter(routes))
+	if err != nil {
+		log.Fatal(err)
+	}
 	s.Run()
 }
 

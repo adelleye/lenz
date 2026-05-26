@@ -152,15 +152,19 @@ func TestRequiredAuthFailsClosedWithoutConfiguredToken(t *testing.T) {
 	}
 }
 
-func TestHealthPathIsPublic(t *testing.T) {
+func TestHealthPathsArePublic(t *testing.T) {
 	t.Setenv("LENZ_DEV_AUTH_TOKEN", "")
 	handler := Authentication(AuthRequiredScope)(okHandler())
 
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	for _, path := range []string{"/api/v1/health", "/api/v1/readyz"} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected public health check, got %d", rec.Code)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected public health check, got %d", rec.Code)
+			}
+		})
 	}
 }
 

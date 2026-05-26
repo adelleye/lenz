@@ -158,7 +158,7 @@ func envCSV(name string, fallback []string) []string {
 }
 
 func isPublicPath(path string) bool {
-	return path == "/api/v1/health"
+	return path == "/api/v1/health" || path == "/api/v1/readyz"
 }
 
 func writeUnauthorized(w http.ResponseWriter) {

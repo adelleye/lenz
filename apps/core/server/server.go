@@ -47,19 +47,22 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func NewServer(fns ...ServerOptions) *Server {
-	s := defaultServerConf()
+func NewServer(fns ...ServerOptions) (*Server, error) {
+	s, err := defaultServerConf()
+	if err != nil {
+		return nil, err
+	}
 	s.initViper()
 
 	s.setGlobalMiddlewares()
 
 	for _, fn := range fns {
 		if err := fn(s); err != nil {
-			log.Fatalln(err)
+			return nil, err
 		}
 	}
 
-	return s
+	return s, nil
 }
 
 func WithAuthn(scopes ...authn.AuthScope) ServerOptions {
@@ -77,15 +80,14 @@ func WithAuthn(scopes ...authn.AuthScope) ServerOptions {
 func WithRouter(fn func(r *chi.Mux, deps Deps)) ServerOptions {
 	return func(opts *Server) error {
 		if opts.router == nil {
-			log.Fatalln("Router is not configured")
+			return fmt.Errorf("router is not configured")
 		}
 
-		opts.router.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("content-type", "application/json")
-			w.WriteHeader(200)
-
-			_, _ = w.Write([]byte(`{"status": "ok"}`))
-		})
+		var pinger dbPinger
+		if opts.cfg != nil && opts.cfg.DBConn != nil {
+			pinger = opts.cfg.DBConn
+		}
+		registerHealthRoutes(opts.router, pinger)
 
 		fn(opts.router, Deps{
 			Cfg:   opts.cfg,
@@ -128,17 +130,20 @@ func (s *Server) setGlobalMiddlewares() {
 	s.router.Use(middleware.AllowContentType("application/json", "text/csv"))
 }
 
-func defaultServerConf() *Server {
-	config := config.New()
+func defaultServerConf() (*Server, error) {
+	cfg, err := config.New()
+	if err != nil {
+		return nil, err
+	}
 	corsMiddleware, err := newCORSFromEnv(os.Getenv)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 	return &Server{
-		cfg:    config,
+		cfg:    cfg,
 		router: chi.NewRouter(),
 		cors:   corsMiddleware,
-	}
+	}, nil
 }
 
 func (s *Server) Run() {
