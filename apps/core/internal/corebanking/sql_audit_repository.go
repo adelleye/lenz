@@ -62,7 +62,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7,
         $19, $20::jsonb, $20::jsonb, $21)`,
 		event.ID,
 		event.InstitutionID,
-		event.ActorType,
+		// TODO(migration): actor, subject_type, subject_id, and meta are legacy
+		// compatibility columns. Keep actor_type, actor_id, entity_*, and
+		// metadata authoritative until a migration can safely drop them.
+		event.ActorID,
 		event.ActorType,
 		event.ActorID,
 		event.RequestID,

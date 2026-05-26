@@ -4,6 +4,7 @@ package corebanking
 
 import (
 	"context"
+	"encoding/json"
 	"lenz-core/apps/auth/authn"
 	"testing"
 
@@ -110,6 +111,98 @@ func TestSQLAuditEventsGoal09(t *testing.T) {
 	}
 	if len(otherTenantEvents) != 0 {
 		t.Fatalf("audit events leaked across tenants: %+v", otherTenantEvents)
+	}
+}
+
+func TestSQLAuditInsertSemanticsPreserveAuthoritativeColumns(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.WithValue(context.Background(), middleware.RequestIDKey, "req-sql-audit-semantics")
+	ctx = authn.ContextWithPrincipal(ctx, authn.Principal{
+		InstitutionID: DemoInstitutionID,
+		ActorType:     "staff",
+		ActorID:       "sql-audit-actor-001",
+		Roles:         []string{"operations"},
+		Scopes:        []string{"corebanking:write"},
+		SourceIP:      "203.0.113.30",
+		UserAgent:     "SQLAuditSemanticsTest/1.0",
+	})
+	svc := seededSQLService(t, db, ctx)
+
+	var inserted *AuditEvent
+	if err := WithTx(ctx, db, func(tx TxRunner) error {
+		event, err := insertAuditEvent(ctx, tx, auditEventInput{
+			InstitutionID: DemoInstitutionID,
+			Action:        "audit.insert_semantics_test",
+			EntityType:    "transfer",
+			EntityID:      "77777777-7777-7777-7777-777777777777",
+			Metadata: map[string]string{
+				"operator_note":        "legacy actor column check",
+				"authorization_header": "Bearer should not persist",
+			},
+		})
+		inserted = event
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var row struct {
+		Actor       string `db:"actor"`
+		ActorType   string `db:"actor_type"`
+		ActorID     string `db:"actor_id"`
+		RequestID   string `db:"request_id"`
+		SubjectType string `db:"subject_type"`
+		SubjectID   string `db:"subject_id"`
+		EntityType  string `db:"entity_type"`
+		EntityID    string `db:"entity_id"`
+		Meta        []byte `db:"meta"`
+		Metadata    []byte `db:"metadata"`
+	}
+	if err := db.GetContext(ctx, &row, `
+SELECT actor, actor_type, actor_id, request_id, subject_type, subject_id, entity_type, entity_id, meta, metadata
+FROM audit_events
+WHERE id = $1`, inserted.ID); err != nil {
+		t.Fatal(err)
+	}
+	if row.Actor != "sql-audit-actor-001" || row.Actor == row.ActorType {
+		t.Fatalf("legacy actor should mirror actor_id, not actor_type: %+v", row)
+	}
+	if row.ActorType != "staff" || row.ActorID != "sql-audit-actor-001" || row.RequestID != "req-sql-audit-semantics" {
+		t.Fatalf("authoritative actor/request columns mismatch: %+v", row)
+	}
+	if row.SubjectType != "transfer" || row.SubjectID != "77777777-7777-7777-7777-777777777777" ||
+		row.EntityType != "transfer" || row.EntityID != "77777777-7777-7777-7777-777777777777" {
+		t.Fatalf("legacy subject/entity mirror columns mismatch: %+v", row)
+	}
+	if string(row.Meta) != string(row.Metadata) {
+		t.Fatalf("legacy meta should mirror authoritative metadata during transition: meta=%s metadata=%s", row.Meta, row.Metadata)
+	}
+
+	metadata := map[string]string{}
+	if err := json.Unmarshal(row.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["operator_note"] != "legacy actor column check" ||
+		metadata["actor_roles"] != "operations" ||
+		metadata["actor_scopes"] != "corebanking:write" ||
+		metadata["source_ip"] != "203.0.113.30" ||
+		metadata["user_agent"] != "SQLAuditSemanticsTest/1.0" {
+		t.Fatalf("metadata was not preserved in inserted audit row: %+v", metadata)
+	}
+	if _, ok := metadata["authorization_header"]; ok {
+		t.Fatalf("unsafe metadata persisted in inserted audit row: %+v", metadata)
+	}
+
+	events, err := svc.repository.ListAuditEvents(ctx, DemoInstitutionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := assertAuditEventPresent(t, events, "audit.insert_semantics_test", func(event AuditEvent) bool {
+		return event.ID == inserted.ID
+	})
+	if event.ActorType != "staff" || event.ActorID != "sql-audit-actor-001" || event.RequestID != "req-sql-audit-semantics" ||
+		event.Metadata["operator_note"] != "legacy actor column check" {
+		t.Fatalf("existing audit query returned mismatched authoritative fields: %+v", event)
 	}
 }
 
