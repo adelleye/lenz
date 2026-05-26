@@ -386,6 +386,151 @@ func TestSQLExternalInboundEventLifecycleIntegration(t *testing.T) {
 	}
 }
 
+func TestSQLExternalTransferRequeryIntegration(t *testing.T) {
+	db := integrationDB(t)
+	ctx := context.Background()
+
+	t.Run("outbound_success_consumes_hold_posts_once", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "sql-requery-out-success-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-requery-out-success", 7000, MockProviderScenarioPending))
+		assertSQLBalancePair(t, svc, ctx, 43000, 50000)
+		assertSQLTransferHold(t, ctx, db, pending.TransferID, HoldStatusActive)
+
+		result := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: pending.TransferID, Scenario: MockProviderScenarioSuccess})
+		transfer := mustGetSQLTransfer(t, svc, ctx, result.TransferID)
+		assertStatus(t, transfer, TransferStatusSucceeded)
+		if transfer.ProviderStatus != TransferStatusSucceeded || transfer.LedgerStatus != LedgerStatusPosted || transfer.ReconciliationStatus != ReconciliationStatusMatched || transfer.JournalEntryID == nil {
+			t.Fatalf("successful requery transfer mismatch: %+v", transfer)
+		}
+		assertSQLBalance(t, svc, ctx, 43000)
+		assertSQLTransferHold(t, ctx, db, transfer.ID, HoldStatusConsumed)
+		assertSQLJournalCountByTransfer(t, ctx, db, transfer.ID, 1)
+		assertSQLJournalBalanced(t, svc, ctx, transfer, 7000)
+
+		replay := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: pending.TransferID, Scenario: MockProviderScenarioSuccess})
+		if replay.TransferID != result.TransferID {
+			t.Fatalf("requery replay returned different transfer: first=%+v replay=%+v", result, replay)
+		}
+		assertSQLJournalCountByTransfer(t, ctx, db, transfer.ID, 1)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
+	t.Run("outbound_failed_releases_hold_no_journal", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "sql-requery-out-failed-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-requery-out-failed", 5000, MockProviderScenarioPending))
+
+		result := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: pending.TransferID, Scenario: MockProviderScenarioFailed})
+		transfer := mustGetSQLTransfer(t, svc, ctx, result.TransferID)
+		if transfer.Status != TransferStatusFailed || transfer.ProviderStatus != TransferStatusFailed || transfer.LedgerStatus != LedgerStatusNoPosting || transfer.ReconciliationStatus != ReconciliationStatusNoAction || transfer.JournalEntryID != nil {
+			t.Fatalf("failed requery transfer mismatch: %+v", transfer)
+		}
+		assertSQLBalance(t, svc, ctx, 50000)
+		assertSQLTransferHold(t, ctx, db, transfer.ID, HoldStatusReleased)
+		assertSQLJournalCountByTransfer(t, ctx, db, transfer.ID, 0)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
+	t.Run("provider_unknown_unavailable_stays_visible", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "sql-requery-out-unknown-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-requery-out-unknown", 6000, MockProviderScenarioProviderUnknown))
+
+		result := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: pending.TransferID, Scenario: MockProviderScenarioTimeout})
+		transfer := mustGetSQLTransfer(t, svc, ctx, result.TransferID)
+		if transfer.Status != TransferStatusPending || transfer.ProviderStatus != TransferProviderStatusUnknown || transfer.LedgerStatus != LedgerStatusPending || transfer.ReconciliationStatus != ReconciliationStatusManualReview || transfer.JournalEntryID != nil {
+			t.Fatalf("provider_unknown requery transfer mismatch: %+v", transfer)
+		}
+		assertSQLBalancePair(t, svc, ctx, 44000, 50000)
+		assertSQLTransferHold(t, ctx, db, transfer.ID, HoldStatusActive)
+		assertSQLJournalCountByTransfer(t, ctx, db, transfer.ID, 0)
+		reconItems, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: TransferProviderStatusUnknown})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertReconciliationItem(t, reconItems, transfer.ID, "provider_unknown", ReconciliationActionRequeryProvider)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
+	t.Run("inbound_pending_success_credits_once", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+		pending := externalInbound(t, svc, ctx, externalInboundPayload("sql-requery-in-event", "sql-requery-in-ref", TransferStatusPending, 7000))
+		if pending.TransferID == nil {
+			t.Fatalf("pending inbound missing transfer id: %+v", pending)
+		}
+
+		result := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: *pending.TransferID, Scenario: MockProviderScenarioSuccess})
+		transfer := mustGetSQLTransfer(t, svc, ctx, result.TransferID)
+		assertStatus(t, transfer, TransferStatusSucceeded)
+		if transfer.ProviderStatus != TransferStatusSucceeded || transfer.LedgerStatus != LedgerStatusPosted || transfer.ReconciliationStatus != ReconciliationStatusMatched || transfer.JournalEntryID == nil {
+			t.Fatalf("inbound requery transfer mismatch: %+v", transfer)
+		}
+		assertSQLBalance(t, svc, ctx, 7000)
+		assertSQLJournalCountByTransfer(t, ctx, db, transfer.ID, 1)
+		assertSQLJournalBalanced(t, svc, ctx, transfer, 7000)
+
+		externalRequery(t, svc, ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: *pending.TransferID, Scenario: MockProviderScenarioSuccess})
+		assertSQLBalance(t, svc, ctx, 7000)
+		assertSQLJournalCountByTransfer(t, ctx, db, transfer.ID, 1)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
+	t.Run("concurrent_outbound_success_has_one_effect", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "sql-requery-concurrent-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("sql-requery-concurrent", 9000, MockProviderScenarioPending))
+
+		results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+			result, err := svc.ExternalTransferRequery(ctx, ExternalTransferRequeryInput{
+				InstitutionID: DemoInstitutionID,
+				TransferID:    pending.TransferID,
+				Scenario:      MockProviderScenarioSuccess,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return svc.GetTransfer(ctx, DemoInstitutionID, result.TransferID)
+		})
+
+		transfer := assertConcurrentReplay(t, results)
+		assertStatus(t, transfer, TransferStatusSucceeded)
+		assertSQLBalance(t, svc, ctx, 41000)
+		assertSQLTransferHold(t, ctx, db, transfer.ID, HoldStatusConsumed)
+		assertSQLJournalCountByTransfer(t, ctx, db, transfer.ID, 1)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+}
+
 func TestSQLRepositoryCustomerCreateGetIntegration(t *testing.T) {
 	db := integrationDB(t)
 	ctx := context.Background()

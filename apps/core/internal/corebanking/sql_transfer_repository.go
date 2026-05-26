@@ -78,6 +78,79 @@ func (r *sqlTransferRepository) CompleteExternalOutboundTransfer(ctx context.Con
 	return transfer, err
 }
 
+func (r *sqlTransferRepository) CompleteExternalTransferRequery(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error) {
+	var transfer *Transfer
+	err := WithTx(ctx, r.db, func(tx TxRunner) error {
+		var err error
+		transferID = strings.TrimSpace(transferID)
+		input.InstitutionID = strings.TrimSpace(input.InstitutionID)
+		input.AccountID = strings.TrimSpace(input.AccountID)
+		input.ClearingAccountID = strings.TrimSpace(input.ClearingAccountID)
+		input.Direction = strings.ToLower(strings.TrimSpace(input.Direction))
+		input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+		input.Provider = strings.TrimSpace(input.Provider)
+		input.ProviderReference = strings.TrimSpace(input.ProviderReference)
+		input.ProviderStatus = strings.ToLower(strings.TrimSpace(input.ProviderStatus))
+		input.CurrencyID = strings.ToUpper(strings.TrimSpace(input.CurrencyID))
+		input.FailureReason = strings.TrimSpace(input.FailureReason)
+		input.Narration = strings.TrimSpace(input.Narration)
+		if transferID == "" || input.InstitutionID == "" || input.AccountID == "" || input.ClearingAccountID == "" || input.Provider == "" || input.CurrencyID == "" {
+			return ErrInvalidRequest
+		}
+
+		current, err := r.getTransferForUpdate(ctx, tx, input.InstitutionID, transferID)
+		if err != nil {
+			return err
+		}
+		if current.Provider == ProviderLedgerInternal {
+			return ErrInvalidRequest
+		}
+		if current.Provider != input.Provider ||
+			current.Direction != input.Direction ||
+			current.AccountID != input.AccountID ||
+			current.AmountMinor != input.AmountMinor ||
+			current.CurrencyID != input.CurrencyID {
+			return ErrConflict
+		}
+		if input.ProviderReference == "" {
+			input.ProviderReference = current.ProviderReference
+		}
+		if input.ProviderReference == "" {
+			return ErrInvalidRequest
+		}
+		if current.ProviderReference != "" && current.ProviderReference != input.ProviderReference {
+			return ErrConflict
+		}
+		if current.Status != TransferStatusPending {
+			transfer = current
+			return nil
+		}
+		if current.LedgerStatus != LedgerStatusPending || !requeryableProviderStatus(current.ProviderStatus) {
+			return ErrInvalidRequest
+		}
+
+		status, providerStatus, err := externalOutboundTransferStatuses(input)
+		if err != nil {
+			return err
+		}
+		switch current.Direction {
+		case TransferDirectionOutbound:
+			transfer, err = r.completeExternalOutboundTransfer(ctx, tx, transferID, input)
+			return err
+		case TransferDirectionInbound:
+			if status == TransferStatusPending {
+				transfer, err = r.updatePendingInboundTransferRequery(ctx, tx, *current, input, providerStatus)
+				return err
+			}
+			transfer, err = r.settlePendingTransfer(ctx, tx, *current, input)
+			return err
+		default:
+			return ErrInvalidRequest
+		}
+	})
+	return transfer, err
+}
+
 func (r *sqlTransferRepository) GetTransferHold(ctx context.Context, institutionID, transferID string) (*AccountHold, error) {
 	return r.holds.getForTransfer(ctx, r.db, institutionID, transferID)
 }
@@ -627,6 +700,61 @@ WHERE institution_id = $10 AND id = $11`,
 	if err = auditPostedInternalTransfer(ctx, tx, input, *updated, account.Account, clearing.Account); err != nil {
 		return nil, err
 	}
+	if err = auditExternalInboundTransfer(ctx, tx, input, *updated, account.Account); err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (r *sqlTransferRepository) updatePendingInboundTransferRequery(ctx context.Context, tx TxRunner, pending Transfer, input RecordTransferInput, providerStatus string) (*Transfer, error) {
+	if pending.Direction != TransferDirectionInbound ||
+		pending.AccountID != input.AccountID ||
+		pending.AmountMinor != input.AmountMinor ||
+		pending.CurrencyID != input.CurrencyID {
+		return nil, ErrConflict
+	}
+	account, err := lockAccountBalance(ctx, tx, pending.InstitutionID, pending.AccountID)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	ledgerStatus, reconciliationStatus := transferStatuses(TransferStatusPending)
+	failureReason := strings.TrimSpace(input.FailureReason)
+	if providerStatus == TransferProviderStatusUnknown {
+		reconciliationStatus = ReconciliationStatusManualReview
+		if failureReason == "" {
+			failureReason = providerUnknownFailureReason
+		}
+	}
+	var failure *string
+	if failureReason != "" {
+		failure = &failureReason
+	}
+	narration := strings.TrimSpace(input.Narration)
+	if narration == "" {
+		narration = pending.Narration
+	}
+
+	if _, err = tx.ExecContext(ctx, `
+UPDATE transfers
+SET status = 'pending',
+    provider_status = $1,
+    ledger_status = $2,
+    reconciliation_status = $3,
+    provider_reference = $4,
+    failure_reason = $5,
+    narration = $6,
+    updated_at = $7
+WHERE institution_id = $8 AND id = $9`,
+		providerStatus, ledgerStatus, reconciliationStatus, input.ProviderReference, failure, narration, now, pending.InstitutionID, pending.ID); err != nil {
+		return nil, err
+	}
+	updated, err := r.getTransferForUpdate(ctx, tx, pending.InstitutionID, pending.ID)
+	if err != nil {
+		return nil, err
+	}
+	input.FailureReason = failureReason
 	if err = auditExternalInboundTransfer(ctx, tx, input, *updated, account.Account); err != nil {
 		return nil, err
 	}

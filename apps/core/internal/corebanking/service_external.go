@@ -46,6 +46,14 @@ type ExternalInboundEventInput struct {
 	Headers       map[string]string
 }
 
+type ExternalTransferRequeryInput struct {
+	InstitutionID     string
+	TransferID        string
+	ProviderReference string
+	Scenario          string
+	Note              string
+}
+
 type ExternalNameEnquiryResult struct {
 	Provider                   string    `json:"provider"`
 	DestinationInstitutionCode string    `json:"destination_institution_code"`
@@ -84,6 +92,24 @@ type ExternalInboundEventResult struct {
 	JournalEntryID       *string `json:"journal_entry_id"`
 	Message              string  `json:"message"`
 	HTTPStatus           int     `json:"-"`
+}
+
+type ExternalTransferRequeryResult struct {
+	TransferID           string    `json:"transfer_id"`
+	AccountID            string    `json:"account_id"`
+	Direction            string    `json:"direction"`
+	Provider             string    `json:"provider"`
+	ProviderReference    string    `json:"provider_reference"`
+	ProviderStatus       string    `json:"provider_status"`
+	LedgerStatus         string    `json:"ledger_status"`
+	ReconciliationStatus string    `json:"reconciliation_status"`
+	Status               string    `json:"status"`
+	AmountMinor          int64     `json:"amount_minor"`
+	CurrencyID           string    `json:"currency_id"`
+	JournalEntryID       *string   `json:"journal_entry_id"`
+	HoldID               *string   `json:"hold_id"`
+	Message              string    `json:"message"`
+	CreatedAt            time.Time `json:"created_at"`
 }
 
 func (s *Service) ExternalNameEnquiry(ctx context.Context, input ExternalNameEnquiryInput) (*ExternalNameEnquiryResult, error) {
@@ -253,6 +279,72 @@ func (s *Service) ExternalInboundEvent(ctx context.Context, input ExternalInboun
 		return nil, err
 	}
 	return externalInboundEventResultFromTransfer(*transfer, "event_recorded", 0), nil
+}
+
+func (s *Service) ExternalTransferRequery(ctx context.Context, input ExternalTransferRequeryInput) (*ExternalTransferRequeryResult, error) {
+	normalized, err := normalizeExternalTransferRequeryInput(input)
+	if err != nil {
+		return nil, err
+	}
+	transfer, err := s.repository.GetTransfer(ctx, normalized.InstitutionID, normalized.TransferID)
+	if err != nil {
+		return nil, err
+	}
+	if transfer.Provider == ProviderLedgerInternal {
+		return nil, ErrInvalidRequest
+	}
+	if transfer.Status != TransferStatusPending {
+		return s.externalTransferRequeryResult(ctx, *transfer, "already_final")
+	}
+	if transfer.LedgerStatus != LedgerStatusPending || !requeryableProviderStatus(transfer.ProviderStatus) {
+		return nil, ErrInvalidRequest
+	}
+
+	providerReference, err := requeryProviderReference(*transfer, normalized.ProviderReference)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := s.provider(transfer.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if err := applyMockRequeryScenario(provider, providerReference, normalized.Scenario); err != nil {
+		return nil, err
+	}
+
+	providerResult, err := provider.RequeryTransfer(ctx, providerReference)
+	if err != nil {
+		if !providerRequeryStatusUnknown(err) {
+			return nil, err
+		}
+		providerResult = providerUnknownRequeryResult(provider, *transfer, providerReference, normalized.Note)
+	}
+	if providerResult == nil {
+		providerResult = providerUnknownRequeryResult(provider, *transfer, providerReference, normalized.Note)
+	}
+
+	clearing, err := s.repository.GetDefaultInternalSettlementAccount(ctx, transfer.InstitutionID, transfer.CurrencyID)
+	if err != nil {
+		return nil, err
+	}
+	completion, message, err := externalTransferRequeryCompletionInput(*transfer, clearing.ID, providerReference, normalized.Note, *providerResult)
+	if err != nil {
+		return nil, err
+	}
+	completed, err := s.repository.CompleteExternalTransferRequery(ctx, transfer.ID, completion)
+	if err != nil {
+		return nil, err
+	}
+	if completed.Status != TransferStatusPending {
+		message = "already_final"
+		switch completed.Status {
+		case TransferStatusSucceeded:
+			message = "requery_succeeded"
+		case TransferStatusFailed:
+			message = "requery_failed"
+		}
+	}
+	return s.externalTransferRequeryResult(ctx, *completed, message)
 }
 
 func externalNameEnquiryErrorResult(providerName, destinationInstitutionCode, accountNumber string, err error) *ExternalNameEnquiryResult {
@@ -486,6 +578,146 @@ func validExternalOutboundScenario(scenario string) bool {
 	}
 }
 
+func normalizeExternalTransferRequeryInput(input ExternalTransferRequeryInput) (ExternalTransferRequeryInput, error) {
+	institutionID, err := requireInstitutionID(input.InstitutionID)
+	if err != nil {
+		return ExternalTransferRequeryInput{}, err
+	}
+	input.InstitutionID = institutionID
+	input.TransferID = strings.TrimSpace(input.TransferID)
+	input.ProviderReference = strings.TrimSpace(input.ProviderReference)
+	input.Scenario = strings.ToLower(strings.TrimSpace(input.Scenario))
+	input.Note = strings.TrimSpace(input.Note)
+	if _, err := uuid.Parse(input.TransferID); err != nil {
+		return ExternalTransferRequeryInput{}, ErrInvalidRequest
+	}
+	if !validExternalRequeryScenario(input.Scenario) {
+		return ExternalTransferRequeryInput{}, ErrInvalidRequest
+	}
+	return input, nil
+}
+
+func validExternalRequeryScenario(scenario string) bool {
+	switch scenario {
+	case "",
+		MockProviderScenarioSuccess,
+		MockProviderScenarioFailed,
+		MockProviderScenarioPending,
+		MockProviderScenarioTimeout,
+		MockProviderScenarioProviderUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func requeryProviderReference(transfer Transfer, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	current := strings.TrimSpace(transfer.ProviderReference)
+	if requested != "" && current != "" && requested != current {
+		return "", ErrConflict
+	}
+	providerReference := firstNonBlank(requested, current)
+	if providerReference == "" {
+		return "", ErrInvalidRequest
+	}
+	return providerReference, nil
+}
+
+type mockRequeryScenarioSetter interface {
+	SetRequeryScenario(providerReference, scenario string) error
+}
+
+func applyMockRequeryScenario(provider TransferProvider, providerReference, scenario string) error {
+	if scenario == "" {
+		return nil
+	}
+	setter, ok := provider.(mockRequeryScenarioSetter)
+	if !ok {
+		return ErrInvalidRequest
+	}
+	return setter.SetRequeryScenario(providerReference, scenario)
+}
+
+func providerRequeryStatusUnknown(err error) bool {
+	return providerTransferStatusUnknown(err) || errors.Is(err, ErrProviderUnavailable)
+}
+
+func providerUnknownRequeryResult(provider TransferProvider, transfer Transfer, providerReference, narration string) *ProviderTransferResult {
+	return providerUnknownTransferResult(provider, ProviderTransferRequest{
+		InstitutionID:     transfer.InstitutionID,
+		AccountID:         transfer.AccountID,
+		AmountMinor:       transfer.AmountMinor,
+		CurrencyID:        transfer.CurrencyID,
+		IdempotencyKey:    transfer.IdempotencyKey,
+		ProviderReference: providerReference,
+		Narration:         narration,
+	})
+}
+
+func externalTransferRequeryCompletionInput(transfer Transfer, clearingAccountID, providerReference, note string, result ProviderTransferResult) (RecordTransferInput, string, error) {
+	if strings.TrimSpace(result.Provider) != "" && strings.TrimSpace(result.Provider) != transfer.Provider {
+		return RecordTransferInput{}, "", ErrConflict
+	}
+	resultReference := strings.TrimSpace(result.ProviderReference)
+	if resultReference != "" && resultReference != providerReference {
+		return RecordTransferInput{}, "", ErrConflict
+	}
+	status := strings.ToLower(strings.TrimSpace(result.Status))
+	providerStatus := strings.ToLower(strings.TrimSpace(result.ProviderStatus))
+	if status != "" && providerStatus != "" && providerStatus != status && providerStatus != TransferProviderStatusUnknown {
+		return RecordTransferInput{}, "", ErrConflict
+	}
+	if providerStatus == "" {
+		providerStatus = status
+	}
+	if providerStatus == TransferProviderStatusUnknown {
+		status = TransferStatusPending
+	}
+	if status == "" {
+		status = providerStatus
+	}
+	if providerStatus == "" {
+		providerStatus = status
+	}
+	if !validTransferStatus(status) || !validProviderStatus(providerStatus) {
+		return RecordTransferInput{}, "", ErrInvalidRequest
+	}
+
+	failureReason := strings.TrimSpace(result.FailureReason)
+	if providerStatus == TransferProviderStatusUnknown && failureReason == "" {
+		failureReason = providerUnknownFailureReason
+	}
+	if status == TransferStatusFailed && failureReason == "" {
+		failureReason = "provider_failed"
+	}
+	message := "requery_pending"
+	switch {
+	case providerStatus == TransferProviderStatusUnknown:
+		message = "requery_provider_unknown"
+	case status == TransferStatusSucceeded:
+		message = "requery_succeeded"
+	case status == TransferStatusFailed:
+		message = "requery_failed"
+	}
+	return RecordTransferInput{
+		InstitutionID:      transfer.InstitutionID,
+		AccountID:          transfer.AccountID,
+		ClearingAccountID:  clearingAccountID,
+		Direction:          transfer.Direction,
+		Status:             status,
+		AmountMinor:        transfer.AmountMinor,
+		CurrencyID:         transfer.CurrencyID,
+		IdempotencyKey:     transfer.IdempotencyKey,
+		Provider:           transfer.Provider,
+		ProviderReference:  providerReference,
+		ProviderStatus:     providerStatus,
+		RequestFingerprint: transfer.RequestFingerprint,
+		FailureReason:      failureReason,
+		Narration:          firstNonBlank(note, result.Narration, transfer.Narration),
+	}, message, nil
+}
+
 func externalOutboundCompletionInput(intent RecordTransferInput, result ProviderTransferResult) RecordTransferInput {
 	status := strings.ToLower(strings.TrimSpace(result.Status))
 	providerStatus := strings.ToLower(strings.TrimSpace(result.ProviderStatus))
@@ -545,6 +777,34 @@ func (s *Service) externalOutboundTransferResult(ctx context.Context, transfer T
 		CurrencyID:           transfer.CurrencyID,
 		JournalEntryID:       transfer.JournalEntryID,
 		HoldID:               holdID,
+		CreatedAt:            transfer.CreatedAt,
+	}, nil
+}
+
+func (s *Service) externalTransferRequeryResult(ctx context.Context, transfer Transfer, message string) (*ExternalTransferRequeryResult, error) {
+	hold, err := s.repository.GetTransferHold(ctx, transfer.InstitutionID, transfer.ID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	var holdID *string
+	if err == nil {
+		holdID = &hold.ID
+	}
+	return &ExternalTransferRequeryResult{
+		TransferID:           transfer.ID,
+		AccountID:            transfer.AccountID,
+		Direction:            transfer.Direction,
+		Provider:             transfer.Provider,
+		ProviderReference:    transfer.ProviderReference,
+		ProviderStatus:       transfer.ProviderStatus,
+		LedgerStatus:         transfer.LedgerStatus,
+		ReconciliationStatus: transfer.ReconciliationStatus,
+		Status:               transfer.Status,
+		AmountMinor:          transfer.AmountMinor,
+		CurrencyID:           transfer.CurrencyID,
+		JournalEntryID:       transfer.JournalEntryID,
+		HoldID:               holdID,
+		Message:              message,
 		CreatedAt:            transfer.CreatedAt,
 	}, nil
 }

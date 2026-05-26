@@ -383,18 +383,6 @@ func (s *Service) GetTransfer(ctx context.Context, institutionID, transferID str
 	return s.repository.GetTransfer(ctx, institutionID, transferID)
 }
 
-func (s *Service) RequeryTransfer(ctx context.Context, institutionID, transferID string) (*ProviderTransferResult, error) {
-	transfer, err := s.GetTransfer(ctx, institutionID, transferID)
-	if err != nil {
-		return nil, err
-	}
-	provider, err := s.provider(transfer.Provider)
-	if err != nil {
-		return nil, err
-	}
-	return provider.RequeryTransfer(ctx, transfer.ProviderReference)
-}
-
 func (s *Service) ListTransfers(ctx context.Context, institutionID string) ([]Transfer, error) {
 	institutionID, err := requireInstitutionID(institutionID)
 	if err != nil {
@@ -744,6 +732,15 @@ func validTransferStatus(status string) bool {
 func validProviderStatus(status string) bool {
 	switch status {
 	case TransferStatusSucceeded, TransferStatusPending, TransferStatusFailed, TransferProviderStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func requeryableProviderStatus(status string) bool {
+	switch status {
+	case TransferStatusPending, TransferProviderStatusUnknown:
 		return true
 	default:
 		return false

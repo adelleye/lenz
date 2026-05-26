@@ -705,6 +705,45 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/external/transfers/{transfer_id}/requery:
+    post:
+      operationId: externalTransferRequery
+      summary: Requery a pending mock external transfer through the configured provider
+      tags: [Corebanking]
+      parameters:
+        - name: transfer_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/InstitutionID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalTransferRequeryRequest"
+      responses:
+        "200":
+          description: External transfer requery result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIExternalTransferRequery"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/transfers/mock/inbound:
     post:
       operationId: mockInboundTransfer
@@ -1490,6 +1529,87 @@ components:
         message:
           type: string
           minLength: 1
+
+    ExternalTransferRequeryRequest:
+      type: object
+      properties:
+        provider_reference:
+          type: string
+          minLength: 1
+          description: Optional when the transfer already has a provider reference.
+        scenario:
+          type: string
+          enum: [success, failed, pending, timeout, provider_unknown]
+          description: Mock-only override for MockNIPProvider requery outcomes.
+        note:
+          type: string
+
+    APIExternalTransferRequery:
+      type: object
+      required:
+        - transfer_id
+        - account_id
+        - direction
+        - provider
+        - provider_reference
+        - provider_status
+        - ledger_status
+        - reconciliation_status
+        - status
+        - amount_minor
+        - currency_id
+        - journal_entry_id
+        - hold_id
+        - message
+        - created_at
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        direction:
+          type: string
+          enum: [inbound, outbound]
+        provider:
+          type: string
+          minLength: 1
+        provider_reference:
+          type: string
+        provider_status:
+          type: string
+          enum: [pending, succeeded, failed, provider_unknown]
+        ledger_status:
+          type: string
+          enum: [pending, posted, no_posting, reversal_deficit]
+        reconciliation_status:
+          type: string
+          enum: [pending, matched, no_action, manual_review]
+        status:
+          type: string
+          enum: [pending, succeeded, failed]
+        amount_minor:
+          type: integer
+          format: int64
+          minimum: 1
+        currency_id:
+          type: string
+          enum: [NGN]
+        journal_entry_id:
+          type: string
+          format: uuid
+          nullable: true
+        hold_id:
+          type: string
+          format: uuid
+          nullable: true
+        message:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
 
     AccountControlRequest:
       type: object

@@ -46,6 +46,7 @@ type TransferRepository interface {
 	RecordProviderEventReview(ctx context.Context, input RecordProviderEventReviewInput) (*Transfer, error)
 	BeginExternalOutboundTransfer(ctx context.Context, input RecordTransferInput) (*Transfer, bool, error)
 	CompleteExternalOutboundTransfer(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error)
+	CompleteExternalTransferRequery(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error)
 	GetTransferHold(ctx context.Context, institutionID, transferID string) (*AccountHold, error)
 	ReverseTransfer(ctx context.Context, input ReverseTransferInput) (*Transfer, error)
 }

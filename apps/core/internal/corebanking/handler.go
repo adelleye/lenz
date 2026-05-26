@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"lenz-core/apps/auth/authn"
 	"log"
 	"net/http"
@@ -43,9 +44,28 @@ func (h *HTTPServer) Routes(r chi.Router) {
 		RequestErrorHandlerFunc:  openAPIRequestError,
 		ResponseErrorHandlerFunc: openAPIResponseError,
 	})
-	HandlerWithOptions(strictHandler, ChiServerOptions{
-		BaseRouter:       r,
-		ErrorHandlerFunc: openAPIRequestError,
+	r.Group(func(r chi.Router) {
+		r.Use(optionalExternalRequeryBody)
+		HandlerWithOptions(strictHandler, ChiServerOptions{
+			BaseRouter:       r,
+			ErrorHandlerFunc: openAPIRequestError,
+		})
+	})
+}
+
+func optionalExternalRequeryBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost &&
+			strings.HasPrefix(r.URL.Path, "/api/v1/external/transfers/") &&
+			strings.HasSuffix(r.URL.Path, "/requery") &&
+			(r.Body == nil || r.Body == http.NoBody || r.ContentLength == 0) {
+			r.Body = io.NopCloser(strings.NewReader("{}"))
+			r.ContentLength = 2
+			if r.Header.Get("Content-Type") == "" {
+				r.Header.Set("Content-Type", "application/json")
+			}
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -252,6 +272,22 @@ func (h *HTTPServer) ExternalInboundEvent(ctx context.Context, request ExternalI
 	return strictJSONResponse{status: status, body: result}, nil
 }
 
+func (h *HTTPServer) ExternalTransferRequery(ctx context.Context, request ExternalTransferRequeryRequestObject) (ExternalTransferRequeryResponseObject, error) {
+	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
+	if err != nil {
+		return nil, err
+	}
+	input, err := bindExternalTransferRequeryRequest(institutionID, request.TransferId.String(), request.Body)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.service.ExternalTransferRequery(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	return okResponse(result), nil
+}
+
 func (h *HTTPServer) ListAccountTransactions(ctx context.Context, request ListAccountTransactionsRequestObject) (ListAccountTransactionsResponseObject, error) {
 	institutionID, err := institutionScope(ctx, request.Params.XInstitutionID)
 	if err != nil {
@@ -442,6 +478,10 @@ func (req *ExternalInboundEventRequest) Bind(r *http.Request) error {
 	return validateExternalInboundEventRequest(req)
 }
 
+func (req *ExternalTransferRequeryRequest) Bind(r *http.Request) error {
+	return validateExternalTransferRequeryRequest(req)
+}
+
 func validateExternalOutboundTransferRequest(req *ExternalOutboundTransferRequest) error {
 	if req == nil {
 		return ErrInvalidRequest
@@ -484,6 +524,16 @@ func validateExternalInboundEventRequest(req *ExternalInboundEventRequest) error
 	return nil
 }
 
+func validateExternalTransferRequeryRequest(req *ExternalTransferRequeryRequest) error {
+	if req == nil {
+		return nil
+	}
+	if req.Scenario != nil && !validExternalTransferRequeryRequestScenario(*req.Scenario) {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
 func validExternalOutboundRequestScenario(scenario ExternalOutboundTransferRequestScenario) bool {
 	switch scenario {
 	case ExternalOutboundTransferRequestScenarioSuccess,
@@ -491,6 +541,19 @@ func validExternalOutboundRequestScenario(scenario ExternalOutboundTransferReque
 		ExternalOutboundTransferRequestScenarioPending,
 		ExternalOutboundTransferRequestScenarioTimeout,
 		ExternalOutboundTransferRequestScenarioProviderUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validExternalTransferRequeryRequestScenario(scenario ExternalTransferRequeryRequestScenario) bool {
+	switch scenario {
+	case ExternalTransferRequeryRequestScenarioSuccess,
+		ExternalTransferRequeryRequestScenarioFailed,
+		ExternalTransferRequeryRequestScenarioPending,
+		ExternalTransferRequeryRequestScenarioTimeout,
+		ExternalTransferRequeryRequestScenarioProviderUnknown:
 		return true
 	default:
 		return false
@@ -717,6 +780,23 @@ func bindExternalInboundEventRequest(institutionID string, body *ExternalInbound
 	}, nil
 }
 
+func bindExternalTransferRequeryRequest(institutionID, transferID string, body *ExternalTransferRequeryRequest) (ExternalTransferRequeryInput, error) {
+	if err := validateExternalTransferRequeryRequest(body); err != nil {
+		return ExternalTransferRequeryInput{}, ErrInvalidRequest
+	}
+	input := ExternalTransferRequeryInput{
+		InstitutionID: institutionID,
+		TransferID:    transferID,
+	}
+	if body == nil {
+		return input, nil
+	}
+	input.ProviderReference = optionalString(body.ProviderReference)
+	input.Scenario = optionalEnumString(body.Scenario)
+	input.Note = optionalString(body.Note)
+	return input, nil
+}
+
 func applyRequestScope(ctx context.Context, headerInstitutionID *InstitutionID, headerIdempotencyKey string, req *TransferRequest) error {
 	institutionID, err := institutionScope(ctx, headerInstitutionID)
 	if err != nil {
@@ -899,6 +979,10 @@ func (response strictJSONResponse) VisitExternalOutboundTransferResponse(w http.
 }
 
 func (response strictJSONResponse) VisitExternalInboundEventResponse(w http.ResponseWriter) error {
+	return response.write(w)
+}
+
+func (response strictJSONResponse) VisitExternalTransferRequeryResponse(w http.ResponseWriter) error {
 	return response.write(w)
 }
 

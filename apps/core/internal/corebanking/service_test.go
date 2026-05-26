@@ -1972,6 +1972,236 @@ func TestExternalOutboundFailurePendingAndUnknownLifecycle(t *testing.T) {
 	}
 }
 
+func TestExternalTransferRequeryOutboundOutcomes(t *testing.T) {
+	tests := []struct {
+		name               string
+		initialScenario    string
+		requeryScenario    string
+		wantStatus         string
+		wantProviderStatus string
+		wantLedgerStatus   string
+		wantReconStatus    string
+		wantHoldStatus     string
+		wantAvailable      int64
+		wantLedger         int64
+		wantJournalDelta   int
+		wantMessage        string
+		wantReviewQueue    bool
+	}{
+		{name: "pending_to_success", initialScenario: MockProviderScenarioPending, requeryScenario: MockProviderScenarioSuccess, wantStatus: TransferStatusSucceeded, wantProviderStatus: TransferStatusSucceeded, wantLedgerStatus: LedgerStatusPosted, wantReconStatus: ReconciliationStatusMatched, wantHoldStatus: HoldStatusConsumed, wantAvailable: 40000, wantLedger: 40000, wantJournalDelta: 1, wantMessage: "requery_succeeded"},
+		{name: "pending_to_failed", initialScenario: MockProviderScenarioPending, requeryScenario: MockProviderScenarioFailed, wantStatus: TransferStatusFailed, wantProviderStatus: TransferStatusFailed, wantLedgerStatus: LedgerStatusNoPosting, wantReconStatus: ReconciliationStatusNoAction, wantHoldStatus: HoldStatusReleased, wantAvailable: 50000, wantLedger: 50000, wantMessage: "requery_failed"},
+		{name: "pending_still_pending", initialScenario: MockProviderScenarioPending, requeryScenario: MockProviderScenarioPending, wantStatus: TransferStatusPending, wantProviderStatus: TransferStatusPending, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusPending, wantHoldStatus: HoldStatusActive, wantAvailable: 40000, wantLedger: 50000, wantMessage: "requery_pending"},
+		{name: "provider_unknown_to_success", initialScenario: MockProviderScenarioProviderUnknown, requeryScenario: MockProviderScenarioSuccess, wantStatus: TransferStatusSucceeded, wantProviderStatus: TransferStatusSucceeded, wantLedgerStatus: LedgerStatusPosted, wantReconStatus: ReconciliationStatusMatched, wantHoldStatus: HoldStatusConsumed, wantAvailable: 40000, wantLedger: 40000, wantJournalDelta: 1, wantMessage: "requery_succeeded"},
+		{name: "provider_unknown_to_no_response", initialScenario: MockProviderScenarioProviderUnknown, requeryScenario: MockProviderScenarioTimeout, wantStatus: TransferStatusPending, wantProviderStatus: TransferProviderStatusUnknown, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusManualReview, wantHoldStatus: HoldStatusActive, wantAvailable: 40000, wantLedger: 50000, wantMessage: "requery_provider_unknown", wantReviewQueue: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, svc, store := newTestService(t)
+			mustInternalCredit(t, svc, ctx, InternalCreditInput{
+				InstitutionID:  DemoInstitutionID,
+				AccountID:      DemoCustomerAccountID,
+				AmountMinor:    50000,
+				CurrencyID:     "NGN",
+				IdempotencyKey: "external-requery-" + tt.name + "-fund",
+			})
+			pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("external-requery-"+tt.name, 10000, tt.initialScenario))
+			journalCountBefore := len(store.journals)
+
+			result := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{
+				InstitutionID: DemoInstitutionID,
+				TransferID:    pending.TransferID,
+				Scenario:      tt.requeryScenario,
+				Note:          "operator requery",
+			})
+
+			if result.Status != tt.wantStatus ||
+				result.ProviderStatus != tt.wantProviderStatus ||
+				result.LedgerStatus != tt.wantLedgerStatus ||
+				result.ReconciliationStatus != tt.wantReconStatus ||
+				result.Message != tt.wantMessage {
+				t.Fatalf("requery %s mismatch: %+v", tt.name, result)
+			}
+			if len(store.journals) != journalCountBefore+tt.wantJournalDelta {
+				t.Fatalf("journal count mismatch: before=%d after=%d want_delta=%d", journalCountBefore, len(store.journals), tt.wantJournalDelta)
+			}
+			assertBalancePair(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, tt.wantAvailable, tt.wantLedger)
+			assertMemoryTransferHold(t, store, pending.TransferID, tt.wantHoldStatus)
+			if tt.wantJournalDelta == 1 {
+				transfer, err := svc.GetTransfer(ctx, DemoInstitutionID, pending.TransferID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertJournalBalanced(t, store, transfer)
+				replay := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{
+					InstitutionID: DemoInstitutionID,
+					TransferID:    pending.TransferID,
+					Scenario:      tt.requeryScenario,
+				})
+				if replay.TransferID != result.TransferID || len(store.journals) != journalCountBefore+1 {
+					t.Fatalf("final requery was not deterministic: replay=%+v journal_count=%d", replay, len(store.journals))
+				}
+			}
+			items, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: tt.wantProviderStatus})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantReviewQueue {
+				assertReconciliationItem(t, items, pending.TransferID, "provider_unknown", ReconciliationActionRequeryProvider)
+			} else {
+				assertNoReconciliationItem(t, items, pending.TransferID)
+			}
+		})
+	}
+}
+
+func TestExternalTransferRequeryInboundPendingSuccessCreditsOnce(t *testing.T) {
+	ctx, svc, store := newTestService(t)
+	pending := externalInbound(t, svc, ctx, externalInboundPayload("external-requery-in-event", "external-requery-in-ref", TransferStatusPending, 12000))
+	if pending.TransferID == nil {
+		t.Fatalf("pending inbound missing transfer id: %+v", pending)
+	}
+	journalCountBefore := len(store.journals)
+
+	result := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{
+		InstitutionID: DemoInstitutionID,
+		TransferID:    *pending.TransferID,
+		Scenario:      MockProviderScenarioSuccess,
+	})
+
+	if result.Status != TransferStatusSucceeded ||
+		result.ProviderStatus != TransferStatusSucceeded ||
+		result.LedgerStatus != LedgerStatusPosted ||
+		result.ReconciliationStatus != ReconciliationStatusMatched ||
+		result.JournalEntryID == nil ||
+		result.Message != "requery_succeeded" {
+		t.Fatalf("inbound requery success mismatch: %+v", result)
+	}
+	if len(store.journals) != journalCountBefore+1 {
+		t.Fatalf("inbound requery journal count mismatch: before=%d after=%d", journalCountBefore, len(store.journals))
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 12000)
+	replay := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{
+		InstitutionID: DemoInstitutionID,
+		TransferID:    *pending.TransferID,
+		Scenario:      MockProviderScenarioSuccess,
+	})
+	if replay.TransferID != result.TransferID || len(store.journals) != journalCountBefore+1 {
+		t.Fatalf("inbound final requery was not deterministic: replay=%+v journal_count=%d", replay, len(store.journals))
+	}
+}
+
+func TestExternalTransferRequeryNoOpsAndRejectsUnsafeTransfers(t *testing.T) {
+	t.Run("already final", func(t *testing.T) {
+		ctx, svc, store := newTestService(t)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "external-requery-final-fund",
+		})
+		final := externalOutbound(t, svc, ctx, externalOutboundTestInput("external-requery-final", 10000, MockProviderScenarioSuccess))
+		journalCountBefore := len(store.journals)
+
+		result := externalRequery(t, svc, ctx, ExternalTransferRequeryInput{
+			InstitutionID: DemoInstitutionID,
+			TransferID:    final.TransferID,
+			Scenario:      MockProviderScenarioFailed,
+		})
+
+		if result.Message != "already_final" || result.Status != TransferStatusSucceeded || len(store.journals) != journalCountBefore {
+			t.Fatalf("already-final requery mismatch: result=%+v journals=%d", result, len(store.journals))
+		}
+	})
+
+	t.Run("internal transfer rejected", func(t *testing.T) {
+		ctx, svc, _ := newTestService(t)
+		internal := mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    10000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "external-requery-internal",
+		})
+		if _, err := svc.ExternalTransferRequery(ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: internal.ID}); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("internal transfer requery error = %v, want invalid request", err)
+		}
+	})
+
+	t.Run("unsupported provider rejected", func(t *testing.T) {
+		ctx, svc, store := newTestService(t)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "external-requery-unsupported-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("external-requery-unsupported", 10000, MockProviderScenarioPending))
+		store.mu.Lock()
+		transfer := store.transfers[pending.TransferID]
+		transfer.Provider = "real_nibss"
+		store.transfers[pending.TransferID] = transfer
+		store.mu.Unlock()
+
+		if _, err := svc.ExternalTransferRequery(ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: pending.TransferID}); !errors.Is(err, ErrUnsupportedProvider) {
+			t.Fatalf("unsupported provider requery error = %v, want unsupported provider", err)
+		}
+	})
+
+	t.Run("provider reference mismatch rejected", func(t *testing.T) {
+		ctx, svc, _ := newTestService(t)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "external-requery-mismatch-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("external-requery-mismatch", 10000, MockProviderScenarioPending))
+
+		if _, err := svc.ExternalTransferRequery(ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: pending.TransferID, ProviderReference: "wrong-reference"}); !errors.Is(err, ErrConflict) {
+			t.Fatalf("provider reference mismatch error = %v, want conflict", err)
+		}
+	})
+
+	t.Run("provider status mismatch rejected", func(t *testing.T) {
+		ctx := context.Background()
+		store := newMemoryStore()
+		provider := &spyTransferProvider{
+			initiateResult: ProviderTransferResult{
+				Provider:          ProviderMockNIP,
+				ProviderReference: "external-requery-provider-mismatch-ref",
+				Status:            TransferStatusPending,
+				ProviderStatus:    TransferStatusPending,
+			},
+			requeryResult: ProviderTransferResult{
+				Provider:          ProviderMockNIP,
+				ProviderReference: "external-requery-provider-mismatch-ref",
+				Status:            TransferStatusPending,
+				ProviderStatus:    TransferStatusSucceeded,
+			},
+		}
+		svc := NewService(store, provider)
+		if _, err := svc.SeedDemo(ctx); err != nil {
+			t.Fatal(err)
+		}
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "external-requery-provider-mismatch-fund",
+		})
+		pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("external-requery-provider-mismatch", 10000, MockProviderScenarioPending))
+
+		if _, err := svc.ExternalTransferRequery(ctx, ExternalTransferRequeryInput{InstitutionID: DemoInstitutionID, TransferID: pending.TransferID}); !errors.Is(err, ErrConflict) {
+			t.Fatalf("provider status mismatch error = %v, want conflict", err)
+		}
+	})
+}
+
 func TestExternalOutboundRejectsBeforeProviderCall(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -2391,6 +2621,15 @@ func externalOutboundTestInput(idempotencyKey string, amountMinor int64, scenari
 		Reference:                  idempotencyKey + "-ref",
 		Scenario:                   scenario,
 	}
+}
+
+func externalRequery(t *testing.T, svc *Service, ctx context.Context, input ExternalTransferRequeryInput) *ExternalTransferRequeryResult {
+	t.Helper()
+	result, err := svc.ExternalTransferRequery(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func externalInbound(t *testing.T, svc *Service, ctx context.Context, payload map[string]any) *ExternalInboundEventResult {
@@ -3373,6 +3612,81 @@ func (m *memoryStore) BeginExternalOutboundTransfer(ctx context.Context, input R
 func (m *memoryStore) CompleteExternalOutboundTransfer(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.completeExternalOutboundTransferLocked(ctx, transferID, input)
+}
+
+func (m *memoryStore) CompleteExternalTransferRequery(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pending, ok := m.transfers[transferID]
+	if !ok || pending.InstitutionID != input.InstitutionID {
+		return nil, ErrNotFound
+	}
+	if pending.Provider == ProviderLedgerInternal {
+		return nil, ErrInvalidRequest
+	}
+	if pending.Provider != input.Provider ||
+		pending.Direction != input.Direction ||
+		pending.AccountID != input.AccountID ||
+		pending.AmountMinor != input.AmountMinor ||
+		pending.CurrencyID != input.CurrencyID {
+		return nil, ErrConflict
+	}
+	if input.ProviderReference == "" {
+		input.ProviderReference = pending.ProviderReference
+	}
+	if input.ProviderReference == "" {
+		return nil, ErrInvalidRequest
+	}
+	if pending.ProviderReference != "" && pending.ProviderReference != input.ProviderReference {
+		return nil, ErrConflict
+	}
+	if pending.Status != TransferStatusPending {
+		return copyOf(pending), nil
+	}
+	if pending.LedgerStatus != LedgerStatusPending || !requeryableProviderStatus(pending.ProviderStatus) {
+		return nil, ErrInvalidRequest
+	}
+	if pending.Direction == TransferDirectionOutbound {
+		return m.completeExternalOutboundTransferLocked(ctx, transferID, input)
+	}
+	status, providerStatus, err := externalOutboundTransferStatuses(input)
+	if err != nil {
+		return nil, err
+	}
+	if status != TransferStatusPending {
+		return m.settlePendingTransferLocked(pending, input)
+	}
+
+	account := m.accounts[pending.AccountID]
+	now := time.Now().UTC()
+	ledgerStatus, reconciliationStatus := transferStatuses(TransferStatusPending)
+	failureReason := strings.TrimSpace(input.FailureReason)
+	if providerStatus == TransferProviderStatusUnknown {
+		reconciliationStatus = ReconciliationStatusManualReview
+		if failureReason == "" {
+			failureReason = providerUnknownFailureReason
+		}
+	}
+	pending.Status = TransferStatusPending
+	pending.ProviderStatus = providerStatus
+	pending.LedgerStatus = ledgerStatus
+	pending.ReconciliationStatus = reconciliationStatus
+	pending.ProviderReference = input.ProviderReference
+	pending.Narration = firstNonBlank(input.Narration, pending.Narration)
+	pending.UpdatedAt = now
+	if failureReason != "" {
+		pending.FailureReason = &failureReason
+	}
+	m.transfers[pending.ID] = pending
+	input.FailureReason = failureReason
+	if err := m.auditExternalInboundTransferLocked(input, pending, account); err != nil {
+		return nil, err
+	}
+	return copyOf(pending), nil
+}
+
+func (m *memoryStore) completeExternalOutboundTransferLocked(ctx context.Context, transferID string, input RecordTransferInput) (*Transfer, error) {
 	pending, ok := m.transfers[transferID]
 	if !ok || pending.InstitutionID != input.InstitutionID {
 		return nil, ErrNotFound
@@ -3830,16 +4144,20 @@ func (m *memoryStore) consumeHoldLocked(transferID string, now time.Time) {
 type spyTransferProvider struct {
 	nameEnquiryCalls int
 	initiateCalls    int
+	requeryCalls     int
 	parseCalls       int
 
 	lastNameEnquiry NameEnquiryRequest
 	lastInitiate    ProviderTransferRequest
+	lastRequery     string
 	lastHeaders     map[string]string
 
 	nameEnquiryResult NameEnquiryResult
 	nameEnquiryErr    error
 	initiateResult    ProviderTransferResult
 	initiateErr       error
+	requeryResult     ProviderTransferResult
+	requeryErr        error
 	webhookEvent      ProviderWebhookEvent
 }
 
@@ -3866,7 +4184,12 @@ func (s *spyTransferProvider) InitiateTransfer(ctx context.Context, request Prov
 }
 
 func (s *spyTransferProvider) RequeryTransfer(ctx context.Context, providerReference string) (*ProviderTransferResult, error) {
-	return nil, ErrNotFound
+	s.requeryCalls++
+	s.lastRequery = providerReference
+	if s.requeryErr != nil {
+		return nil, s.requeryErr
+	}
+	return copyOf(s.requeryResult), nil
 }
 
 func (s *spyTransferProvider) ParseWebhook(ctx context.Context, payload []byte, headers map[string]string) (*ProviderWebhookEvent, error) {

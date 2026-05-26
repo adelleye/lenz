@@ -1517,6 +1517,157 @@ func TestExternalInboundEventRouteRejectsInvalidBody(t *testing.T) {
 	}
 }
 
+func TestExternalTransferRequeryRouteOutcomesAndSchema(t *testing.T) {
+	tests := []struct {
+		name               string
+		initialScenario    string
+		requeryScenario    string
+		wantStatus         string
+		wantProviderStatus string
+		wantLedgerStatus   string
+		wantReconStatus    string
+		wantMessage        string
+	}{
+		{name: "success", initialScenario: MockProviderScenarioPending, requeryScenario: MockProviderScenarioSuccess, wantStatus: TransferStatusSucceeded, wantProviderStatus: TransferStatusSucceeded, wantLedgerStatus: LedgerStatusPosted, wantReconStatus: ReconciliationStatusMatched, wantMessage: "requery_succeeded"},
+		{name: "failed", initialScenario: MockProviderScenarioPending, requeryScenario: MockProviderScenarioFailed, wantStatus: TransferStatusFailed, wantProviderStatus: TransferStatusFailed, wantLedgerStatus: LedgerStatusNoPosting, wantReconStatus: ReconciliationStatusNoAction, wantMessage: "requery_failed"},
+		{name: "pending", initialScenario: MockProviderScenarioPending, requeryScenario: MockProviderScenarioPending, wantStatus: TransferStatusPending, wantProviderStatus: TransferStatusPending, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusPending, wantMessage: "requery_pending"},
+		{name: "provider_unknown", initialScenario: MockProviderScenarioProviderUnknown, requeryScenario: MockProviderScenarioTimeout, wantStatus: TransferStatusPending, wantProviderStatus: TransferProviderStatusUnknown, wantLedgerStatus: LedgerStatusPending, wantReconStatus: ReconciliationStatusManualReview, wantMessage: "requery_provider_unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, svc, _ := newTestService(t)
+			mustInternalCredit(t, svc, ctx, InternalCreditInput{
+				InstitutionID:  DemoInstitutionID,
+				AccountID:      DemoCustomerAccountID,
+				AmountMinor:    50000,
+				CurrencyID:     "NGN",
+				IdempotencyKey: "http-requery-" + tt.name + "-fund",
+			})
+			pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("http-requery-"+tt.name, 10000, tt.initialScenario))
+			router := chi.NewRouter()
+			NewHandler(svc).Routes(router)
+
+			body := `{"scenario":"` + tt.requeryScenario + `","note":"HTTP requery"}`
+			rec := postExternalRequery(t, router, pending.TransferID, body, DemoInstitutionID)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected requery %s to return 200, got %d body=%s", tt.name, rec.Code, rec.Body.String())
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+pending.TransferID+"/requery", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = withTestPrincipal(req, DemoInstitutionID)
+			assertResponseMatchesOpenAPISchema(t, req, rec)
+
+			var result ExternalTransferRequeryResult
+			if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.TransferID != pending.TransferID ||
+				result.Status != tt.wantStatus ||
+				result.ProviderStatus != tt.wantProviderStatus ||
+				result.LedgerStatus != tt.wantLedgerStatus ||
+				result.ReconciliationStatus != tt.wantReconStatus ||
+				result.Message != tt.wantMessage {
+				t.Fatalf("requery route %s mismatch: %+v", tt.name, result)
+			}
+		})
+	}
+}
+
+func TestExternalTransferRequeryRouteNoBodyAlreadyFinalAndInternal(t *testing.T) {
+	t.Run("empty body already final no-op", func(t *testing.T) {
+		ctx, svc, _ := newTestService(t)
+		mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    50000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "http-requery-final-fund",
+		})
+		final := externalOutbound(t, svc, ctx, externalOutboundTestInput("http-requery-final", 10000, MockProviderScenarioSuccess))
+		router := chi.NewRouter()
+		NewHandler(svc).Routes(router)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+final.TransferID+"/requery", nil)
+		req = withTestPrincipal(req, DemoInstitutionID)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected empty-body final requery to return 200, got %d body=%s", rec.Code, rec.Body.String())
+		}
+		var result ExternalTransferRequeryResult
+		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Message != "already_final" || result.Status != TransferStatusSucceeded {
+			t.Fatalf("already-final route mismatch: %+v", result)
+		}
+	})
+
+	t.Run("internal transfer rejected", func(t *testing.T) {
+		ctx, svc, _ := newTestService(t)
+		internal := mustInternalCredit(t, svc, ctx, InternalCreditInput{
+			InstitutionID:  DemoInstitutionID,
+			AccountID:      DemoCustomerAccountID,
+			AmountMinor:    10000,
+			CurrencyID:     "NGN",
+			IdempotencyKey: "http-requery-internal",
+		})
+		router := chi.NewRouter()
+		NewHandler(svc).Routes(router)
+
+		rec := postExternalRequery(t, router, internal.ID, `{}`, DemoInstitutionID)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected internal transfer requery to return 400, got %d body=%s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestExternalTransferRequeryRouteRequiresAuthTenantAndValidID(t *testing.T) {
+	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
+	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
+	ctx, svc, _ := newTestService(t)
+	mustInternalCredit(t, svc, ctx, InternalCreditInput{
+		InstitutionID:  DemoInstitutionID,
+		AccountID:      DemoCustomerAccountID,
+		AmountMinor:    50000,
+		CurrencyID:     "NGN",
+		IdempotencyKey: "http-requery-auth-fund",
+	})
+	pending := externalOutbound(t, svc, ctx, externalOutboundTestInput("http-requery-auth", 10000, MockProviderScenarioPending))
+	router := chi.NewRouter()
+	router.Use(authn.Authentication(authn.AuthRequiredScope))
+	NewHandler(svc).Routes(router)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+pending.TransferID+"/requery", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing auth to return 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+pending.TransferID+"/requery", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("X-Institution-ID", "99999999-9999-9999-9999-999999999999")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected mismatched tenant to return 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/not-a-uuid/requery", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid transfer id to return 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestExternalOutboundTransferRouteRequiresAuthAndTenantScope(t *testing.T) {
 	t.Setenv("LENZ_DEV_AUTH_TOKEN", "test-token")
 	t.Setenv("LENZ_DEV_INSTITUTION_ID", DemoInstitutionID)
@@ -1548,6 +1699,16 @@ func TestExternalOutboundTransferRouteRequiresAuthAndTenantScope(t *testing.T) {
 func postExternalInboundEvent(t *testing.T, router http.Handler, body, institutionID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/inbound-events", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withTestPrincipal(req, institutionID)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func postExternalRequery(t *testing.T, router http.Handler, transferID, body, institutionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/external/transfers/"+transferID+"/requery", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req = withTestPrincipal(req, institutionID)
 	rec := httptest.NewRecorder()

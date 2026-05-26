@@ -30,9 +30,10 @@ const (
 )
 
 type MockNIPProvider struct {
-	mu        sync.Mutex
-	clock     func() time.Time
-	transfers map[string]ProviderTransferResult
+	mu            sync.Mutex
+	clock         func() time.Time
+	transfers     map[string]ProviderTransferResult
+	requeryErrors map[string]error
 }
 
 var _ Provider = (*MockNIPProvider)(nil)
@@ -42,8 +43,9 @@ type MockNIPOption func(*MockNIPProvider)
 
 func NewMockNIPProvider(options ...MockNIPOption) *MockNIPProvider {
 	provider := &MockNIPProvider{
-		clock:     func() time.Time { return time.Now().UTC() },
-		transfers: map[string]ProviderTransferResult{},
+		clock:         func() time.Time { return time.Now().UTC() },
+		transfers:     map[string]ProviderTransferResult{},
+		requeryErrors: map[string]error{},
 	}
 	for _, option := range options {
 		option(provider)
@@ -139,6 +141,10 @@ func (p *MockNIPProvider) RequeryTransfer(ctx context.Context, providerReference
 	}
 
 	p.mu.Lock()
+	if err := p.requeryErrors[providerReference]; err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
 	result, ok := p.transfers[providerReference]
 	p.mu.Unlock()
 	if !ok {
@@ -152,6 +158,52 @@ func (p *MockNIPProvider) RequeryTransfer(ctx context.Context, providerReference
 		}
 	}
 	return copyProviderTransferResult(result), nil
+}
+
+func (p *MockNIPProvider) SetRequeryScenario(providerReference, scenario string) error {
+	providerReference = strings.TrimSpace(providerReference)
+	scenario = mockScenario(scenario)
+	if providerReference == "" || scenario == "" {
+		return ErrInvalidRequest
+	}
+	if scenario == MockProviderScenarioTimeout {
+		p.mu.Lock()
+		if _, ok := p.transfers[providerReference]; !ok {
+			p.mu.Unlock()
+			return ErrNotFound
+		}
+		p.requeryErrors[providerReference] = ErrProviderStatusUnknown
+		p.mu.Unlock()
+		return nil
+	}
+
+	status, failureReason, delayed, err := p.resolveScenario("", "", scenario)
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	result, ok := p.transfers[providerReference]
+	if !ok {
+		p.mu.Unlock()
+		return ErrNotFound
+	}
+	result.Status = status
+	result.ProviderStatus = status
+	result.FailureReason = failureReason
+	result.Delayed = delayed
+	result.DelayedUntil = nil
+	if scenario == MockProviderScenarioProviderUnknown {
+		result.ProviderStatus = TransferProviderStatusUnknown
+		result.FailureReason = providerUnknownFailureReason
+	}
+	if delayed {
+		delayedUntil := p.clock().Add(delayDuration(0))
+		result.DelayedUntil = &delayedUntil
+	}
+	p.transfers[providerReference] = result
+	delete(p.requeryErrors, providerReference)
+	p.mu.Unlock()
+	return nil
 }
 
 func (p *MockNIPProvider) ParseWebhook(ctx context.Context, payload []byte, headers map[string]string) (*ProviderWebhookEvent, error) {
@@ -222,7 +274,30 @@ func (p *MockNIPProvider) ParseWebhook(ctx context.Context, payload []byte, head
 		delayedUntil := p.clock().Add(delayDuration(request.DelaySeconds))
 		event.DelayedUntil = &delayedUntil
 	}
+	p.rememberWebhookEvent(event)
 	return &event, nil
+}
+
+func (p *MockNIPProvider) rememberWebhookEvent(event ProviderWebhookEvent) {
+	providerReference := strings.TrimSpace(event.ProviderReference)
+	if providerReference == "" {
+		return
+	}
+	result := ProviderTransferResult{
+		Provider:          p.Name(),
+		ProviderReference: providerReference,
+		ProviderEventID:   strings.TrimSpace(event.ProviderEventID),
+		Status:            event.Status,
+		ProviderStatus:    event.Status,
+		FailureReason:     strings.TrimSpace(event.FailureReason),
+		Narration:         strings.TrimSpace(event.Narration),
+		Delayed:           event.Delayed,
+		DelayedUntil:      event.DelayedUntil,
+	}
+	p.mu.Lock()
+	p.transfers[providerReference] = result
+	delete(p.requeryErrors, providerReference)
+	p.mu.Unlock()
 }
 
 type mockWebhookPayload struct {
