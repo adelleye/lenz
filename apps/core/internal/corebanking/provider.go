@@ -14,12 +14,8 @@ var (
 
 const providerUnknownFailureReason = "provider_status_unknown"
 
-type Provider interface {
-	Name() string
-}
-
 type TransferProvider interface {
-	Provider
+	Name() string
 	NameEnquiry(ctx context.Context, request NameEnquiryRequest) (*NameEnquiryResult, error)
 	InitiateTransfer(ctx context.Context, request ProviderTransferRequest) (*ProviderTransferResult, error)
 	RequeryTransfer(ctx context.Context, providerReference string) (*ProviderTransferResult, error)

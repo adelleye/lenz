@@ -36,7 +36,6 @@ type MockNIPProvider struct {
 	requeryErrors map[string]error
 }
 
-var _ Provider = (*MockNIPProvider)(nil)
 var _ TransferProvider = (*MockNIPProvider)(nil)
 
 type MockNIPOption func(*MockNIPProvider)
