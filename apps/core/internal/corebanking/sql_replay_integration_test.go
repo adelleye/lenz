@@ -159,6 +159,45 @@ func TestSQLRepositoryTransferSpineIntegrationConcurrentReplay(t *testing.T) {
 		assertSQLReplayIntegrity(t, ctx, db)
 	})
 
+	t.Run("reversal_unique_per_source", func(t *testing.T) {
+		resetIntegrationSchema(t, db)
+		svc := seededSQLService(t, db, ctx)
+
+		original := mockInbound(t, svc, ctx, TransferRequest{
+			AccountID:       DemoCustomerAccountID,
+			AmountMinor:     50000,
+			IdempotencyKey:  "sql-concurrent-reversal-fund",
+			ProviderEventID: "sql-concurrent-reversal-fund-event",
+			Narration:       "SQL concurrent reversal funding",
+		})
+
+		results := runConcurrentTransfers(t, 10, func(i int) (*Transfer, error) {
+			return svc.ReverseTransfer(ctx, DemoInstitutionID, original.ID, fmt.Sprintf("sql-concurrent-reversal-%02d", i))
+		})
+
+		var winners []*Transfer
+		conflicts := 0
+		for i, result := range results {
+			if result.err == nil {
+				winners = append(winners, result.transfer)
+				continue
+			}
+			if errors.Is(result.err, ErrConflict) {
+				conflicts++
+				continue
+			}
+			t.Fatalf("concurrent reversal request %d returned unexpected error: %v", i, result.err)
+		}
+		if len(winners) != 1 {
+			t.Fatalf("expected exactly one reversal to succeed, got %d", len(winners))
+		}
+		if conflicts != 9 {
+			t.Fatalf("expected nine reversal attempts to conflict, got %d", conflicts)
+		}
+		assertSQLBalance(t, svc, ctx, 0)
+		assertSQLReplayIntegrity(t, ctx, db)
+	})
+
 	t.Run("pending_settlement_replay", func(t *testing.T) {
 		resetIntegrationSchema(t, db)
 		svc := seededSQLService(t, db, ctx)

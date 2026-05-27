@@ -193,6 +193,16 @@ func (r *sqlTransferRepository) ReverseTransfer(ctx context.Context, input Rever
 			return ErrInvalidRequest
 		}
 
+		if existing, err := r.getActiveReversalOf(ctx, tx, input.InstitutionID, original.ID); err == nil {
+			if existing.IdempotencyKey != input.IdempotencyKey {
+				return ErrConflict
+			}
+			transfer = existing
+			return nil
+		} else if !errors.Is(err, ErrNotFound) {
+			return err
+		}
+
 		provider := strings.TrimSpace(input.Provider)
 		if provider == "" {
 			provider = original.Provider
@@ -1107,6 +1117,17 @@ func (r *sqlTransferRepository) getTransferForUpdate(ctx context.Context, tx TxR
 func (r *sqlTransferRepository) getTransferByIdempotency(ctx context.Context, tx TxRunner, institutionID, idempotencyKey string) (*Transfer, error) {
 	var transfer Transfer
 	err := tx.GetContext(ctx, &transfer, transferSelectSQL+` WHERE institution_id = $1 AND idempotency_key = $2 FOR UPDATE`, institutionID, idempotencyKey)
+	return &transfer, normalizeSQLError(err)
+}
+
+func (r *sqlTransferRepository) getActiveReversalOf(ctx context.Context, tx TxRunner, institutionID, originalTransferID string) (*Transfer, error) {
+	var transfer Transfer
+	err := tx.GetContext(ctx, &transfer, transferSelectSQL+`
+ WHERE institution_id = $1
+   AND reversal_of_transfer_id = $2
+   AND direction = 'reversal'
+   AND status IN ('succeeded', 'pending')
+ LIMIT 1`, institutionID, originalTransferID)
 	return &transfer, normalizeSQLError(err)
 }
 

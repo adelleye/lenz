@@ -562,6 +562,24 @@ func TestReversalRejectsUnrelatedIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestSecondReversalWithNewIdempotencyKeyIsRejected(t *testing.T) {
+	ctx, svc, _ := newTestService(t)
+	original := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "double-rev-in", ProviderEventID: "evt-double-rev-in"})
+
+	first := reverseTransfer(t, svc, ctx, original.ID, "double-rev-reverse-1")
+
+	_, err := svc.ReverseTransfer(ctx, DemoInstitutionID, original.ID, "double-rev-reverse-2")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected second reversal with new idempotency key to be rejected as conflict, got %v", err)
+	}
+
+	replay := reverseTransfer(t, svc, ctx, original.ID, "double-rev-reverse-1")
+	if replay.ID != first.ID {
+		t.Fatalf("expected same-key replay to return the original reversal: first=%s replay=%s", first.ID, replay.ID)
+	}
+	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
+}
+
 func TestTenantScopingPreventsCrossTenantReads(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 10000, IdempotencyKey: "tenant-in", ProviderEventID: "evt-tenant-in"})

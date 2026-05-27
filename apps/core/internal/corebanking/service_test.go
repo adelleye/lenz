@@ -1433,6 +1433,21 @@ func (m *memoryStore) ReverseTransfer(ctx context.Context, input ReverseTransfer
 	if original.Status != TransferStatusSucceeded || original.JournalEntryID == nil || original.Direction == TransferDirectionReversal {
 		return nil, ErrInvalidRequest
 	}
+	for _, candidate := range m.transfers {
+		if candidate.InstitutionID != input.InstitutionID || candidate.ReversalOfTransferID == nil || *candidate.ReversalOfTransferID != original.ID {
+			continue
+		}
+		if candidate.Direction != TransferDirectionReversal {
+			continue
+		}
+		if candidate.Status != TransferStatusSucceeded && candidate.Status != TransferStatusPending {
+			continue
+		}
+		if candidate.IdempotencyKey != input.IdempotencyKey {
+			return nil, ErrConflict
+		}
+		return copyOf(candidate), nil
+	}
 	provider := strings.TrimSpace(input.Provider)
 	if provider == "" {
 		provider = original.Provider
