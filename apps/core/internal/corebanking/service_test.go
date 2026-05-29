@@ -534,9 +534,9 @@ func (m *memoryStore) CreateCustomer(ctx context.Context, input CreateCustomerIn
 		Email:         input.Email,
 		Phone:         input.Phone,
 		Status:        "active",
-		KYCTier:       input.KYCTier,
-		BVNStatus:     input.BVNStatus,
-		NINStatus:     input.NINStatus,
+		KYCTier:       input.kycTier,
+		BVNStatus:     input.bvnStatus,
+		NINStatus:     input.ninStatus,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}

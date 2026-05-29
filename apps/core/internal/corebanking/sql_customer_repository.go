@@ -54,9 +54,9 @@ func (r *sqlCustomerRepository) CreateCustomer(ctx context.Context, input Create
 		meta, err := json.Marshal(customerMeta{
 			CustomerType: input.CustomerType,
 			BusinessName: input.BusinessName,
-			KYCTier:      input.KYCTier,
-			BVNStatus:    input.BVNStatus,
-			NINStatus:    input.NINStatus,
+			KYCTier:      input.kycTier,
+			BVNStatus:    input.bvnStatus,
+			NINStatus:    input.ninStatus,
 		})
 		if err != nil {
 			return err

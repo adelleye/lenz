@@ -169,7 +169,6 @@ fi
 
 echo "Generating OpenAPI code..."
 "$GO_BIN" generate ./apps/core/internal/corebanking
-"$GO_BIN" generate ./apps/core/internal/institution
 pass "OpenAPI code generated"
 
 echo "Resetting Docker Compose services and volumes for a clean demo database..."

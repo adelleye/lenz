@@ -51,9 +51,7 @@ The dead `oapi_validate.go` request-validator stub was removed after `staticchec
 
 ```sh
 go generate ./apps/core/internal/corebanking
-go generate ./apps/core/internal/institution
 git check-ignore -v apps/core/internal/corebanking/corebanking.gen.go
-git check-ignore -v apps/core/internal/institution/institution.gen.go
 go test -race -count=1 ./apps/core/internal/corebanking
 go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
 go build ./apps/core/... ./apps/auth/... ./packages/shared/...
@@ -68,7 +66,6 @@ Generated code remains ignored:
 
 ```text
 .gitignore:13:apps/core/internal/corebanking/corebanking.gen.go apps/core/internal/corebanking/corebanking.gen.go
-.gitignore:14:apps/core/internal/institution/institution.gen.go apps/core/internal/institution/institution.gen.go
 ```
 
 ## Manual API And DB Evidence

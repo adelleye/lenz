@@ -7,7 +7,6 @@ tasks:
     desc: Generate OpenAPI-backed Go code.
     cmds:
       - go generate ./apps/core/internal/corebanking
-      - go generate ./apps/core/internal/institution
 
   build:
     desc: Generate code, then build the Go workspace packages.

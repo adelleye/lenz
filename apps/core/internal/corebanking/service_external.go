@@ -270,10 +270,19 @@ func (s *Service) ExternalInboundEvent(ctx context.Context, input ExternalInboun
 	}
 	event.AccountID = account.ID
 	event.RequestFingerprint = externalInboundEventFingerprint(*event, account.ID)
+	if externalInboundDestinationNeedsReview(*account) {
+		return s.recordExternalInboundReview(ctx, *event, account.ID, "blocked_destination_account", true)
+	}
 
 	transfer, err := s.recordExternalInboundTransfer(ctx, *event, account.ID)
 	if errors.Is(err, ErrConflict) {
 		return s.recordExternalInboundReview(ctx, *event, account.ID, "provider_event_payload_conflict", false)
+	}
+	if errors.Is(err, ErrInvalidRequest) {
+		current, getErr := s.repository.GetAccount(ctx, institutionID, account.ID)
+		if getErr == nil && externalInboundDestinationNeedsReview(*current) {
+			return s.recordExternalInboundReview(ctx, *event, account.ID, "blocked_destination_account", true)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -431,6 +440,11 @@ func (s *Service) externalInboundDestinationAccount(ctx context.Context, event P
 		return s.repository.GetAccount(ctx, event.InstitutionID, event.AccountID)
 	}
 	return s.repository.GetAccountByNumber(ctx, event.InstitutionID, event.DestinationAccountNumber)
+}
+
+func externalInboundDestinationNeedsReview(account Account) bool {
+	return account.Kind == AccountKindCustomer &&
+		(account.Status == AccountStatusFrozen || account.Status == AccountStatusClosed)
 }
 
 func (s *Service) recordExternalInboundTransfer(ctx context.Context, event ProviderWebhookEvent, accountID string) (*Transfer, error) {

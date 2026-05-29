@@ -526,24 +526,6 @@ func TestStandardAccountCannotSpendReversalDeficit(t *testing.T) {
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, -20000)
 }
 
-func TestOverdraftCapableAccountCanBeRepresented(t *testing.T) {
-	ctx, svc, store := newTestService(t)
-	creditAccountID := "66666666-6666-6666-6666-666666666666"
-	customerID := DemoCustomerID
-	now := time.Now().UTC()
-	store.accounts[creditAccountID] = Account{ID: creditAccountID, InstitutionID: DemoInstitutionID, CustomerID: &customerID, AccountNumber: "9990000002", Name: "Ada Demo Overdraft", Kind: AccountKindCustomer, ProductType: AccountProductOverdraftCredit, AllowNegative: true, CurrencyID: "NGN", NormalBalance: NormalBalanceCredit, Status: "active", CreatedAt: now, UpdatedAt: now}
-	store.balances[creditAccountID] = AccountBalance{AccountID: creditAccountID, InstitutionID: DemoInstitutionID, CurrencyID: "NGN", UpdatedAt: now}
-
-	transfer := mockOutbound(t, svc, ctx, TransferRequest{
-		AccountID:      creditAccountID,
-		AmountMinor:    10000,
-		IdempotencyKey: "overdraft-out",
-	})
-
-	assertStatus(t, transfer, TransferStatusSucceeded)
-	assertBalance(t, svc, ctx, DemoInstitutionID, creditAccountID, -10000)
-}
-
 func TestReversalRejectsUnrelatedIdempotencyKey(t *testing.T) {
 	ctx, svc, _ := newTestService(t)
 	original := mockInbound(t, svc, ctx, TransferRequest{AccountID: DemoCustomerAccountID, AmountMinor: 50000, IdempotencyKey: "collision-in", ProviderEventID: "evt-collision-in"})

@@ -28,7 +28,6 @@ apps/core/
   main.go                         starts the API
   server/                         HTTP server, middleware, dependency wiring
   internal/corebanking/           CBA v0.1 transaction spine
-  internal/institution/           no-route OpenAPI module placeholder
 ```
 
 Active OpenAPI inputs:
@@ -36,9 +35,6 @@ Active OpenAPI inputs:
 - `design/openapi/core/corebanking.yaml` is the current source of truth for the
   transaction CBA v0.1 HTTP surface and the runtime routes registered by
   `apps/core`.
-- `design/openapi/core/institution.yaml` is intentionally a placeholder with no
-  routes. It is generated only to keep the institution module workflow visible;
-  it does not define runtime API behavior yet.
 
 The core-banking module is split by responsibility:
 
@@ -134,7 +130,6 @@ Demo-only routes, enabled only with `LENZ_DEMO_MODE=true`:
 
 ```sh
 go generate ./apps/core/internal/corebanking
-go generate ./apps/core/internal/institution
 go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
 go build ./apps/core/... ./apps/auth/... ./packages/shared/...
 ./scripts/migrate.sh up

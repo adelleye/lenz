@@ -42,6 +42,3 @@ they are not the fastest way to learn how to run the app today.
 
 - `design/openapi/core/corebanking.yaml` is the active source of truth for the
   transaction CBA v0.1 HTTP contract.
-- `design/openapi/core/institution.yaml` is an intentional no-route placeholder
-  for a future institution module. It is generated but not registered by the
-  runtime API.

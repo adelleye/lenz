@@ -95,9 +95,7 @@ For code-level verification:
 
 ```sh
 go generate ./apps/core/internal/corebanking
-go generate ./apps/core/internal/institution
 git check-ignore -v apps/core/internal/corebanking/corebanking.gen.go
-git check-ignore -v apps/core/internal/institution/institution.gen.go
 go test -race -count=1 ./apps/core/internal/corebanking
 go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
 go build ./apps/core/... ./apps/auth/... ./packages/shared/...
@@ -157,8 +155,6 @@ Reference: https://gobuffalo.io/documentation/database/soda/
 
 - `design/openapi/core/corebanking.yaml` is the active OpenAPI source of truth
   for the transaction CBA v0.1 HTTP API.
-- `design/openapi/core/institution.yaml` is an intentional generated-module
-  placeholder. It defines no routes and is not registered by the runtime API.
 - `go generate` creates ignored `*.gen.go` server/model files.
 - `apps/core/server` wires auth, tenant checks, CORS, routes, and dependencies.
 - `apps/core/internal/corebanking/handler*.go` adapts HTTP requests into service
@@ -179,22 +175,17 @@ See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for a folder-by-folder map and
 Generated files are intentionally not committed:
 
 - `apps/core/internal/corebanking/corebanking.gen.go`
-- `apps/core/internal/institution/institution.gen.go`
 
 Active OpenAPI inputs:
 
 - `design/openapi/core/corebanking.yaml`: active runtime contract for CBA v0.1
   customer, account, ledger, transfer, reconciliation, audit, and mock-provider
   routes.
-- `design/openapi/core/institution.yaml`: no-route placeholder kept only so the
-  institution module generation path stays explicit until institution product
-  APIs are designed.
 
-Regenerate them before direct test/build commands:
+Regenerate it before direct test/build commands:
 
 ```sh
 go generate ./apps/core/internal/corebanking
-go generate ./apps/core/internal/institution
 ```
 
 ## Local Security Notes

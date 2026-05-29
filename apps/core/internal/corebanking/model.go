@@ -25,7 +25,6 @@ const (
 	AccountProductStandardWallet  = "standard_wallet"
 	AccountProductStandardCurrent = "standard_current"
 	AccountProductStandardSavings = "standard_savings"
-	AccountProductOverdraftCredit = "overdraft_credit"
 	AccountProductInternal        = "internal"
 
 	NormalBalanceDebit  = "debit"
@@ -167,9 +166,9 @@ type CreateCustomerInput struct {
 	BusinessName  string
 	Email         string
 	Phone         string
-	KYCTier       string
-	BVNStatus     string
-	NINStatus     string
+	kycTier       string
+	bvnStatus     string
+	ninStatus     string
 }
 
 type CreateAccountInput struct {

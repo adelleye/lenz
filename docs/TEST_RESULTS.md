@@ -4,26 +4,27 @@ Latest verified state for the current transaction spine.
 
 ## Run Summary
 
-- Date: 2026-05-26 WAT.
-- Commit: `d0d82ee6c4ad050ae2f03f782db15bae424acd7a`.
-- Branch used for implementation: `goal/cba-v0.1-14-mock-tsq-requery`.
+- Date: 2026-05-28 WAT.
+- Commit: working tree verification before commit.
+- Branch used for implementation: `main`.
 - Result: pass.
-- Scope: mock transaction status query/requery plus the existing CBA v0.1
-  transaction spine.
+- Scope: code-review cleanup, blocked-destination external inbound review, and
+  existing CBA v0.1 transaction spine.
 
 ## Commands Run
 
 | Command | Result | Evidence |
 | --- | --- | --- |
 | `go generate ./apps/core/internal/corebanking` | PASS | exit 0 |
-| `go generate ./apps/core/internal/institution` | PASS | exit 0 |
+| `git diff --check` | PASS | exit 0 |
 | `git check-ignore -v apps/core/internal/corebanking/corebanking.gen.go` | PASS | `.gitignore:13` |
-| `git check-ignore -v apps/core/internal/institution/institution.gen.go` | PASS | `.gitignore:14` |
+| `go test -count=1 ./apps/core/internal/corebanking` | PASS | focused suite passed |
 | `go test -race -count=1 ./apps/core/internal/corebanking` | PASS | race suite passed |
 | `go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...` | PASS | module suite passed |
 | `go build ./apps/core/... ./apps/auth/... ./packages/shared/...` | PASS | exit 0 |
 | `TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/demo_transfer_spine.sh` | PASS | `DEMO TRANSFER SPINE: PASS` |
 | `TMPDIR=$PWD/tmp POSTGRES_PORT=55432 ./scripts/uat_simple_transaction_cba.sh` | PASS | `UAT simple transaction CBA passed.` |
+| `docker build -f infra/docker/Dockerfile.backend .` | PASS | image built successfully |
 
 ## Behavior Proved
 
@@ -36,6 +37,8 @@ Latest verified state for the current transaction spine.
 - mock external inbound success credits once;
 - mock external pending, failed, unknown, and mismatch cases remain visible for
   reconciliation without posting incorrect money;
+- blocked external inbound destinations are recorded for manual review without
+  posting incorrect money;
 - requery is limited to pending/provider-unknown external transfers;
 - already-final requery calls are deterministic no-ops;
 - internal transfers are not settled through the external requery endpoint;

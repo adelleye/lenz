@@ -35,7 +35,6 @@ returns, or production deployment.
 
 ```sh
 go generate ./apps/core/internal/corebanking
-go generate ./apps/core/internal/institution
 go test -race -count=1 ./apps/core/internal/corebanking
 go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
 go build ./apps/core/... ./apps/auth/... ./packages/shared/...

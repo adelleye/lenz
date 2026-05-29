@@ -64,9 +64,9 @@ func (s *Service) CreateCustomer(ctx context.Context, input CreateCustomerInput)
 			return nil, ErrInvalidRequest
 		}
 	}
-	input.KYCTier = CustomerKYCTier1
-	input.BVNStatus = CustomerIdentityStatusNotCollected
-	input.NINStatus = CustomerIdentityStatusNotCollected
+	input.kycTier = CustomerKYCTier1
+	input.bvnStatus = CustomerIdentityStatusNotCollected
+	input.ninStatus = CustomerIdentityStatusNotCollected
 	return s.repository.CreateCustomer(ctx, input)
 }
 

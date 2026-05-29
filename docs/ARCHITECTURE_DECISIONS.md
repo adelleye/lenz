@@ -2,15 +2,14 @@
 
 ## Account Product Policy
 
-Lenz Core separates ordinary customer deposit accounts from accounts that are
-allowed to carry negative balances as product behavior.
+Lenz Core keeps ordinary customer deposit accounts non-negative. Internal
+clearing/settlement accounts may carry operational negative balances.
 
 | Account/product type | Allows normal negative customer balance? | Notes |
 | --- | --- | --- |
 | `standard_wallet` | No | Default demo customer account. Customer-initiated spend must be limited by available balance. |
 | `standard_current` | No | Same spend rule as wallet unless explicitly migrated to a credit product. |
 | `standard_savings` | No | Same spend rule as wallet. |
-| `overdraft_credit` | Yes | Future explicit credit/overdraft product. Must be configured per account, not globally. |
 | `internal` | Yes, operationally | Internal clearing/settlement accounts can represent system positions and are not customer spend products. |
 
 The code stores this as account policy fields on `accounts`:

@@ -103,8 +103,7 @@ The distinct-concurrent test funds the source with `30000`, sends ten different 
 
 ```text
 go generate ./apps/core/internal/corebanking
-go generate ./apps/core/internal/institution
-git check-ignore -v apps/core/internal/corebanking/corebanking.gen.go apps/core/internal/institution/institution.gen.go
+git check-ignore -v apps/core/internal/corebanking/corebanking.gen.go
 go test -race -count=1 ./apps/core/internal/corebanking
 go test -count=1 ./apps/core/... ./apps/auth/... ./packages/shared/...
 go build ./apps/core/... ./apps/auth/... ./packages/shared/...
@@ -118,7 +117,6 @@ Ignored generated-code proof:
 
 ```text
 .gitignore:13:apps/core/internal/corebanking/corebanking.gen.go apps/core/internal/corebanking/corebanking.gen.go
-.gitignore:14:apps/core/internal/institution/institution.gen.go apps/core/internal/institution/institution.gen.go
 ```
 
 ## Deferred Gaps

@@ -891,16 +891,30 @@ func TestExternalInboundEventUnknownDestinationManualReviewNoCredit(t *testing.T
 	assertReconciliationItem(t, items, *result.TransferID, "provider_succeeded_ledger_not_posted", ReconciliationActionInspectJournal)
 }
 
-func TestExternalInboundEventFrozenDestinationAndUnsupportedProvider(t *testing.T) {
+func TestExternalInboundEventBlockedDestinationManualReviewAndUnsupportedProvider(t *testing.T) {
 	ctx, svc, store := newTestService(t)
 	setMemoryAccountStatus(store, DemoCustomerAccountID, AccountStatusFrozen)
-	if _, err := svc.ExternalInboundEvent(ctx, externalInboundInput(t, externalInboundPayload("external-in-frozen-event", "external-in-frozen-ref", TransferStatusSucceeded, 10000))); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("expected frozen destination to reject inbound posting, got %v", err)
+	journalCountBefore := len(store.journals)
+
+	result := externalInbound(t, svc, ctx, externalInboundPayload("external-in-frozen-event", "external-in-frozen-ref", TransferStatusSucceeded, 10000))
+	if result.TransferID == nil ||
+		result.Status != TransferStatusFailed ||
+		result.ProviderStatus != TransferStatusSucceeded ||
+		result.LedgerStatus != LedgerStatusNoPosting ||
+		result.ReconciliationStatus != ReconciliationStatusManualReview ||
+		result.JournalEntryID != nil ||
+		result.Message != "blocked_destination_account" {
+		t.Fatalf("blocked destination review mismatch: %+v", result)
 	}
 	assertBalance(t, svc, ctx, DemoInstitutionID, DemoCustomerAccountID, 0)
-	if len(store.journals) != 0 {
-		t.Fatalf("frozen destination created a journal: %+v", store.journals)
+	if len(store.journals) != journalCountBefore {
+		t.Fatalf("blocked destination created a journal: before=%d after=%d", journalCountBefore, len(store.journals))
 	}
+	items, err := svc.ListReconciliationItems(ctx, DemoInstitutionID, ListReconciliationItemsOptions{ProviderStatus: TransferStatusSucceeded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertReconciliationItem(t, items, *result.TransferID, "provider_succeeded_ledger_not_posted", ReconciliationActionInspectJournal)
 
 	payload := externalInboundPayload("external-in-provider-event", "external-in-provider-ref", TransferStatusSucceeded, 10000)
 	payload["provider"] = "real_nibss"
